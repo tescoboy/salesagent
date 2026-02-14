@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 # --- V2.3 Pydantic Models (Bearer Auth, Restored & Complete) ---
 # --- MCP Status System (AdCP PR #77) ---
 from enum import Enum
-from typing import Any, Literal, TypeAlias, Union
+from typing import Any, Literal, TypeAlias
 
 from adcp import Error
 from adcp.types import CreateMediaBuyRequest as LibraryCreateMediaBuyRequest
@@ -67,6 +67,11 @@ from adcp.types import (
     CppPricingOption,
     CpvPricingOption,
     FlatRatePricingOption,
+    GeoCountry,
+    GeoMetro,
+    GeoPostalArea,
+    GeoRegion,
+    TargetingOverlay,
     VcpmPricingOption,  # V3: consolidated from VcpmAuctionPricingOption/VcpmFixedRatePricingOption
 )
 
@@ -74,6 +79,9 @@ from adcp.types import (
 from adcp.types import CreativeAsset as LibraryCreativeAsset
 from adcp.types import CreativeAssignment as LibraryCreativeAssignment
 from adcp.types import DeliveryMeasurement as LibraryDeliveryMeasurement
+
+# V3: Structured geo targeting types
+from adcp.types import FrequencyCap as LibraryFrequencyCap
 from adcp.types import Measurement as LibraryMeasurement
 from adcp.types import Product as LibraryProduct
 from adcp.types import Property as LibraryProperty
@@ -837,14 +845,13 @@ def convert_format_ids_to_formats(format_ids: list[str], tenant_id: str | None =
     return formats
 
 
-class FrequencyCap(BaseModel):
-    """Simple frequency capping configuration.
+class FrequencyCap(LibraryFrequencyCap):
+    """Frequency capping extending AdCP library type with scope.
 
-    Provides basic impression suppression at the media buy or package level.
-    More sophisticated frequency management is handled by the AXE layer.
+    Inherits suppress_minutes: float from library.
+    Adds scope field for media buy vs package level capping.
     """
 
-    suppress_minutes: int = Field(..., gt=0, description="Suppress impressions for this many minutes after serving")
     scope: Literal["media_buy", "package"] = Field("media_buy", description="Apply at media buy or package level")
 
 
@@ -852,38 +859,63 @@ class TargetingCapability(BaseModel):
     """Defines targeting dimension capabilities and restrictions."""
 
     dimension: str  # e.g., "geo_country", "key_value"
-    access: Literal["overlay", "managed_only", "both"] = "overlay"
+    access: Literal["overlay", "managed_only", "both", "removed"] = "overlay"
     description: str | None = None
     allowed_values: list[str] | None = None  # For restricted value sets
     axe_signal: bool | None = False  # Whether this is an AXE signal dimension
 
 
-class Targeting(BaseModel):
-    """Comprehensive targeting options for media buys.
+# Mapping from legacy v2 geo fields to v3 structured fields.
+# Each tuple: (v2_field_name, v3_field_name, transform_fn_or_None).
+# transform_fn receives the truthy list value and returns the v3 value.
+# None means passthrough (value used as-is).
+def _prefix_us_regions(v: list[str]) -> list[str]:
+    """Legacy DB stores bare US state codes; GeoRegion requires ISO 3166-2."""
+    return [r if "-" in r else f"US-{r}" for r in v]
 
-    All fields are optional and can be combined for precise audience targeting.
-    Platform adapters will map these to their specific targeting capabilities.
-    Uses any_of/none_of pattern for consistent include/exclude across all dimensions.
 
-    Note: Some targeting dimensions are managed-only and cannot be set via overlay.
-    These are typically used for AXE signal integration.
+_LEGACY_GEO_FIELDS: list[tuple[str, str, Any]] = [
+    ("geo_country_any_of", "geo_countries", None),
+    ("geo_country_none_of", "geo_countries_exclude", None),
+    ("geo_region_any_of", "geo_regions", _prefix_us_regions),
+    ("geo_region_none_of", "geo_regions_exclude", _prefix_us_regions),
+    ("geo_metro_any_of", "geo_metros", lambda v: [{"system": "nielsen_dma", "values": v}]),
+    ("geo_metro_none_of", "geo_metros_exclude", lambda v: [{"system": "nielsen_dma", "values": v}]),
+    ("geo_zip_any_of", "geo_postal_areas", lambda v: [{"system": "us_zip", "values": v}]),
+    ("geo_zip_none_of", "geo_postal_areas_exclude", lambda v: [{"system": "us_zip", "values": v}]),
+]
+
+
+class Targeting(TargetingOverlay):
+    """Targeting extending AdCP TargetingOverlay with internal dimensions.
+
+    Inherits v3 structured geo fields from library:
+    - geo_countries, geo_regions, geo_metros, geo_postal_areas
+    - frequency_cap, axe_include_segment, axe_exclude_segment
+
+    Adds exclusion extensions, internal dimensions, and a legacy normalizer
+    that converts flat DB fields to v3 structured format.
     """
 
-    # Geographic targeting - aligned with OpenRTB (overlay access)
-    geo_country_any_of: list[str] | None = None  # ISO country codes: ["US", "CA", "GB"]
-    geo_country_none_of: list[str] | None = None
+    # --- Inherited from TargetingOverlay (7 fields): ---
+    # geo_countries: list[GeoCountry] | None
+    # geo_regions: list[GeoRegion] | None
+    # geo_metros: list[GeoMetro] | None
+    # geo_postal_areas: list[GeoPostalArea] | None
+    # frequency_cap: FrequencyCap | None  (overridden below)
+    # axe_include_segment: str | None
+    # axe_exclude_segment: str | None
 
-    geo_region_any_of: list[str] | None = None  # Region codes: ["NY", "CA", "ON"]
-    geo_region_none_of: list[str] | None = None
+    # Override frequency_cap to use our extended FrequencyCap with scope
+    frequency_cap: FrequencyCap | None = None
 
-    geo_metro_any_of: list[str] | None = None  # Metro/DMA codes: ["501", "803"]
-    geo_metro_none_of: list[str] | None = None
+    # --- Geo exclusion extensions (not in library) ---
+    geo_countries_exclude: list[GeoCountry] | None = None
+    geo_regions_exclude: list[GeoRegion] | None = None
+    geo_metros_exclude: list[GeoMetro] | None = None
+    geo_postal_areas_exclude: list[GeoPostalArea] | None = None
 
-    geo_city_any_of: list[str] | None = None  # City names: ["New York", "Los Angeles"]
-    geo_city_none_of: list[str] | None = None
-
-    geo_zip_any_of: list[str] | None = None  # Postal codes: ["10001", "90210"]
-    geo_zip_none_of: list[str] | None = None
+    # --- Internal dimensions (unchanged) ---
 
     # Device and platform targeting
     device_type_any_of: list[str] | None = None  # ["mobile", "desktop", "tablet", "ctv", "audio", "dooh"]
@@ -913,13 +945,6 @@ class Targeting(BaseModel):
     media_type_any_of: list[str] | None = None  # ["video", "audio", "display", "native"]
     media_type_none_of: list[str] | None = None
 
-    # Frequency control
-    frequency_cap: FrequencyCap | None = None  # Impression limits per user/period
-
-    # AXE segment targeting (AdCP 3.0.3)
-    axe_include_segment: str | None = None  # AXE segment ID to include for targeting
-    axe_exclude_segment: str | None = None  # AXE segment ID to exclude from targeting
-
     # Connection type targeting
     connection_type_any_of: list[int] | None = None  # OpenRTB connection types
     connection_type_none_of: list[int] | None = None
@@ -937,8 +962,43 @@ class Targeting(BaseModel):
     updated_at: datetime | None = Field(None, description="Internal: Last update timestamp")
     metadata: dict[str, Any] | None = Field(None, description="Internal: Additional metadata")
 
+    # Transient normalizer signal: set by normalize_legacy_geo when city targeting
+    # fields are encountered in legacy data. Consumed by adapters (e.g. GAM
+    # build_targeting) to raise an explicit error instead of silently ignoring.
+    had_city_targeting: bool = Field(default=False, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_geo(cls, values: Any) -> Any:
+        """Convert flat DB geo fields to v3 structured format.
+
+        Handles reconstruction from legacy database JSON where fields were stored as:
+        - geo_country_any_of: ["US", "CA"] → geo_countries: [GeoCountry("US"), ...]
+        - geo_region_any_of: ["CA", "NY"] → geo_regions: [GeoRegion("US-CA"), ...]
+        - geo_metro_any_of: ["501"] → geo_metros: [{system: "nielsen_dma", values: ["501"]}]
+        - geo_zip_any_of: ["10001"] → geo_postal_areas: [{system: "us_zip", values: ["10001"]}]
+        - *_none_of variants → *_exclude variants
+        """
+        if not isinstance(values, dict):
+            return values
+
+        for v2_key, v3_key, transform in _LEGACY_GEO_FIELDS:
+            if v2_key not in values:
+                continue
+            v = values.pop(v2_key)
+            if v and v3_key not in values:
+                values[v3_key] = transform(v) if transform else v
+
+        # City targeting removed in v3. Set a transient flag so downstream consumers
+        # (e.g. GAM build_targeting) can raise an explicit error instead of silently ignoring.
+        if values.pop("geo_city_any_of", None) or values.pop("geo_city_none_of", None):
+            values["had_city_targeting"] = True
+
+        return values
+
     def model_dump(self, **kwargs):
         """Override to provide AdCP-compliant responses while preserving internal fields."""
+        kwargs.setdefault("mode", "json")
         # Default to excluding internal and managed fields for AdCP compliance
         exclude = kwargs.get("exclude", set())
         if isinstance(exclude, set):
@@ -958,6 +1018,7 @@ class Targeting(BaseModel):
 
     def model_dump_internal(self, **kwargs):
         """Dump including internal and managed fields for database storage and internal processing."""
+        kwargs.setdefault("mode", "json")
         # Don't exclude internal fields or managed fields
         kwargs.pop("exclude", None)  # Remove any exclude parameter
         return super().model_dump(**kwargs)
@@ -1250,19 +1311,18 @@ class Product(LibraryProduct):
                         result.append(FormatId(agent_url=url(DEFAULT_AGENT_URL), id=fmt["id"]))
                 else:
                     raise ValueError(f"Invalid format dict: {fmt}")
-            else:
-                # Other object types (like FormatReference)
-                if hasattr(fmt, "agent_url") and hasattr(fmt, "id"):
-                    result.append(FormatId(agent_url=url(str(fmt.agent_url)), id=fmt.id))
-                elif hasattr(fmt, "format_id"):
-                    from src.core.format_cache import upgrade_legacy_format_id
+            # Other object types (like FormatReference)
+            elif hasattr(fmt, "agent_url") and hasattr(fmt, "id"):
+                result.append(FormatId(agent_url=url(str(fmt.agent_url)), id=fmt.id))
+            elif hasattr(fmt, "format_id"):
+                from src.core.format_cache import upgrade_legacy_format_id
 
-                    try:
-                        result.append(upgrade_legacy_format_id(fmt.format_id))
-                    except ValueError:
-                        result.append(FormatId(agent_url=url(DEFAULT_AGENT_URL), id=fmt.format_id))
-                else:
-                    raise ValueError(f"Cannot serialize format: {fmt}")
+                try:
+                    result.append(upgrade_legacy_format_id(fmt.format_id))
+                except ValueError:
+                    result.append(FormatId(agent_url=url(DEFAULT_AGENT_URL), id=fmt.format_id))
+            else:
+                raise ValueError(f"Cannot serialize format: {fmt}")
 
         return result
 
@@ -2460,6 +2520,8 @@ class PackageRequest(LibraryPackageRequest):
         description="Internal: List of creative IDs to assign (alternative to full creatives objects)",
         exclude=True,
     )
+    # Override library TargetingOverlay -> our Targeting with internal fields + legacy normalizer
+    targeting_overlay: Targeting | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2573,8 +2635,9 @@ class CreateMediaBuyRequest(LibraryCreateMediaBuyRequest):
     - reporting_webhook: dict (webhook configuration)
     """
 
-    # Note: packages field uses LibraryPackageRequest from parent class.
-    # Internal fields (pricing_model, impressions) are accessed via getattr() for backward compatibility.
+    # Override packages to use our PackageRequest (which overrides targeting_overlay
+    # to Targeting instead of library TargetingOverlay, enabling the legacy normalizer).
+    packages: list[PackageRequest] | None = None  # type: ignore[assignment]
 
     @model_validator(mode="after")
     def validate_timezone_aware(self):
@@ -2855,8 +2918,7 @@ class MediaPackage(BaseModel):
     # Accept library FormatId (not our extended FormatId) to avoid validation errors
     # when Product from library returns LibraryFormatId instances
     format_ids: list[LibraryFormatId]  # FormatId objects per AdCP spec
-    # Accept both Targeting (internal) and TargetingOverlay (adcp library) for compatibility
-    targeting_overlay: Union["Targeting", Any] | None = None
+    targeting_overlay: Targeting | None = None
     buyer_ref: str | None = None  # Optional buyer reference from request package
     product_id: str | None = None  # Product ID for this package
     budget: float | None = None  # Budget allocation in the currency specified by the pricing option

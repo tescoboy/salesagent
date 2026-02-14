@@ -88,6 +88,7 @@ from src.core.schemas import (
     PackageRequest,
     Principal,
     Product,
+    Targeting,
 )
 from src.core.schemas import (
     url as make_url,
@@ -664,11 +665,13 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         }
 
                     # Get targeting_overlay from package_config if present
+                    # Fallback to "targeting" key for data written before salesagent-dzr fix
                     targeting_overlay = None
-                    if "targeting_overlay" in package_config and package_config["targeting_overlay"]:
+                    targeting_raw = package_config.get("targeting_overlay") or package_config.get("targeting")
+                    if targeting_raw:
                         from src.core.schemas import Targeting
 
-                        targeting_overlay = Targeting(**package_config["targeting_overlay"])
+                        targeting_overlay = Targeting(**targeting_raw)
 
                     # Create MediaPackage object (what adapters expect)
                     # Note: Product model has 'formats' not 'format_ids'
@@ -1897,15 +1900,27 @@ async def _create_media_buy_impl(
         if req.packages:
             for pkg in req.packages:
                 if hasattr(pkg, "targeting_overlay") and pkg.targeting_overlay:
-                    from src.services.targeting_capabilities import validate_overlay_targeting
+                    from src.services.targeting_capabilities import (
+                        validate_geo_overlap,
+                        validate_overlay_targeting,
+                        validate_unknown_targeting_fields,
+                    )
 
-                    # Convert to dict for validation - TargetingOverlay always has model_dump
+                    # Reject unknown targeting fields (typos, bogus names) via model_extra
+                    unknown_violations = validate_unknown_targeting_fields(pkg.targeting_overlay)
+
+                    # Convert to dict for dimension-access validation
                     targeting_data: dict[str, Any] = (
                         pkg.targeting_overlay.model_dump(exclude_none=True)
                         if hasattr(pkg.targeting_overlay, "model_dump")
                         else dict(pkg.targeting_overlay)  # Fallback for dict-like objects
                     )
-                    violations = validate_overlay_targeting(targeting_data)
+                    access_violations = validate_overlay_targeting(targeting_data)
+
+                    # Reject same-value geo inclusion/exclusion overlap (AdCP SHOULD requirement)
+                    geo_overlap_violations = validate_geo_overlap(targeting_data)
+
+                    violations = unknown_violations + access_violations + geo_overlap_violations
                     if violations:
                         error_msg = f"Targeting validation failed: {'; '.join(violations)}"
                         raise ValueError(error_msg)
@@ -1951,7 +1966,7 @@ async def _create_media_buy_impl(
                     testing_ctx=testing_ctx,
                 )
                 # Replace packages with updated versions (functional approach)
-                req.packages = cast(list[AdcpPackageRequest], updated_packages)
+                req.packages = cast(list[AdcpPackageRequest], updated_packages)  # type: ignore[assignment]
                 logger.info("[INLINE_CREATIVE_DEBUG] Updated req.packages with creative_ids")
                 if uploaded_ids:
                     logger.info(f"Successfully uploaded creatives for {len(uploaded_ids)} packages: {uploaded_ids}")
@@ -2702,9 +2717,9 @@ async def _create_media_buy_impl(
                 # Merge dimensions from product's format_ids if request format_ids don't have them
                 # This handles the case where buyer specifies format_id but not dimensions
                 # Build lookup of product format dimensions by (normalized_url, id)
-                product_format_dimensions: dict[tuple[str | None, str], tuple[int | None, int | None, float | None]] = (
-                    {}
-                )
+                product_format_dimensions: dict[
+                    tuple[str | None, str], tuple[int | None, int | None, float | None]
+                ] = {}
                 if pkg_product.format_ids:
                     for fmt in pkg_product.format_ids:
                         # pkg_product.format_ids are dicts from database JSONB
@@ -2850,10 +2865,11 @@ async def _create_media_buy_impl(
                     cpm=cpm,
                     impressions=int(total_budget / cpm * 1000),
                     format_ids=cast(list[Any], format_ids_to_use),
-                    targeting_overlay=(
+                    targeting_overlay=cast(
+                        "Targeting | None",
                         matching_package.targeting_overlay
                         if matching_package and hasattr(matching_package, "targeting_overlay")
-                        else None
+                        else None,
                     ),
                     buyer_ref=package_buyer_ref,
                     product_id=pkg_product.product_id,  # Include product_id
