@@ -40,6 +40,7 @@ from a2a.types import (
     MessageSendParams,
     MethodNotFoundError,
     Part,
+    PushNotificationConfig,
     Task,
     TaskIdParams,
     TaskQueryParams,
@@ -60,6 +61,8 @@ from datetime import UTC, datetime
 
 from adcp import create_a2a_webhook_payload
 from adcp.types import GeneratedTaskStatus
+from adcp.types.generated_poc.core.context import ContextObject
+from adcp.types.generated_poc.core.creative_asset import CreativeAsset
 from sqlalchemy import select
 
 from src.core.audit_logger import get_audit_logger
@@ -316,7 +319,7 @@ class AdCPRequestHandler(RequestHandler):
             tool_name=tool_name,
             request_timestamp=datetime.now(UTC),
             metadata={"source": "a2a_server", "protocol": "a2a_jsonrpc"},
-            testing_context=AdCPTestContext().model_dump(),  # Default testing context for A2A requests
+            testing_context=AdCPTestContext(),  # Default testing context for A2A requests
         )
 
     def _tool_context_to_mcp_context(self, tool_context: ToolContext) -> ToolContext:
@@ -376,23 +379,23 @@ class AdCPRequestHandler(RequestHandler):
             if not task.metadata or "push_notification_config" not in task.metadata:
                 return
 
-            webhook_config = task.metadata["push_notification_config"]
+            webhook_config: PushNotificationConfig = task.metadata["push_notification_config"]
             push_notification_service = get_protocol_webhook_service()
 
             from uuid import uuid4
 
-            url = webhook_config.get("url")
+            url = webhook_config.url
             if not url:
                 logger.info("[red]No push notification URL present; skipping webhook[/red]")
                 return
 
-            authentication = webhook_config.get("authentication") or {}
-            schemes = authentication.get("schemes") or []
+            auth = webhook_config.authentication
+            schemes = auth.schemes if auth else []
             auth_type = schemes[0] if isinstance(schemes, list) and schemes else None
-            auth_token = authentication.get("credentials")
+            auth_token = auth.credentials if auth else None
 
             push_notification_config = DBPushNotificationConfig(
-                id=webhook_config.get("id") or f"pnc_{uuid4().hex[:16]}",
+                id=webhook_config.id or f"pnc_{uuid4().hex[:16]}",
                 tenant_id="",
                 principal_id="",
                 url=url,
@@ -576,27 +579,9 @@ class AdCPRequestHandler(RequestHandler):
         if skill_invocations:
             task_metadata["skills_requested"] = [inv["skill"] for inv in skill_invocations]
 
-        # Store push notification config in metadata if provided
+        # Store push notification config model directly in metadata (no destructuring)
         if push_notification_config:
-            task_metadata["push_notification_config"] = {
-                "url": push_notification_config.url,
-                "authentication": (
-                    {
-                        "schemes": (
-                            push_notification_config.authentication.schemes
-                            if push_notification_config.authentication
-                            else []
-                        ),
-                        "credentials": (
-                            push_notification_config.authentication.credentials
-                            if push_notification_config.authentication
-                            else None
-                        ),
-                    }
-                    if push_notification_config.authentication
-                    else None
-                ),
-            }
+            task_metadata["push_notification_config"] = push_notification_config
 
         task = Task(
             id=task_id,
@@ -1031,7 +1016,7 @@ class AdCPRequestHandler(RequestHandler):
         # Yield a single event with the complete task
         # result can be Task, Message, or other A2A types - all have model_dump()
         # mypy doesn't understand that union members all have model_dump()
-        yield Event(type="task_update", data=result.model_dump())  # type: ignore[operator]
+        yield Event(type="task_update", data=result.model_dump(mode="json"))  # type: ignore[operator]
 
     async def on_get_task(
         self,
@@ -1385,7 +1370,7 @@ class AdCPRequestHandler(RequestHandler):
         skill_name: str,
         parameters: dict,
         auth_token: str | None,
-        push_notification_config: dict | None = None,
+        push_notification_config: PushNotificationConfig | None = None,
     ) -> dict:
         """Handle explicit AdCP skill invocations.
 
@@ -1531,7 +1516,7 @@ class AdCPRequestHandler(RequestHandler):
             if isinstance(response, dict):
                 response_data = response
             else:
-                response_data = response.model_dump()
+                response_data = response.model_dump(mode="json")
 
             # Add A2A protocol field: message for agent communication
             # All AdCP response types support __str__() for human-readable messages
@@ -1611,7 +1596,7 @@ class AdCPRequestHandler(RequestHandler):
             if isinstance(response, dict):
                 response_data = response
             else:
-                response_data = response.model_dump()
+                response_data = response.model_dump(mode="json")
 
             # Add A2A protocol fields: success indicator and message
             # Check if there are domain-level errors (per AdCP spec)
@@ -1652,9 +1637,22 @@ class AdCPRequestHandler(RequestHandler):
                     "received_parameters": list(parameters.keys()),
                 }
 
+            # Construct typed models at the A2A boundary (Pydantic validation at entry).
+            # Pre-process format_id: upgrade legacy strings to FormatId models.
+            from src.core.format_cache import upgrade_legacy_format_id
+
+            creatives = []
+            for c in parameters["creatives"]:
+                if isinstance(c, dict) and "format_id" in c:
+                    c = {**c, "format_id": upgrade_legacy_format_id(c["format_id"])}
+                creatives.append(CreativeAsset(**c) if isinstance(c, dict) else c)
+
+            ctx_param = parameters.get("context")
+            context = ContextObject(**ctx_param) if isinstance(ctx_param, dict) else ctx_param
+
             # Call core function with spec-compliant parameters (AdCP v2.5)
             response = core_sync_creatives_tool(
-                creatives=parameters["creatives"],
+                creatives=creatives,
                 # AdCP 2.5: Full upsert semantics (patch parameter removed)
                 creative_ids=parameters.get("creative_ids"),
                 assignments=parameters.get("assignments"),
@@ -1662,7 +1660,7 @@ class AdCPRequestHandler(RequestHandler):
                 dry_run=parameters.get("dry_run", False),
                 validation_mode=parameters.get("validation_mode", "strict"),
                 push_notification_config=parameters.get("push_notification_config"),
-                context=parameters.get("context"),
+                context=context,
                 ctx=self._tool_context_to_mcp_context(tool_context),
             )
 
@@ -1670,7 +1668,7 @@ class AdCPRequestHandler(RequestHandler):
             if isinstance(response, dict):
                 response_data = response
             else:
-                response_data = response.model_dump()
+                response_data = response.model_dump(mode="json")
 
             # Add A2A protocol fields for agent communication
             # Success means the operation completed (even if some creatives had errors)
@@ -1716,7 +1714,7 @@ class AdCPRequestHandler(RequestHandler):
             if isinstance(response, dict):
                 response_data = response
             else:
-                response_data = response.model_dump()
+                response_data = response.model_dump(mode="json")
 
             # Add A2A protocol field: message for agent communication
             response_data["message"] = str(response)
@@ -1949,7 +1947,7 @@ class AdCPRequestHandler(RequestHandler):
             if isinstance(response, dict):
                 response_data = response
             else:
-                response_data = response.model_dump()
+                response_data = response.model_dump(mode="json")
 
             # Add A2A protocol field: message for agent communication
             response_data["message"] = str(response)
@@ -1999,8 +1997,7 @@ class AdCPRequestHandler(RequestHandler):
 
             # Call core function directly
             # Context can be None for unauthenticated calls - tenant will be detected from headers
-            # MinimalContext is not compatible with ToolContext type, but works at runtime
-            response = core_list_authorized_properties_tool(req=request, ctx=tool_context)  # type: ignore[arg-type]
+            response = core_list_authorized_properties_tool(req=request, ctx=cast(Any, tool_context))
 
             # Return spec-compliant response (no extra fields)
             # Per AdCP v2.4 spec: only publisher_domains, primary_channels, primary_countries,
@@ -2008,7 +2005,7 @@ class AdCPRequestHandler(RequestHandler):
             if isinstance(response, dict):
                 return response
             else:
-                return response.model_dump()
+                return response.model_dump(mode="json")
 
         except Exception as e:
             logger.error(f"Error in list_authorized_properties skill: {e}")
@@ -2061,7 +2058,7 @@ class AdCPRequestHandler(RequestHandler):
             if isinstance(response, dict):
                 return response
             else:
-                return response.model_dump()
+                return response.model_dump(mode="json")
 
         except Exception as e:
             logger.error(f"Error in update_media_buy skill: {e}")
@@ -2113,7 +2110,7 @@ class AdCPRequestHandler(RequestHandler):
             )
 
             # Convert response to dict for A2A format
-            return response.model_dump() if hasattr(response, "model_dump") else response
+            return response.model_dump(mode="json") if hasattr(response, "model_dump") else response
 
         except Exception as e:
             logger.error(f"Error in get_media_buy_delivery skill: {e}")
@@ -2153,7 +2150,7 @@ class AdCPRequestHandler(RequestHandler):
             if isinstance(response, dict):
                 return response
             else:
-                return response.model_dump()
+                return response.model_dump(mode="json")
 
         except Exception as e:
             logger.error(f"Error in update_performance_index skill: {e}")
@@ -2189,7 +2186,7 @@ class AdCPRequestHandler(RequestHandler):
             )
 
             # Convert to A2A response format with v2.x backward compatibility
-            products = [product.model_dump() for product in response.products]
+            products = [product.model_dump(mode="json") for product in response.products]
             products = add_v2_compat_to_products(products)
             return {
                 "products": products,
@@ -2514,7 +2511,7 @@ def main():
 
         dynamic_card = create_dynamic_agent_card(request)
         # CORS middleware automatically adds CORS headers
-        return JSONResponse(dynamic_card.model_dump())
+        return JSONResponse(dynamic_card.model_dump(mode="json"))
 
     async def dynamic_agent_card_endpoint(request):
         """Override for /agent.json with tenant-specific URL."""
@@ -2526,7 +2523,7 @@ def main():
 
         dynamic_card = create_dynamic_agent_card(request)
         # CORS middleware automatically adds CORS headers
-        return JSONResponse(dynamic_card.model_dump())
+        return JSONResponse(dynamic_card.model_dump(mode="json"))
 
     # Find and replace the existing routes to ensure proper A2A specification compliance
     new_routes = []

@@ -175,6 +175,7 @@ class TestSchemaLibraryInheritance:
             # Core types
             "CreateMediaBuyRequest",
             "GetProductsRequest",
+            # UpdateMediaBuyRequest extends UpdateMediaBuyRequest1 (variant, not RootModel)
             "UpdateMediaBuyRequest",
             "ListCreativesRequest",
             "ListCreativesResponse",  # Nested type incompatibilities
@@ -219,7 +220,7 @@ class TestSchemaLibraryInheritance:
         assert not new_violations, (
             f"New schemas must extend library types when available:\n"
             f"  {new_violations}\n\n"
-            f"To fix: Change 'class {new_violations[0]}(AdCPBaseModel)' to "
+            f"To fix: Change 'class {new_violations[0]}(SalesAgentBaseModel)' to "
             f"'class {new_violations[0]}(Library{new_violations[0]})'\n"
             f"See GetMediaBuyDeliveryRequest for example pattern."
         )

@@ -130,17 +130,16 @@ class TestXandrV3GeoFields:
         assert "geo_regions" in targeting_dict
 
     def test_create_targeting_profile_reads_v3_fields(self):
-        """_create_targeting_profile should read geo_countries/geo_regions from dict."""
+        """_create_targeting_profile should read geo_countries/geo_regions from Targeting model."""
         from src.adapters.xandr import XandrAdapter
 
         targeting = Targeting(geo_countries=["US", "CA"], geo_regions=["US-NY"])
-        targeting_dict = targeting.model_dump(exclude_none=True)
 
         # Call _create_targeting_profile via unbound method with mock self + mock _make_request
         mock_self = MagicMock(spec=XandrAdapter)
         mock_self._make_request.return_value = {"response": {"profile": {"id": 999}}}
 
-        profile_id = XandrAdapter._create_targeting_profile(mock_self, targeting_dict)
+        profile_id = XandrAdapter._create_targeting_profile(mock_self, targeting)
         assert profile_id == 999
 
         # Verify the POST call included country/region targets

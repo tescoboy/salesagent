@@ -34,7 +34,7 @@ from src.core.schemas import (
     GetProductsResponse,
     Product,  # Extends library Product
 )
-from src.core.testing_hooks import apply_testing_hooks, get_testing_context
+from src.core.testing_hooks import get_testing_context
 from src.core.tool_context import ToolContext
 from src.core.validation_helpers import format_validation_error, safe_parse_json_field
 from src.services.policy_check_service import PolicyCheckService, PolicyStatus
@@ -104,10 +104,9 @@ def get_recommended_cpm(product: Product) -> float | None:
         Recommended CPM value (p75) from price_guidance, or None if not available
     """
     for option in product.pricing_options:
-        # adcp 2.14.0+ uses RootModel wrapper - access via .root
-        inner = getattr(option, "root", option)
+        inner = option.root
         price_guidance = getattr(inner, "price_guidance", None)
-        if inner.pricing_model.upper() == "CPM" and price_guidance:  # type: ignore[union-attr]
+        if inner.pricing_model.upper() == "CPM" and price_guidance:
             p75 = price_guidance.p75
             if p75 is not None:
                 return float(p75)
@@ -140,14 +139,9 @@ async def _get_products_impl(
     # Handle both old Context and new ToolContext
     if isinstance(context, ToolContext):
         # New context management - everything is already extracted
-        testing_ctx_raw = context.testing_context
-        # Convert dict testing context back to TestContext object if needed
-        if isinstance(testing_ctx_raw, dict):
-            from src.core.testing_hooks import AdCPTestContext
+        from src.core.testing_hooks import AdCPTestContext
 
-            testing_ctx: AdCPTestContext | None = AdCPTestContext(**testing_ctx_raw)
-        else:
-            testing_ctx = testing_ctx_raw
+        testing_ctx: AdCPTestContext | None = context.testing_context or AdCPTestContext()
         principal_id: str | None = context.principal_id
         tenant: dict[str, Any] = {"tenant_id": context.tenant_id}  # Simplified tenant info
         # Ensure ContextVar is populated for helpers that require tenant context
@@ -186,7 +180,6 @@ async def _get_products_impl(
 
     # Get the Principal object with ad server mappings
     principal = get_principal_object(principal_id) if principal_id else None
-    principal_data = principal.model_dump() if principal else None
 
     # Handle RootModel wrappers for brand_manifest (e.g., BrandManifestReference wraps BrandManifest)
     # adcp library uses RootModel for union types, so we need to unwrap
@@ -206,15 +199,14 @@ async def _get_products_impl(
         elif hasattr(brand_manifest_unwrapped, "__str__") and str(brand_manifest_unwrapped).startswith("http"):
             # brand_manifest is AnyUrl object from Pydantic
             offering = f"Brand at {brand_manifest_unwrapped}"
-        else:
-            # brand_manifest is a BrandManifest object or dict
-            # Per AdCP spec: either name OR url is required
-            if hasattr(brand_manifest_unwrapped, "name") and brand_manifest_unwrapped.name:
-                offering = brand_manifest_unwrapped.name
-            elif hasattr(brand_manifest_unwrapped, "url") and brand_manifest_unwrapped.url:
-                offering = f"Brand at {brand_manifest_unwrapped.url}"
-            elif isinstance(brand_manifest_unwrapped, dict):
-                offering = brand_manifest_unwrapped.get("name") or brand_manifest_unwrapped.get("url", "")
+        # brand_manifest is a BrandManifest object or dict
+        # Per AdCP spec: either name OR url is required
+        elif hasattr(brand_manifest_unwrapped, "name") and brand_manifest_unwrapped.name:
+            offering = brand_manifest_unwrapped.name
+        elif hasattr(brand_manifest_unwrapped, "url") and brand_manifest_unwrapped.url:
+            offering = f"Brand at {brand_manifest_unwrapped.url}"
+        elif isinstance(brand_manifest_unwrapped, dict):
+            offering = brand_manifest_unwrapped.get("name") or brand_manifest_unwrapped.get("url", "")
 
     # Check brand_manifest_policy from tenant settings
     brand_manifest_policy = tenant.get("brand_manifest_policy", "require_auth")
@@ -268,22 +260,11 @@ async def _get_products_impl(
             # Use advertising_policy settings for tenant-specific rules
             tenant_policies = advertising_policy if advertising_policy else {}
 
-            # Convert brand_manifest to dict if it's a BrandManifest object
-            # Use brand_manifest_unwrapped (already unwrapped from RootModel above)
-            brand_manifest_dict = None
-            if brand_manifest_unwrapped:
-                if hasattr(brand_manifest_unwrapped, "model_dump"):
-                    brand_manifest_dict = brand_manifest_unwrapped.model_dump()
-                elif isinstance(brand_manifest_unwrapped, dict):
-                    brand_manifest_dict = brand_manifest_unwrapped
-                else:
-                    brand_manifest_dict = brand_manifest_unwrapped  # URL string
-
             try:
                 policy_result = await policy_service.check_brief_compliance(
                     brief=brief_text,
                     promoted_offering=offering,  # Use extracted offering from brand_manifest
-                    brand_manifest=brand_manifest_dict,
+                    brand_manifest=brand_manifest_unwrapped,
                     tenant_policies=tenant_policies if tenant_policies else None,
                 )
 
@@ -640,7 +621,7 @@ async def _get_products_impl(
     if policy_result and policy_check_enabled:
         # Policy checks are enabled - filter products based on policy compliance
         for product in products:
-            is_eligible, reason = policy_service.check_product_eligibility(policy_result, product.model_dump())
+            is_eligible, reason = policy_service.check_product_eligibility(policy_result, product)
 
             if is_eligible:
                 # Product passed policy checks - add to eligible products
@@ -694,14 +675,12 @@ async def _get_products_impl(
                 agent = create_ranking_agent(model)
 
                 # Convert products to dicts for ranking
-                products_for_ranking = [p.model_dump() for p in eligible_products]
-
                 # Run AI ranking
                 ranking_result = await rank_products_async(
                     agent=agent,
                     custom_prompt=product_ranking_prompt,
                     brief=brief_text,
-                    products=products_for_ranking,
+                    products=eligible_products,
                 )
 
                 # Build a map of product_id -> (score, reason)
@@ -746,16 +725,17 @@ async def _get_products_impl(
                 if product.pricing_options:
                     # Annotate each pricing option with "supported" flag
                     for option in product.pricing_options:
-                        # adcp 2.14.0+ uses RootModel wrapper - access via .root
-                        inner = getattr(option, "root", option)
+                        inner = option.root
                         # Get pricing model as string (handle both enum and literal)
-                        pricing_model = getattr(inner.pricing_model, "value", inner.pricing_model)  # type: ignore[union-attr]
+                        pricing_model = getattr(inner.pricing_model, "value", inner.pricing_model)
                         # Add supported annotation (will be included in response)
                         # Dynamic attributes on discriminated union types
                         is_supported = pricing_model in supported_models
                         inner.supported = is_supported  # type: ignore[union-attr]
                         if not is_supported:
-                            inner.unsupported_reason = f"Current adapter does not support {pricing_model.upper()} pricing"  # type: ignore[union-attr]
+                            inner.unsupported_reason = (  # type: ignore[union-attr]
+                                f"Current adapter does not support {str(pricing_model).upper()} pricing"
+                            )
         except Exception as e:
             logger.warning(f"Failed to annotate pricing options with adapter support: {e}")
 
@@ -766,12 +746,6 @@ async def _get_products_impl(
         # Set to empty list to hide pricing (will be excluded during serialization)
         for product in eligible_products:
             product.pricing_options = []
-
-    # Apply testing hooks to response (after modifications)
-    # AdCP library Product uses model_dump(), not model_dump_internal()
-    response_data = {"products": [p.model_dump() for p in eligible_products]}
-    if testing_ctx is not None:
-        response_data = apply_testing_hooks(response_data, testing_ctx, "get_products")
 
     # Our Product extends LibraryProduct - cast for type safety since list is invariant
     # When serialized, Pydantic automatically uses library Product fields
