@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from adcp.types.aliases import Package as ResponsePackage
+from adcp.types.generated_poc.core.brand_manifest import BrandManifest
 from pydantic import Field
 
 from src.adapters.base import (
@@ -380,8 +381,7 @@ class MockAdServer(AdServerAdapter):
         if start_time >= end_time:
             errors.append("NotNullError.NULL @ lineItem[0].endDateTime")
 
-        # Ensure consistent timezone handling for date comparison
-        current_time = datetime.now(UTC) if end_time.tzinfo else datetime.now()
+        current_time = datetime.now(UTC)
         if end_time <= current_time:
             errors.append("InvalidArgumentError @ lineItem[0].endDateTime")
 
@@ -458,15 +458,13 @@ class MockAdServer(AdServerAdapter):
         scenario = None
         test_message = None
         if request.brand_manifest:
-            if isinstance(request.brand_manifest, str):
-                test_message = request.brand_manifest
-            elif hasattr(request.brand_manifest, "name"):
-                test_message = request.brand_manifest.name
-            elif hasattr(request.brand_manifest, "root") and hasattr(request.brand_manifest.root, "name"):
-                # Handle library BrandManifestReference wrapper
-                test_message = request.brand_manifest.root.name
-            elif isinstance(request.brand_manifest, dict):
-                test_message = request.brand_manifest.get("name")
+            # BrandManifestReference.root is BrandManifest | AnyUrl
+            inner = request.brand_manifest.root
+            if isinstance(inner, BrandManifest):
+                test_message = inner.name
+            else:
+                # AnyUrl — use the URL string as test message
+                test_message = str(inner)
 
         if test_message and isinstance(test_message, str) and has_test_keywords(test_message):
             scenario = parse_test_scenario(test_message, "create_media_buy")
@@ -1117,9 +1115,8 @@ class MockAdServer(AdServerAdapter):
             self.log("  API Request: {")
             self.log(f"    'advertiser_id': '{self.adapter_principal_id}',")
             self.log(f"    'campaign_id': '{media_buy_id}',")
-            # date_range is ReportingPeriod which has start/end as datetime
-            start_str = date_range.start.date() if hasattr(date_range.start, "date") else str(date_range.start)
-            end_str = date_range.end.date() if hasattr(date_range.end, "date") else str(date_range.end)
+            start_str = date_range.start.date()
+            end_str = date_range.end.date()
             self.log(f"    'start_date': '{start_str}',")
             self.log(f"    'end_date': '{end_str}'")
             self.log("  }")

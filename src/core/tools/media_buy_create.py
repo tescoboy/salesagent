@@ -85,6 +85,7 @@ from src.core.schema_helpers import to_context_object, to_reporting_webhook
 from src.core.schemas import (
     CreateMediaBuyError,
     CreateMediaBuyRequest,
+    CreateMediaBuyResult,
     CreateMediaBuySuccess,
     CreativeApprovalStatus,
     Error,
@@ -557,13 +558,11 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                         logger.error(f"[APPROVAL] {error_msg}")
                         return False, error_msg
 
-                    # Extract delivery_type string value from enum (if it's an enum)
-                    if hasattr(product.delivery_type, "value"):
-                        # It's an enum - extract the string value
-                        delivery_type_str = product.delivery_type.value
-                    else:
-                        # Already a string
-                        delivery_type_str = str(product.delivery_type)
+                    delivery_type_str = (
+                        product.delivery_type.value
+                        if hasattr(product.delivery_type, "value")
+                        else str(product.delivery_type)
+                    )
 
                     # Validate delivery_type is a valid literal
                     if delivery_type_str not in ["guaranteed", "non_guaranteed"]:
@@ -1133,7 +1132,7 @@ async def _validate_and_convert_format_ids(
         if isinstance(fmt_id, dict):
             agent_url = fmt_id.get("agent_url")
             format_id = fmt_id.get("id")
-        elif hasattr(fmt_id, "agent_url") and hasattr(fmt_id, "id"):
+        elif isinstance(fmt_id, FormatId):
             agent_url = fmt_id.agent_url
             format_id = fmt_id.id
         else:
@@ -1195,7 +1194,7 @@ async def _create_media_buy_impl(
     req: CreateMediaBuyRequest,
     push_notification_config: dict[str, Any] | BaseModel | None = None,
     ctx: Context | ToolContext | None = None,
-) -> tuple[CreateMediaBuySuccess | CreateMediaBuyError, AdcpTaskStatus]:
+) -> CreateMediaBuyResult:
     """Create a media buy with the specified parameters.
 
     Args:
@@ -1204,7 +1203,7 @@ async def _create_media_buy_impl(
         ctx: FastMCP context (automatically provided)
 
     Returns:
-        CreateMediaBuyResponse with media buy details
+        CreateMediaBuyResult wrapping response and status
     """
     # Normalize push_notification_config to dict for downstream dict-based operations
     # (A2A server passes a2a.types.PushNotificationConfig model)
@@ -1256,12 +1255,12 @@ async def _create_media_buy_impl(
     if not principal:
         error_msg = f"Principal {principal_id} not found"
         # Cannot create context or workflow step without valid principal
-        return (
-            CreateMediaBuyError(
+        return CreateMediaBuyResult(
+            response=CreateMediaBuyError(
                 errors=[Error(code="authentication_error", message=error_msg, details=None)],
-                context=to_context_object(req.context),
+                context=req.context,
             ),
-            AdcpTaskStatus.failed,
+            status=AdcpTaskStatus.failed.value,
         )
 
     # Context management and workflow step creation - create workflow step FIRST
@@ -1376,8 +1375,8 @@ async def _create_media_buy_impl(
             raise ValueError(error_msg)
 
         # Handle 'asap' start_time (AdCP v1.7.0)
-        # Library may wrap start_time in StartTiming - unwrap if needed
-        raw_start_time = req.start_time.root if hasattr(req.start_time, "root") else req.start_time
+        # start_time is StartTiming (RootModel[datetime | 'asap']); unwrap via .root
+        raw_start_time = req.start_time.root
         if raw_start_time == "asap":
             computed_start_time: datetime = now
         else:
@@ -1769,12 +1768,12 @@ async def _create_media_buy_impl(
             ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=str(e))
 
         # Return error response with failed status
-        return (
-            CreateMediaBuyError(
+        return CreateMediaBuyResult(
+            response=CreateMediaBuyError(
                 errors=[Error(code="validation_error", message=str(e), details=None)],
-                context=to_context_object(req.context),
+                context=req.context,
             ),
-            AdcpTaskStatus.failed,
+            status=AdcpTaskStatus.failed.value,
         )
 
     # Type narrowing: in non-dry_run mode, step and persistent_ctx are guaranteed to exist
@@ -1793,7 +1792,7 @@ async def _create_media_buy_impl(
             logger.info(f"[INLINE_CREATIVE_DEBUG] req.packages count: {len(req.packages)}")
             for idx, pkg in enumerate(req.packages):
                 logger.info(
-                    f"[INLINE_CREATIVE_DEBUG] Package {idx}: product_id={pkg.product_id}, has_creatives={hasattr(pkg, 'creatives')}, creatives_count={len(pkg.creatives) if hasattr(pkg, 'creatives') and pkg.creatives else 0}"
+                    f"[INLINE_CREATIVE_DEBUG] Package {idx}: product_id={pkg.product_id}, creatives_count={len(pkg.creatives) if pkg.creatives else 0}"
                 )
             try:
                 logger.info("[INLINE_CREATIVE_DEBUG] Calling process_and_upload_package_creatives")
@@ -1821,14 +1820,10 @@ async def _create_media_buy_impl(
         # Check if manual approval is required
         # Use tenant.human_review_required as the authoritative source, with adapter setting as fallback
         tenant_approval_required = tenant.get("human_review_required", True)
-        adapter_approval_required = (
-            adapter.manual_approval_required if hasattr(adapter, "manual_approval_required") else False
-        )
+        adapter_approval_required = adapter.manual_approval_required
         # Tenant setting takes precedence - if tenant requires approval, it's required
         manual_approval_required = tenant_approval_required or adapter_approval_required
-        manual_approval_operations = (
-            adapter.manual_approval_operations if hasattr(adapter, "manual_approval_operations") else []
-        )
+        manual_approval_operations = adapter.manual_approval_operations
 
         # DEBUG: Log manual approval settings
         logger.info(
@@ -2244,16 +2239,16 @@ async def _create_media_buy_impl(
             # The workflow_step_id in packages indicates approval is required
             # buyer_ref is required by schema, but mypy needs explicit check
             response_buyer_ref = req.buyer_ref if req.buyer_ref else "unknown"
-            return (
-                CreateMediaBuySuccess(
+            return CreateMediaBuyResult(
+                response=CreateMediaBuySuccess(
                     buyer_ref=response_buyer_ref,
                     media_buy_id=media_buy_id,
                     creative_deadline=None,
                     packages=pending_packages,
                     workflow_step_id=step.step_id,  # Client can track approval via this ID
-                    context=to_context_object(req.context),
+                    context=req.context,
                 ),
-                AdcpTaskStatus.submitted,
+                status=AdcpTaskStatus.submitted.value,
             )
 
         # Get products for the media buy to check product-level auto-creation settings
@@ -2280,9 +2275,7 @@ async def _create_media_buy_impl(
                     )
                     # Generate defaults based on product delivery type and formats
                     delivery_type_str = (
-                        str(schema_product.delivery_type)
-                        if hasattr(schema_product, "delivery_type") and schema_product.delivery_type
-                        else "non_guaranteed"
+                        str(schema_product.delivery_type) if schema_product.delivery_type else "non_guaranteed"
                     )
                     # Extract format IDs as strings for config generation
                     formats_list: list[str] | None = None
@@ -2316,14 +2309,14 @@ async def _create_media_buy_impl(
                 )
                 if step:
                     ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=error_detail)
-                return (
-                    CreateMediaBuyError(
+                return CreateMediaBuyResult(
+                    response=CreateMediaBuyError(
                         errors=[
                             Error(code="invalid_configuration", message=err, details=None) for err in config_errors
                         ],
-                        context=to_context_object(req.context),
+                        context=req.context,
                     ),
-                    AdcpTaskStatus.failed,
+                    status=AdcpTaskStatus.failed.value,
                 )
 
         product_auto_create = all(
@@ -2407,15 +2400,15 @@ async def _create_media_buy_impl(
             except Exception as e:
                 logger.warning(f"⚠️ Failed to send configuration approval Slack notification: {e}")
 
-            return (
-                CreateMediaBuySuccess(
+            return CreateMediaBuyResult(
+                response=CreateMediaBuySuccess(
                     buyer_ref=req.buyer_ref if req.buyer_ref else "unknown",
                     media_buy_id=media_buy_id,
                     packages=response_packages,
                     workflow_step_id=step.step_id,
-                    context=to_context_object(req.context),
+                    context=req.context,
                 ),
-                AdcpTaskStatus.submitted,
+                status=AdcpTaskStatus.submitted.value,
             )
 
         # Continue with synchronized media buy creation
@@ -2459,7 +2452,7 @@ async def _create_media_buy_impl(
             matching_package = pkg  # The package we're iterating over
 
             # If found and has format_ids, validate and use those
-            if matching_package and hasattr(matching_package, "format_ids") and matching_package.format_ids:
+            if matching_package and matching_package.format_ids:
                 # Validate that requested formats are supported by product
                 # Format is composite key: (agent_url, id) per AdCP spec
                 product_format_keys: set[tuple[str | None, str]] = set()
@@ -2646,9 +2639,8 @@ async def _create_media_buy_impl(
             package_buyer_ref: str | None = None
             package_budget_value: float | None = None
             if matching_package:
-                if hasattr(matching_package, "buyer_ref"):
-                    package_buyer_ref = matching_package.buyer_ref
-                if hasattr(matching_package, "budget"):
+                package_buyer_ref = matching_package.buyer_ref
+                if matching_package.budget is not None:
                     raw_budget = matching_package.budget
                     # Normalize budget: MediaPackage expects float | None (ADCP 2.5.0)
                     if raw_budget is not None:
@@ -2658,19 +2650,13 @@ async def _create_media_buy_impl(
                         elif isinstance(raw_budget, dict):
                             # Legacy dict format: extract total
                             package_budget_value = float(raw_budget.get("total", 0.0))
-                        elif hasattr(raw_budget, "total"):
+                        elif isinstance(raw_budget, BaseModel):
                             # Budget object: extract total
                             package_budget_value = float(raw_budget.total)
                         else:
                             package_budget_value = None
 
-            # Extract delivery_type string value from enum (if it's an enum)
-            if hasattr(pkg_product.delivery_type, "value"):
-                # It's an enum - extract the string value
-                delivery_type_str = pkg_product.delivery_type.value
-            else:
-                # Already a string - cast to satisfy mypy
-                delivery_type_str = str(pkg_product.delivery_type)
+            delivery_type_str = str(pkg_product.delivery_type.value)
 
             delivery_type_value: Literal["guaranteed", "non_guaranteed"] = cast(
                 Literal["guaranteed", "non_guaranteed"], delivery_type_str
@@ -2686,9 +2672,7 @@ async def _create_media_buy_impl(
                     format_ids=cast(list[Any], format_ids_to_use),
                     targeting_overlay=cast(
                         "Targeting | None",
-                        matching_package.targeting_overlay
-                        if matching_package and hasattr(matching_package, "targeting_overlay")
-                        else None,
+                        matching_package.targeting_overlay if matching_package else None,
                     ),
                     buyer_ref=package_buyer_ref,
                     product_id=pkg_product.product_id,  # Include product_id
@@ -2720,12 +2704,12 @@ async def _create_media_buy_impl(
             error_msg = "start_time and end_time are required but were not properly set"
             if step:
                 ctx_manager.update_workflow_step(step.step_id, status="failed", error_message=error_msg)
-            return (
-                CreateMediaBuyError(
+            return CreateMediaBuyResult(
+                response=CreateMediaBuyError(
                     errors=[Error(code="invalid_datetime", message=error_msg, details=None)],
-                    context=to_context_object(req.context),
+                    context=req.context,
                 ),
-                AdcpTaskStatus.failed,
+                status=AdcpTaskStatus.failed.value,
             )
 
         # PRE-VALIDATE: Check all creatives have required fields BEFORE calling adapter
@@ -2757,7 +2741,7 @@ async def _create_media_buy_impl(
             error_msg = response.errors[0].message if response.errors else "Unknown error"
             error_code = response.errors[0].code if response.errors else "UNKNOWN"
             logger.error(f"[ADAPTER] Adapter returned error response: {error_code} - {error_msg}")
-            return (response, AdcpTaskStatus.failed)
+            return CreateMediaBuyResult(response=response, status=AdcpTaskStatus.failed.value)
 
         # At this point, response is CreateMediaBuySuccess - safe to access success-specific fields
         # Type narrowing: media_buy_id must be present in successful response
@@ -2773,7 +2757,7 @@ async def _create_media_buy_impl(
         # Adapter validation has run, so errors (like unsupported pricing) are already caught above
         if testing_ctx.dry_run:
             logger.info("[DRY_RUN] Adapter validation passed, returning response without database writes")
-            return (response, AdcpTaskStatus.completed)
+            return CreateMediaBuyResult(response=response, status=AdcpTaskStatus.completed.value)
 
         # Type narrowing: after dry_run return, step and persistent_ctx are guaranteed to exist
         # This is needed for mypy to understand these won't be None in the code below
@@ -3248,7 +3232,7 @@ async def _create_media_buy_impl(
                 try:
                     # Ensure product_ids is a list, not None
                     # Note: product_ids no longer exists on CreateMediaBuyRequest - use get_product_ids() method
-                    product_ids_list = req.get_product_ids() if hasattr(req, "get_product_ids") else []
+                    product_ids_list = req.get_product_ids()
                     asset = _convert_creative_to_adapter_asset(creative, product_ids_list)
                     assets.append(asset)
                 except Exception as e:
@@ -3258,7 +3242,7 @@ async def _create_media_buy_impl(
                         creative_id=creative.creative_id, status="rejected", detail=f"Conversion error: {str(e)}"
                     )
                     continue
-            statuses = adapter.add_creative_assets(response.media_buy_id, assets, datetime.now())
+            statuses = adapter.add_creative_assets(response.media_buy_id, assets, datetime.now(UTC))
 
             # Check if manual approval is required for creatives
             require_creative_approval = manual_approval_required and "add_creative_assets" in manual_approval_operations
@@ -3295,7 +3279,7 @@ async def _create_media_buy_impl(
             if i < len(adapter_packages):
                 # adapter_packages may be Package Pydantic objects (adcp v1.2.1) or dicts
                 response_package = adapter_packages[i]
-                if hasattr(response_package, "package_id"):
+                if isinstance(response_package, BaseModel):
                     adapter_package_id = response_package.package_id
                     adapter_paused = getattr(response_package, "paused", False)
                 elif isinstance(response_package, dict):
@@ -3353,7 +3337,7 @@ async def _create_media_buy_impl(
             media_buy_id=response.media_buy_id,
             packages=response_packages,
             creative_deadline=response.creative_deadline,
-            context=to_context_object(req.context),
+            context=req.context,
         )
 
         # Log activity
@@ -3474,7 +3458,7 @@ async def _create_media_buy_impl(
             },
         )
 
-        return (modified_response, AdcpTaskStatus.completed)
+        return CreateMediaBuyResult(response=modified_response, status=AdcpTaskStatus.completed.value)
 
     except Exception as e:
         # Update workflow step as failed on any error during execution
@@ -3622,11 +3606,8 @@ async def create_media_buy(
     except ValidationError as e:
         raise ToolError(format_validation_error(e, context="request")) from e
 
-    response, status = await _create_media_buy_impl(req=req, ctx=ctx)
-    return ToolResult(
-        content=str(response),
-        structured_content={"status": status.value, **response.model_dump(mode="json")},
-    )
+    result = await _create_media_buy_impl(req=req, ctx=ctx)
+    return ToolResult(content=str(result), structured_content=result)
 
 
 async def create_media_buy_raw(
@@ -3699,12 +3680,11 @@ async def create_media_buy_raw(
     except ValidationError as e:
         raise ToolError(format_validation_error(e, context="request")) from e
 
-    response, status = await _create_media_buy_impl(
+    return await _create_media_buy_impl(
         req=req,
         push_notification_config=push_notification_config,
         ctx=ctx,
     )
-    return {"status": status.value, **response.model_dump()}
 
 
 # Unified update tools

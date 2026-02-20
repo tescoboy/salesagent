@@ -178,19 +178,17 @@ class TestSchemaLibraryInheritance:
             # UpdateMediaBuyRequest extends UpdateMediaBuyRequest1 (variant, not RootModel)
             "UpdateMediaBuyRequest",
             "ListCreativesRequest",
-            "ListCreativesResponse",  # Nested type incompatibilities
-            "SyncCreativesRequest",
-            "SyncCreativesResponse",
-            # Signal types - nested DeliverTo type incompatibility
-            "ActivateSignalRequest",
-            "ActivateSignalResponse",
-            "GetSignalsRequest",
-            "GetSignalsResponse",
+            # ListCreativesResponse — migrated (nested types now extend library)
+            # SyncCreativesResponse — migrated (RootModel proxy subclass)
+            # Signal types
+            # ActivateSignalRequest — migrated (signal_id → signal_agent_segment_id)
+            "ActivateSignalResponse",  # RootModel union + semantic incompatibility (no signal_id in library)
+            # GetSignalsRequest — migrated (uses library DeliverTo)
+            # GetSignalsResponse — migrated (uses local Signal with exclude=True)
             # Property types - nested PublisherDomain type incompatibility
             "ListAuthorizedPropertiesRequest",
             "ListAuthorizedPropertiesResponse",
-            # Response types (may need custom serialization)
-            "GetMediaBuyDeliveryResponse",
+            # GetMediaBuyDeliveryResponse — migrated (local MediaBuyDeliveryData override)
         }
 
         # Get all Request/Response classes from our schemas

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
@@ -94,11 +94,9 @@ class TritonDigital(AdServerAdapter):
         # Geographic targeting (v3 structured fields, audio market focused)
         targeting_obj = {}
         if targeting_overlay.geo_countries:
-            targeting_obj["countries"] = [
-                c.root if hasattr(c, "root") else str(c) for c in targeting_overlay.geo_countries
-            ]
+            targeting_obj["countries"] = [c.root for c in targeting_overlay.geo_countries]
         if targeting_overlay.geo_regions:
-            targeting_obj["states"] = [r.root if hasattr(r, "root") else str(r) for r in targeting_overlay.geo_regions]
+            targeting_obj["states"] = [r.root for r in targeting_overlay.geo_regions]
         if targeting_overlay.geo_metros:
             # Map to audio market names if possible
             targeting_obj["markets"] = []  # Would need metro-to-market mapping
@@ -162,7 +160,7 @@ class TritonDigital(AdServerAdapter):
 
         # Generate a media buy ID
         media_buy_id = (
-            f"triton_{request.po_number}" if request.po_number else f"triton_{int(datetime.now().timestamp())}"
+            f"triton_{request.po_number}" if request.po_number else f"triton_{int(datetime.now(UTC).timestamp())}"
         )
 
         # Calculate total budget using pricing_info if available
@@ -452,18 +450,15 @@ class TritonDigital(AdServerAdapter):
             self.log(f"Would call: POST {self.base_url}/reports")
             self.log("  Report Request: {")
             self.log("    'reportType': 'FLIGHT',")
-            # date_range.start and .end are ISO 8601 strings, use them directly
-            self.log(f"    'startDate': '{date_range.start}',")
-            self.log(f"    'endDate': '{date_range.end}',")
+            self.log(f"    'startDate': '{date_range.start.isoformat()}',")
+            self.log(f"    'endDate': '{date_range.end.isoformat()}',")
             self.log(f"    'filters': {{'campaigns': ['{media_buy_id}']}},")
             self.log("    'columns': ['flightName', 'impressions', 'totalRevenue']")
             self.log("  }")
             self.log("Would poll for report completion and download results")
 
             # Simulate response based on campaign progress
-            # Parse ISO string to datetime, then extract date
-            start_dt = datetime.fromisoformat(date_range.start.replace("Z", "+00:00"))
-            days_elapsed = (today.date() - start_dt.date()).days
+            days_elapsed = (today.date() - date_range.start.date()).days
             progress_factor = min(days_elapsed / 14, 1.0)  # Assume 14-day campaigns
 
             # Calculate simulated delivery for audio campaigns
@@ -482,11 +477,10 @@ class TritonDigital(AdServerAdapter):
                 currency="USD",
             )
         else:
-            # date_range.start and .end are already ISO 8601 strings
             report_payload = {
                 "reportType": "FLIGHT",
-                "startDate": date_range.start,
-                "endDate": date_range.end,
+                "startDate": date_range.start.isoformat(),
+                "endDate": date_range.end.isoformat(),
                 "filters": {"campaigns": [media_buy_id]},
                 "columns": ["flightName", "impressions", "totalRevenue"],
             }

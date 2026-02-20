@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from adcp.types import CreativePolicy
 
 from src.core.database.models import (
     Principal as PrincipalModel,
@@ -24,7 +25,6 @@ from src.core.schemas import (
     Creative,
     CreativeApprovalStatus,
     CreativeAssignment,
-    CreativePolicy,
     Format,
     FormatId,
     GetMediaBuyDeliveryRequest,
@@ -916,6 +916,7 @@ class TestAdCPContract:
             platform="google_ad_manager",
             account="123456789",
             is_live=True,
+            type="platform",
             scope="account-specific",
             decisioning_platform_segment_id="gam_segment_123",
             estimated_activation_duration_minutes=0,
@@ -969,10 +970,11 @@ class TestAdCPContract:
         assert isinstance(adcp_response["deployments"], list), "deployments must be array"
         assert len(adcp_response["deployments"]) > 0, "deployments array must not be empty"
         deployment_obj = adcp_response["deployments"][0]
-        required_deployment_fields = ["platform", "is_live", "scope"]
+        required_deployment_fields = ["platform", "is_live", "type"]
         for field in required_deployment_fields:
             assert field in deployment_obj, f"Required deployment field '{field}' missing"
-        assert deployment_obj["scope"] in ["platform-wide", "account-specific"], "scope must be valid enum"
+        # scope is an internal field (exclude=True), should not appear in AdCP response
+        assert "scope" not in deployment_obj, "Internal field 'scope' exposed in AdCP response"
 
         # Verify pricing structure
         assert isinstance(adcp_response["pricing"], dict), "pricing must be object"
@@ -1269,8 +1271,8 @@ class TestAdCPContract:
         """Test that CreativePolicy model complies with AdCP creative-policy schema."""
         policy = CreativePolicy(co_branding="required", landing_page="retailer_site_only", templates_available=True)
 
-        # Test model_dump (CreativePolicy doesn't have internal fields)
-        adcp_response = policy.model_dump()
+        # Test model_dump with mode="json" (library enums serialize to strings)
+        adcp_response = policy.model_dump(mode="json")
 
         # Verify required AdCP fields are present
         adcp_required_fields = ["co_branding", "landing_page", "templates_available"]
@@ -2333,18 +2335,19 @@ class TestAdCPContract:
         # ✅ FIXED: Implementation now matches AdCP spec
         # AdCP spec requires: signal_spec, deliver_to, optional filters/max_results
 
-        from src.core.schemas import GetSignalsRequest, SignalDeliverTo, SignalFilters
+        from adcp.types import DeliverTo, PlatformDestination
+
+        from src.core.schemas import GetSignalsRequest, SignalFilters
 
         # Test AdCP-compliant request with all required fields
         adcp_request = GetSignalsRequest(
             signal_spec="Sports enthusiasts in automotive market",
-            deliver_to=SignalDeliverTo(
-                platforms=["google_ad_manager", "the_trade_desk"],
-                countries=["US", "CA"],
-                accounts=[
-                    {"platform": "google_ad_manager", "account": "123456"},
-                    {"platform": "the_trade_desk", "account": "ttd789"},
+            deliver_to=DeliverTo(
+                deployments=[
+                    PlatformDestination(platform="google_ad_manager", type="platform", account="123456"),
+                    PlatformDestination(platform="the_trade_desk", type="platform", account="ttd789"),
                 ],
+                countries=["US", "CA"],
             ),
             filters=SignalFilters(
                 catalog_types=["marketplace", "custom"],
@@ -2355,7 +2358,7 @@ class TestAdCPContract:
             max_results=50,
         )
 
-        adcp_response = adcp_request.model_dump()
+        adcp_response = adcp_request.model_dump(mode="json")
 
         # ✅ VERIFY ADCP COMPLIANCE: Required fields present
         required_fields = ["signal_spec", "deliver_to"]
@@ -2368,11 +2371,12 @@ class TestAdCPContract:
         for field in optional_fields:
             assert field in adcp_response, f"Optional AdCP field '{field}' missing from response"
 
-        # ✅ VERIFY deliver_to structure
+        # ✅ VERIFY deliver_to structure (library DeliverTo uses deployments + countries)
         deliver_to = adcp_response["deliver_to"]
-        assert "platforms" in deliver_to, "deliver_to must have platforms field"
+        assert "deployments" in deliver_to, "deliver_to must have deployments field"
         assert "countries" in deliver_to, "deliver_to must have countries field"
-        assert isinstance(deliver_to["platforms"], list), "platforms must be array when not 'all'"
+        assert isinstance(deliver_to["deployments"], list), "deployments must be array"
+        assert len(deliver_to["deployments"]) >= 1, "deployments must have at least one entry"
         assert isinstance(deliver_to["countries"], list), "countries must be array"
 
         # Verify country codes are 2-letter ISO
@@ -2399,10 +2403,14 @@ class TestAdCPContract:
 
         # Test minimal request (only required fields)
         minimal_request = GetSignalsRequest(
-            signal_spec="Automotive intenders", deliver_to=SignalDeliverTo(platforms="all", countries=["US"])
+            signal_spec="Automotive intenders",
+            deliver_to=DeliverTo(
+                deployments=[PlatformDestination(platform="google_ad_manager", type="platform")],
+                countries=["US"],
+            ),
         )
         minimal_response = minimal_request.model_dump()
-        assert minimal_response["deliver_to"]["platforms"] == "all"
+        assert "deployments" in minimal_response["deliver_to"]
 
         # ✅ VERIFY backward compatibility properties work (deprecated)
         with warnings.catch_warnings(record=True) as w:
@@ -2835,7 +2843,7 @@ class TestAdCPContract:
             "signal_type": "marketplace",
             "data_provider": "Acme Data",
             "coverage_percentage": 85.5,
-            "deployments": [{"platform": "GAM", "is_live": True, "scope": "platform-wide"}],
+            "deployments": [{"platform": "GAM", "is_live": True, "type": "platform"}],
             "pricing": {"cpm": 2.50, "currency": "USD"},
         }
         # Test with optional errors field

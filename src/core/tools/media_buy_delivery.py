@@ -10,7 +10,7 @@ Handles delivery metrics reporting including:
 
 import logging
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import floor
 from typing import Any, cast
 
@@ -26,7 +26,7 @@ from src.core.tool_context import ToolContext
 logger = logging.getLogger(__name__)
 console = Console()
 
-from adcp.types import MediaBuyStatus
+from adcp.types import Error, MediaBuyStatus
 from adcp.types.generated_poc.core.context import ContextObject
 
 from src.core.auth import get_principal_object
@@ -49,16 +49,6 @@ from src.core.testing_hooks import DeliverySimulator, TimeSimulator, apply_testi
 from src.core.validation_helpers import format_validation_error
 
 
-def _context_to_dict(context: ContextObject | None) -> dict[str, Any] | None:
-    """Convert ContextObject to dict for response, handling None case."""
-    if context is None:
-        return None
-    if hasattr(context, "model_dump"):
-        return context.model_dump()
-    # Fallback for dict-like objects
-    return dict(context) if context else None
-
-
 def _get_media_buy_delivery_impl(
     req: GetMediaBuyDeliveryRequest, ctx: Context | ToolContext | None
 ) -> GetMediaBuyDeliveryResponse:
@@ -79,10 +69,9 @@ def _get_media_buy_delivery_impl(
     if not principal_id:
         # Return AdCP-compliant error response
         # TODO: @yusuf - Should this return only error field and not the other fields? Haven't we updated adcp spec to only return error field on errors??
-        # Convert ContextObject to dict if needed
-        context_dict = _context_to_dict(req.context)
+        context_val = req.context
         return GetMediaBuyDeliveryResponse(
-            reporting_period=ReportingPeriod(start=datetime.now().isoformat(), end=datetime.now().isoformat()),
+            reporting_period=ReportingPeriod(start=datetime.now(UTC), end=datetime.now(UTC)),
             currency="USD",
             aggregated_totals=AggregatedTotals(
                 impressions=0.0,
@@ -92,8 +81,8 @@ def _get_media_buy_delivery_impl(
                 media_buy_count=0,
             ),
             media_buy_deliveries=[],
-            errors=[{"code": "principal_id_missing", "message": "Principal ID not found in context"}],
-            context=context_dict,
+            errors=[Error(code="principal_id_missing", message="Principal ID not found in context")],
+            context=context_val,
         )
 
     # Get the Principal object
@@ -101,9 +90,9 @@ def _get_media_buy_delivery_impl(
     if not principal:
         # Return AdCP-compliant error response
         # TODO: @yusuf - Should this return only error field and not the other fields? Haven't we updated adcp spec to only return error field on errors??
-        context_dict = _context_to_dict(req.context)
+        context_val = req.context
         return GetMediaBuyDeliveryResponse(
-            reporting_period=ReportingPeriod(start=datetime.now().isoformat(), end=datetime.now().isoformat()),
+            reporting_period=ReportingPeriod(start=datetime.now(UTC), end=datetime.now(UTC)),
             currency="USD",
             aggregated_totals=AggregatedTotals(
                 impressions=0.0,
@@ -113,8 +102,8 @@ def _get_media_buy_delivery_impl(
                 media_buy_count=0,
             ),
             media_buy_deliveries=[],
-            errors=[{"code": "principal_not_found", "message": f"Principal {principal_id} not found"}],
-            context=context_dict,
+            errors=[Error(code="principal_not_found", message=f"Principal {principal_id} not found")],
+            context=context_val,
         )
 
     # Get the appropriate adapter
@@ -123,14 +112,14 @@ def _get_media_buy_delivery_impl(
 
     # Determine reporting period
     if req.start_date and req.end_date:
-        # Use provided date range
-        start_dt = datetime.strptime(req.start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(req.end_date, "%Y-%m-%d")
+        # Use provided date range (make timezone-aware for AwareDatetime)
+        start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").replace(tzinfo=UTC)
+        end_dt = datetime.strptime(req.end_date, "%Y-%m-%d").replace(tzinfo=UTC)
 
         if start_dt >= end_dt:
-            context_dict = _context_to_dict(req.context)
+            context_val = req.context
             return GetMediaBuyDeliveryResponse(
-                reporting_period=ReportingPeriod(start=datetime.now().isoformat(), end=datetime.now().isoformat()),
+                reporting_period=ReportingPeriod(start=datetime.now(UTC), end=datetime.now(UTC)),
                 currency="USD",
                 aggregated_totals=AggregatedTotals(
                     impressions=0.0,
@@ -140,15 +129,15 @@ def _get_media_buy_delivery_impl(
                     media_buy_count=0,
                 ),
                 media_buy_deliveries=[],
-                errors=[{"code": "invalid_date_range", "message": "Start date must be before end date"}],
-                context=context_dict,
+                errors=[Error(code="invalid_date_range", message="Start date must be before end date")],
+                context=context_val,
             )
     else:
         # Default to last 30 days
-        end_dt = datetime.now()
+        end_dt = datetime.now(UTC)
         start_dt = end_dt - timedelta(days=30)
 
-    reporting_period = ReportingPeriod(start=start_dt.isoformat(), end=end_dt.isoformat())
+    reporting_period = ReportingPeriod(start=start_dt, end=end_dt)
 
     # Determine reference date for status calculations use end_date, it either will be today or the user provided end_date.
     reference_date = end_dt.date()
@@ -242,7 +231,7 @@ def _get_media_buy_delivery_impl(
 
                 except Exception as e:
                     logger.error(f"Error getting delivery for {media_buy_id}: {e}")
-                    context_dict = _context_to_dict(req.context)
+                    context_val = req.context
                     return GetMediaBuyDeliveryResponse(
                         reporting_period=reporting_period,
                         currency=buy.currency,
@@ -254,8 +243,8 @@ def _get_media_buy_delivery_impl(
                             media_buy_count=0,
                         ),
                         media_buy_deliveries=[],
-                        errors=[{"code": "adapter_error", "message": f"Error getting delivery for {media_buy_id}"}],
-                        context=context_dict,
+                        errors=[Error(code="adapter_error", message=f"Error getting delivery for {media_buy_id}")],
+                        context=context_val,
                     )
             else:
                 # Use simulation for testing
@@ -264,8 +253,8 @@ def _get_media_buy_delivery_impl(
 
                 buy_start_date_sim = type_cast(date, buy.start_date)
                 buy_end_date_sim = type_cast(date, buy.end_date)
-                start_dt = datetime.combine(buy_start_date_sim, datetime.min.time())
-                end_dt_campaign = datetime.combine(buy_end_date_sim, datetime.min.time())
+                start_dt = datetime.combine(buy_start_date_sim, datetime.min.time(), tzinfo=UTC)
+                end_dt_campaign = datetime.combine(buy_end_date_sim, datetime.min.time(), tzinfo=UTC)
                 progress = TimeSimulator.calculate_campaign_progress(start_dt, end_dt_campaign, simulation_datetime)
 
                 simulated_metrics = DeliverySimulator.calculate_simulated_metrics(
@@ -321,7 +310,7 @@ def _get_media_buy_delivery_impl(
                         package_spend = spend / len(packages)
                         package_impressions = impressions / len(packages)
 
-                    if pricing_option and pricing_option.pricing_model == PricingModel.CPC and pricing_option.rate:
+                    if pricing_option and pricing_option.pricing_model == PricingModel.cpc and pricing_option.rate:
                         package_clicks = floor(spend / (float(pricing_option.rate)))
                     else:
                         package_clicks = None
@@ -394,7 +383,7 @@ def _get_media_buy_delivery_impl(
             # Continue with other media buys
 
     # Create AdCP-compliant response
-    context_dict = _context_to_dict(req.context)
+    context_val = req.context
     response = GetMediaBuyDeliveryResponse(
         reporting_period=reporting_period,
         currency="USD",  # TODO: @yusuf - This is wrong. Currency should be at the media buy delivery level, not on aggregated totals.
@@ -407,7 +396,7 @@ def _get_media_buy_delivery_impl(
         ),
         media_buy_deliveries=deliveries,
         errors=None,
-        context=context_dict,
+        context=context_val,
     )
 
     # Apply testing hooks if needed

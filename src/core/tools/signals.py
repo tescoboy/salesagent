@@ -7,7 +7,6 @@ implementation pattern from CLAUDE.md.
 import logging
 import time
 import uuid
-from typing import Literal
 
 from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
@@ -17,11 +16,16 @@ from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 
-from adcp.types import PlatformDeployment, Pricing, Signal, SignalCatalogType
-
 from src.core.auth import get_principal_from_context, get_principal_object
 from src.core.config_loader import get_current_tenant
-from src.core.schemas import ActivateSignalResponse, GetSignalsRequest, GetSignalsResponse
+from src.core.schemas import (
+    ActivateSignalResponse,
+    GetSignalsRequest,
+    GetSignalsResponse,
+    Signal,
+    SignalDeployment,
+    SignalPricing,
+)
 from src.core.testing_hooks import get_testing_context
 
 
@@ -58,103 +62,67 @@ async def _get_signals_impl(req: GetSignalsRequest, context: Context | ToolConte
     # or the ad server's available audience segments
     signals = []
 
-    # Sample signals for demonstration using AdCP-compliant structure
+    # Sample signals for demonstration using local types (extend AdCP library types)
     sample_signals = [
         Signal(
             signal_agent_segment_id="auto_intenders_q1_2025",
             name="Auto Intenders Q1 2025",
             description="Users actively researching new vehicles in Q1 2025",
-            signal_type=SignalCatalogType.marketplace,
+            signal_type="marketplace",
             data_provider="Acme Data Solutions",
             coverage_percentage=85.0,
-            deployments=[
-                PlatformDeployment(
-                    platform="google_ad_manager",
-                    is_live=True,
-                    type="platform",
-                )
-            ],
-            pricing=Pricing(cpm=3.0, currency="USD"),
+            deployments=[SignalDeployment(platform="google_ad_manager", is_live=True, type="platform")],
+            pricing=SignalPricing(cpm=3.0, currency="USD"),
         ),
         Signal(
             signal_agent_segment_id="luxury_travel_enthusiasts",
             name="Luxury Travel Enthusiasts",
             description="High-income individuals interested in premium travel experiences",
-            signal_type=SignalCatalogType.marketplace,
+            signal_type="marketplace",
             data_provider="Premium Audience Co",
             coverage_percentage=75.0,
-            deployments=[
-                PlatformDeployment(
-                    platform="google_ad_manager",
-                    is_live=True,
-                    type="platform",
-                )
-            ],
-            pricing=Pricing(cpm=5.0, currency="USD"),
+            deployments=[SignalDeployment(platform="google_ad_manager", is_live=True, type="platform")],
+            pricing=SignalPricing(cpm=5.0, currency="USD"),
         ),
         Signal(
             signal_agent_segment_id="sports_content",
             name="Sports Content Pages",
             description="Target ads on sports-related content",
-            signal_type=SignalCatalogType.owned,
+            signal_type="owned",
             data_provider="Publisher Sports Network",
             coverage_percentage=95.0,
-            deployments=[
-                PlatformDeployment(
-                    platform="google_ad_manager",
-                    is_live=True,
-                    type="platform",
-                )
-            ],
-            pricing=Pricing(cpm=1.5, currency="USD"),
+            deployments=[SignalDeployment(platform="google_ad_manager", is_live=True, type="platform")],
+            pricing=SignalPricing(cpm=1.5, currency="USD"),
         ),
         Signal(
             signal_agent_segment_id="finance_content",
             name="Finance & Business Content",
             description="Target ads on finance and business content",
-            signal_type=SignalCatalogType.owned,
+            signal_type="owned",
             data_provider="Financial News Corp",
             coverage_percentage=88.0,
-            deployments=[
-                PlatformDeployment(
-                    platform="google_ad_manager",
-                    is_live=True,
-                    type="platform",
-                )
-            ],
-            pricing=Pricing(cpm=2.0, currency="USD"),
+            deployments=[SignalDeployment(platform="google_ad_manager", is_live=True, type="platform")],
+            pricing=SignalPricing(cpm=2.0, currency="USD"),
         ),
         Signal(
             signal_agent_segment_id="urban_millennials",
             name="Urban Millennials",
             description="Millennials living in major metropolitan areas",
-            signal_type=SignalCatalogType.marketplace,
+            signal_type="marketplace",
             data_provider="Demographics Plus",
             coverage_percentage=78.0,
-            deployments=[
-                PlatformDeployment(
-                    platform="google_ad_manager",
-                    is_live=True,
-                    type="platform",
-                )
-            ],
-            pricing=Pricing(cpm=1.8, currency="USD"),
+            deployments=[SignalDeployment(platform="google_ad_manager", is_live=True, type="platform")],
+            pricing=SignalPricing(cpm=1.8, currency="USD"),
         ),
         Signal(
             signal_agent_segment_id="pet_owners",
             name="Pet Owners",
             description="Households with dogs or cats",
-            signal_type=SignalCatalogType.marketplace,
+            signal_type="marketplace",
             data_provider="Lifestyle Data Inc",
             coverage_percentage=92.0,
-            deployments=[
-                PlatformDeployment(
-                    platform="google_ad_manager",
-                    is_live=True,
-                    type="platform",
-                )
-            ],
-            pricing=Pricing(cpm=1.2, currency="USD"),
+            deployments=[SignalDeployment(platform="google_ad_manager", is_live=True, type="platform")],
+            pricing=SignalPricing(cpm=1.2, currency="USD"),
         ),
     ]
 
@@ -166,7 +134,7 @@ async def _get_signals_impl(req: GetSignalsRequest, context: Context | ToolConte
             if (
                 spec_lower not in signal.name.lower()
                 and spec_lower not in signal.description.lower()
-                and spec_lower not in signal.signal_type.value.lower()
+                and spec_lower not in signal.signal_type.lower()
             ):
                 continue
 
@@ -197,62 +165,9 @@ async def _get_signals_impl(req: GetSignalsRequest, context: Context | ToolConte
     if req.max_results:
         signals = signals[: req.max_results]
 
-    # Per AdCP PR #113 and official schema, protocol fields (message, context_id)
-    # are added by the protocol layer, not the domain response.
-    # Convert library Signal types to our local Signal type for type compatibility
-    from src.core.schemas import Signal as LocalSignal
-    from src.core.schemas import SignalDeployment, SignalPricing
-
-    local_signals = []
-    for s in signals:
-        # Convert library signal_type enum to string literal
-        signal_type_val = s.signal_type.value if hasattr(s.signal_type, "value") else str(s.signal_type)
-        # Map to valid Literal type
-        signal_type_literal: Literal["marketplace", "custom", "owned"] = (
-            "marketplace" if signal_type_val == "marketplace" else "custom" if signal_type_val == "custom" else "owned"
-        )
-
-        # Convert library deployments to local SignalDeployment
-        # Library Deployment is a union of Deployment1 (platform-based) and Deployment2 (agent-based)
-        local_deployments = []
-        for d in s.deployments or []:
-            # Access attributes safely - both Deployment1 and Deployment2 have is_live
-            # platform is only on Deployment1, use getattr with default
-            deployment_platform = getattr(d, "platform", "unknown")
-            deployment_is_live = getattr(d, "is_live", False)
-            deployment_type = getattr(d, "type", "platform")
-            local_deployments.append(
-                SignalDeployment(
-                    platform=deployment_platform,
-                    account=None,
-                    is_live=deployment_is_live,
-                    scope="platform-wide" if deployment_type == "platform" else "account-specific",
-                    decisioning_platform_segment_id=None,
-                    estimated_activation_duration_minutes=None,
-                )
-            )
-
-        local_signals.append(
-            LocalSignal(
-                signal_agent_segment_id=s.signal_agent_segment_id,
-                name=s.name,
-                description=s.description or "",
-                signal_type=signal_type_literal,
-                data_provider=s.data_provider or "",
-                coverage_percentage=s.coverage_percentage or 0.0,
-                deployments=local_deployments,
-                pricing=SignalPricing(
-                    cpm=s.pricing.cpm if s.pricing else 0.0,
-                    currency=s.pricing.currency if s.pricing else "USD",
-                ),
-                # Optional internal fields - explicitly None to satisfy mypy
-                tenant_id=None,
-                created_at=None,
-                updated_at=None,
-                metadata=None,
-            )
-        )
-    return GetSignalsResponse(signals=local_signals, errors=None, context=req.context)
+    # Signals are already constructed as local types (extending library types),
+    # so no conversion needed — pass directly to response.
+    return GetSignalsResponse(signals=signals, errors=None, context=req.context)
 
 
 async def get_signals(req: GetSignalsRequest, context: Context | ToolContext | None = None):
@@ -272,7 +187,7 @@ async def get_signals(req: GetSignalsRequest, context: Context | ToolContext | N
 
 
 async def _activate_signal_impl(
-    signal_id: str,
+    signal_agent_segment_id: str,
     campaign_id: str = None,
     media_buy_id: str = None,
     context: dict | None = None,  # payload-level context
@@ -281,7 +196,7 @@ async def _activate_signal_impl(
     """Shared implementation for activate_signal (used by both MCP and A2A).
 
     Args:
-        signal_id: Signal ID to activate
+        signal_agent_segment_id: Universal signal identifier to activate
         campaign_id: Optional campaign ID to activate signal for
         media_buy_id: Optional media buy ID to activate signal for
         context: Application level context per adcp spec
@@ -309,7 +224,7 @@ async def _activate_signal_impl(
     if not ctx:
         raise ToolError("Context required for signal activation")
     testing_ctx = get_testing_context(ctx)
-    campaign_info = {"endpoint": "activate_signal", "signal_id": signal_id}
+    campaign_info = {"endpoint": "activate_signal", "signal_id": signal_agent_segment_id}
     # Note: apply_testing_hooks modifies response data dict, not called here as no response yet
 
     try:
@@ -321,7 +236,7 @@ async def _activate_signal_impl(
 
         # Mock implementation for demonstration
         activation_success = True
-        requires_approval = signal_id.startswith("premium_")  # Mock rule: premium signals need approval
+        requires_approval = signal_agent_segment_id.startswith("premium_")
 
         from src.core.schemas import Error
 
@@ -330,20 +245,20 @@ async def _activate_signal_impl(
             errors = [
                 Error(
                     code="APPROVAL_REQUIRED",
-                    message=f"Signal {signal_id} requires manual approval before activation",
+                    message=f"Signal {signal_agent_segment_id} requires manual approval before activation",
                 )
             ]
             return ActivateSignalResponse(
-                signal_id=signal_id,
+                signal_id=signal_agent_segment_id,
                 activation_details=None,
                 errors=errors,
                 context=context,
             )
         elif activation_success:
             # Success - return activation details
-            decisioning_platform_segment_id = f"seg_{signal_id}_{uuid.uuid4().hex[:8]}"
+            decisioning_platform_segment_id = f"seg_{signal_agent_segment_id}_{uuid.uuid4().hex[:8]}"
             return ActivateSignalResponse(
-                signal_id=signal_id,
+                signal_id=signal_agent_segment_id,
                 activation_details={
                     "decisioning_platform_segment_id": decisioning_platform_segment_id,
                     "estimated_activation_duration_minutes": 15.0,
@@ -356,18 +271,18 @@ async def _activate_signal_impl(
             # Failure
             errors = [Error(code="ACTIVATION_FAILED", message="Signal provider unavailable")]
             return ActivateSignalResponse(
-                signal_id=signal_id,
+                signal_id=signal_agent_segment_id,
                 activation_details=None,
                 errors=errors,
                 context=context,
             )
 
     except Exception as e:
-        logger.error(f"Error activating signal {signal_id}: {e}")
+        logger.error(f"Error activating signal {signal_agent_segment_id}: {e}")
         from src.core.schemas import Error
 
         return ActivateSignalResponse(
-            signal_id=signal_id,
+            signal_id=signal_agent_segment_id,
             activation_details=None,
             errors=[Error(code="ACTIVATION_ERROR", message=str(e))],
             context=context,
@@ -375,7 +290,7 @@ async def _activate_signal_impl(
 
 
 async def activate_signal(
-    signal_id: str,
+    signal_agent_segment_id: str,
     campaign_id: str = None,
     media_buy_id: str = None,
     context: dict | None = None,  # payload-level context
@@ -386,7 +301,7 @@ async def activate_signal(
     MCP tool wrapper that delegates to the shared implementation.
 
     Args:
-        signal_id: Signal ID to activate
+        signal_agent_segment_id: Universal signal identifier to activate
         campaign_id: Optional campaign ID to activate signal for
         media_buy_id: Optional media buy ID to activate signal for
         context: Application level context per adcp spec
@@ -395,7 +310,7 @@ async def activate_signal(
     Returns:
         ToolResult with ActivateSignalResponse data
     """
-    response = await _activate_signal_impl(signal_id, campaign_id, media_buy_id, context, ctx)
+    response = await _activate_signal_impl(signal_agent_segment_id, campaign_id, media_buy_id, context, ctx)
     return ToolResult(content=str(response), structured_content=response)
 
 
@@ -415,7 +330,7 @@ async def get_signals_raw(req: GetSignalsRequest, ctx: Context | ToolContext | N
 
 
 async def activate_signal_raw(
-    signal_id: str,
+    signal_agent_segment_id: str,
     campaign_id: str = None,
     media_buy_id: str = None,
     context: dict | None = None,  # payload-level context
@@ -426,7 +341,7 @@ async def activate_signal_raw(
     Delegates to the shared implementation.
 
     Args:
-        signal_id: Signal ID to activate
+        signal_agent_segment_id: Universal signal identifier to activate
         campaign_id: Optional campaign ID to activate signal for
         media_buy_id: Optional media buy ID to activate signal for
         context: Application level context per adcp spec
@@ -435,4 +350,4 @@ async def activate_signal_raw(
     Returns:
         ActivateSignalResponse with activation status
     """
-    return await _activate_signal_impl(signal_id, campaign_id, media_buy_id, context, ctx)
+    return await _activate_signal_impl(signal_agent_segment_id, campaign_id, media_buy_id, context, ctx)

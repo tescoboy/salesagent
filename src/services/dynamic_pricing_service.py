@@ -8,8 +8,9 @@ Uses historical GAM reporting data aggregated by country + creative format.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+from adcp import FormatId
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
@@ -56,7 +57,7 @@ class DynamicPricingService:
         )
 
         # Get recent metrics (last 30 days)
-        cutoff_date = datetime.now().date() - timedelta(days=30)
+        cutoff_date = datetime.now(UTC).date() - timedelta(days=30)
 
         for product in products:
             try:
@@ -94,7 +95,7 @@ class DynamicPricingService:
             # Pydantic validation may return dict, object, or string depending on context
             if isinstance(format_id, dict):
                 format_id_str = format_id.get("id", "")
-            elif hasattr(format_id, "id"):
+            elif isinstance(format_id, FormatId):
                 format_id_str = format_id.id
             else:
                 format_id_str = str(format_id)
@@ -268,7 +269,7 @@ class DynamicPricingService:
 
             new_option = PricingOption(
                 pricing_option_id=f"{product.product_id}_dynamic_cpm",
-                pricing_model=PricingModel.CPM,
+                pricing_model=PricingModel.cpm,
                 floor_price=floor_cpm,  # V3: floor moved to top-level
                 currency=pricing.get("currency", "USD"),
                 price_guidance=price_guidance_obj,

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
+from adcp.types.generated_poc.enums.creative_action import CreativeAction
 from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
@@ -354,7 +355,7 @@ class TestCreativeLifecycleMCP:
             if isinstance(creative_item, dict):
                 assert creative_item.get("action") == "updated"
             else:
-                assert creative_item.action == "updated"
+                assert creative_item.action == CreativeAction.updated
 
             # Verify database update
             with get_db_session() as session:
@@ -470,9 +471,9 @@ class TestCreativeLifecycleMCP:
                     action = c.get("action")
                 else:
                     action = getattr(c, "action", None)
-                if action == "created":
+                if action in ("created", CreativeAction.created):
                     created_count += 1
-                elif action == "failed":
+                elif action in ("failed", CreativeAction.failed):
                     failed_count += 1
             assert created_count == 1, f"Expected 1 created, got {created_count}. Creatives: {response.creatives}"
             assert failed_count == 1, f"Expected 1 failed, got {failed_count}. Creatives: {response.creatives}"
@@ -1220,15 +1221,17 @@ class TestCreativeLifecycleMCP:
                 ctx=mock_context,
             )
 
-            # Verify response (domain response doesn't have status field)
-            # Note: media_buy_id may be transformed by naming template (e.g., "buy_PO-TEST-123")
-            # Debug: print response to understand failures
-            print(f"DEBUG create_media_buy response: {response}")
-            if "errors" in response:
-                print(f"DEBUG errors: {response['errors']}")
-            assert "media_buy_id" in response, f"Expected media_buy_id in response, got: {response.keys()}"
-            assert response["media_buy_id"]  # Just verify it exists
-            actual_media_buy_id = response["media_buy_id"]
+            # Verify response — create_media_buy_raw returns CreateMediaBuyResult
+            # which supports tuple unpacking: (domain_response, status)
+            domain_response, status = response
+            print(f"DEBUG create_media_buy response: {domain_response}")
+            if hasattr(domain_response, "errors") and domain_response.errors:
+                print(f"DEBUG errors: {domain_response.errors}")
+            assert hasattr(domain_response, "media_buy_id"), (
+                f"Expected CreateMediaBuySuccess, got: {type(domain_response).__name__}"
+            )
+            assert domain_response.media_buy_id  # Just verify it exists
+            actual_media_buy_id = domain_response.media_buy_id
             # Protocol envelope adds status field - domain response just has media_buy_id
 
             # Verify creative assignments were created in database

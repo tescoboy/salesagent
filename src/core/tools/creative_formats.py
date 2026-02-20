@@ -212,9 +212,7 @@ def _list_creative_formats_impl(
         # Extract the 'id' field from each FormatId object
         format_ids_set = {fmt.id for fmt in req.format_ids}
         # Compare format_id.id (handle both FormatId objects and strings)
-        formats = [
-            f for f in formats if (f.format_id.id if hasattr(f.format_id, "id") else f.format_id) in format_ids_set
-        ]
+        formats = [f for f in formats if f.format_id.id in format_ids_set]
 
     # Helper functions to extract properties from Format structure per AdCP spec
     def is_format_responsive(f) -> bool:
@@ -255,14 +253,14 @@ def _list_creative_formats_impl(
             # Handle both individual assets and repeatable groups
             asset_type = getattr(asset_req, "asset_type", None)
             if asset_type:
-                types.add(asset_type.value if hasattr(asset_type, "value") else str(asset_type))
+                types.add(str(asset_type))
             # For repeatable groups, check nested assets
             assets = getattr(asset_req, "assets", None)
             if assets:
                 for asset in assets:
                     at = getattr(asset, "asset_type", None)
                     if at:
-                        types.add(at.value if hasattr(at, "value") else str(at))
+                        types.add(str(at))
         return types
 
     # Filter by is_responsive (AdCP filter)
@@ -278,7 +276,7 @@ def _list_creative_formats_impl(
     # Filter by asset_types - formats must support at least one of the requested types
     if req.asset_types:
         # Normalize requested asset types to string values for comparison
-        requested_types = {at.value if hasattr(at, "value") else at for at in req.asset_types}
+        requested_types = {str(at) for at in req.asset_types}
         formats = [f for f in formats if get_format_asset_types(f) & requested_types]
 
     # Filter by dimension constraints
@@ -370,8 +368,6 @@ def list_creative_formats(
         # FastMCP already coerced JSON inputs to these types
         type_str = type.value if type else None
         asset_types_strs = [at.value for at in asset_types] if asset_types else None
-        context_dict = context.model_dump(mode="json") if context else None
-
         req = ListCreativeFormatsRequest(
             type=type_str,
             format_ids=format_ids,
@@ -382,7 +378,7 @@ def list_creative_formats(
             max_width=max_width,
             min_height=min_height,
             max_height=max_height,
-            context=context_dict,
+            context=context,
         )
     except ValidationError as e:
         raise ToolError(format_validation_error(e, context="list_creative_formats request")) from e

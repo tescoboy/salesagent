@@ -10,7 +10,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from adcp import BrandManifest, ProductFilters
+from adcp import BrandManifest, FormatId, ProductFilters
 from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp import Product as LibraryProduct
 from adcp.types import PushNotificationConfig
@@ -28,7 +28,7 @@ from src.core.audit_logger import get_audit_logger
 from src.core.auth import get_principal_from_context, get_principal_object
 from src.core.config_loader import set_current_tenant
 from src.core.database.database_session import get_db_session
-from src.core.product_conversion import add_v2_compat_to_products
+from src.core.product_conversion import add_v2_compat_to_products, needs_v2_compat
 from src.core.schema_helpers import create_get_products_request
 from src.core.schemas import (
     GetProductsResponse,
@@ -181,32 +181,23 @@ async def _get_products_impl(
     # Get the Principal object with ad server mappings
     principal = get_principal_object(principal_id) if principal_id else None
 
-    # Handle RootModel wrappers for brand_manifest (e.g., BrandManifestReference wraps BrandManifest)
-    # adcp library uses RootModel for union types, so we need to unwrap
-    # This unwrapped value is used for both offering extraction and policy checks
+    # Unwrap BrandManifestReference (RootModel[BrandManifest | AnyUrl]) to inner value.
+    # After unwrapping, brand_manifest_unwrapped is BrandManifest, AnyUrl, or None.
     brand_manifest_unwrapped: Any = None
     if req.brand_manifest:
-        brand_manifest_unwrapped = req.brand_manifest
-        if hasattr(brand_manifest_unwrapped, "root"):
-            brand_manifest_unwrapped = brand_manifest_unwrapped.root
+        brand_manifest_unwrapped = req.brand_manifest.root
 
-    # Extract offering text from brand_manifest
+    # Extract offering text from brand_manifest (BrandManifest | AnyUrl)
     offering = None
     if brand_manifest_unwrapped:
-        if isinstance(brand_manifest_unwrapped, str):
-            # brand_manifest is a URL string - use it as-is for now
+        if isinstance(brand_manifest_unwrapped, BrandManifest):
+            if brand_manifest_unwrapped.name:
+                offering = brand_manifest_unwrapped.name
+            elif brand_manifest_unwrapped.url:
+                offering = f"Brand at {brand_manifest_unwrapped.url}"
+        else:
+            # AnyUrl — use the URL string
             offering = f"Brand at {brand_manifest_unwrapped}"
-        elif hasattr(brand_manifest_unwrapped, "__str__") and str(brand_manifest_unwrapped).startswith("http"):
-            # brand_manifest is AnyUrl object from Pydantic
-            offering = f"Brand at {brand_manifest_unwrapped}"
-        # brand_manifest is a BrandManifest object or dict
-        # Per AdCP spec: either name OR url is required
-        elif hasattr(brand_manifest_unwrapped, "name") and brand_manifest_unwrapped.name:
-            offering = brand_manifest_unwrapped.name
-        elif hasattr(brand_manifest_unwrapped, "url") and brand_manifest_unwrapped.url:
-            offering = f"Brand at {brand_manifest_unwrapped.url}"
-        elif isinstance(brand_manifest_unwrapped, dict):
-            offering = brand_manifest_unwrapped.get("name") or brand_manifest_unwrapped.get("url", "")
 
     # Check brand_manifest_policy from tenant settings
     brand_manifest_policy = tenant.get("brand_manifest_policy", "require_auth")
@@ -486,9 +477,11 @@ async def _get_products_impl(
                         format_obj = get_format_by_id(format_id)
                         if format_obj:
                             product_format_types.add(format_obj.type)
-                    elif hasattr(format_id, "type"):
-                        # Already a Format object
-                        product_format_types.add(format_id.type)
+                    elif isinstance(format_id, FormatId):
+                        # FormatId object — look up the format for its type
+                        format_obj = get_format_by_id(format_id.id)
+                        if format_obj:
+                            product_format_types.add(format_obj.type)
 
                 if not any(fmt_type in product_format_types for fmt_type in req.filters.format_types):
                     continue
@@ -505,8 +498,7 @@ async def _get_products_impl(
                         dict_id = format_id.get("id")
                         if dict_id is not None:
                             product_format_ids.add(dict_id)
-                    elif hasattr(format_id, "id"):
-                        # FormatId object (has .id attribute, not .format_id)
+                    elif isinstance(format_id, FormatId):
                         product_format_ids.add(format_id.id)
 
                 # req.filters.format_ids contains FormatId objects, extract .id from them
@@ -514,8 +506,7 @@ async def _get_products_impl(
                 for fmt_id in req.filters.format_ids:
                     if isinstance(fmt_id, str):
                         request_format_ids.add(fmt_id)
-                    elif hasattr(fmt_id, "id"):
-                        # FormatId object
+                    elif isinstance(fmt_id, FormatId):
                         request_format_ids.add(fmt_id.id)
                     elif isinstance(fmt_id, dict):
                         dict_id = fmt_id.get("id")
@@ -536,8 +527,7 @@ async def _get_products_impl(
                         format_id_str = format_id
                     elif isinstance(format_id, dict):
                         format_id_str = format_id.get("id")
-                    elif hasattr(format_id, "id"):
-                        # FormatId object (has .id attribute, not .format_id)
+                    elif isinstance(format_id, FormatId):
                         format_id_str = format_id.id
 
                     if format_id_str and not format_id_str.startswith(("display_", "video_", "audio_", "native_")):
@@ -554,7 +544,7 @@ async def _get_products_impl(
 
                 # Check if product has countries field (from database)
                 # Our extended Product may have a countries field
-                if hasattr(product, "countries") and product.countries:
+                if product.countries:
                     product_countries.update(product.countries)
 
                 # If no countries specified, product is considered available everywhere
@@ -562,14 +552,10 @@ async def _get_products_impl(
                     # Product has no country restrictions, matches any country filter
                     pass
                 else:
-                    # Extract country codes from filter (Country is a RootModel[str])
+                    # Extract country codes from filter (Country is RootModel[str])
                     request_countries: set[str] = set()
                     for country in req.filters.countries:
-                        if isinstance(country, str):
-                            request_countries.add(country.upper())
-                        elif hasattr(country, "root"):
-                            # RootModel - access .root for the string value
-                            request_countries.add(country.root.upper())
+                        request_countries.add(country.root.upper())
 
                     # Check if any requested country is in the product's countries
                     if not product_countries.intersection(request_countries):
@@ -579,17 +565,13 @@ async def _get_products_impl(
             if req.filters.channels:
                 # Check if product has channels field
                 product_channels: set[str] = set()
-                if hasattr(product, "channels") and product.channels:
+                if product.channels:
                     product_channels = {c.lower() for c in product.channels}
 
                 # Extract channel values from filter (enum values)
                 request_channels: set[str] = set()
                 for channel in req.filters.channels:
-                    if isinstance(channel, str):
-                        request_channels.add(channel.lower())
-                    elif hasattr(channel, "value"):
-                        # Enum - access .value
-                        request_channels.add(channel.value.lower())
+                    request_channels.add(channel.value.lower())
 
                 if product_channels:
                     # Product has explicit channels - must have at least one match
@@ -785,6 +767,7 @@ async def _get_products_impl(
 async def get_products(
     brand_manifest: BrandManifest | None = None,
     brief: str = "",
+    adcp_version: str = "1.0.0",
     filters: ProductFilters | None = None,
     push_notification_config: PushNotificationConfig | None = None,
     context: ContextObject | None = None,  # payload-level context
@@ -797,6 +780,7 @@ async def get_products(
     Args:
         brand_manifest: Brand information following AdCP BrandManifest schema
         brief: Brief description of the advertising campaign or requirements (optional)
+        adcp_version: Client's AdCP version (default: 1.0.0). V3+ clients get clean responses.
         filters: Structured filters for product discovery (optional)
         context: Application level context per adcp spec
         ctx: FastMCP context (automatically provided)
@@ -825,9 +809,9 @@ async def get_products(
     response = await _get_products_impl(req, ctx)
 
     # Return ToolResult with human-readable text and structured data
-    # Apply v2.x backward-compat fields to pricing_options for older clients
-    response_dict = response.model_dump()
-    if "products" in response_dict:
+    response_dict = response.model_dump(mode="json")
+    # Apply v2.x backward-compat fields only for pre-3.0 clients
+    if needs_v2_compat(adcp_version) and "products" in response_dict:
         response_dict["products"] = add_v2_compat_to_products(response_dict["products"])
     return ToolResult(content=str(response), structured_content=response_dict)
 
@@ -835,7 +819,6 @@ async def get_products(
 async def get_products_raw(
     brief: str,
     brand_manifest: dict[str, Any] | None = None,
-    adcp_version: str = "1.0.0",
     min_exposures: int | None = None,
     filters: dict | None = None,
     strategy_id: str | None = None,
@@ -845,13 +828,13 @@ async def get_products_raw(
     """Get available products matching the brief.
 
     Raw function without @mcp.tool decorator for A2A server use.
-    Aligned with adcp v1.2.1 spec.
+    Returns a clean GetProductsResponse model — v2 compat is applied
+    at the caller's boundary (A2A handler), not here.
 
     Args:
         brief: Brief description of the advertising campaign or requirements
         brand_manifest: Brand information as dict following AdCP BrandManifest schema.
                        Example: {"name": "Acme", "url": "https://acme.com"}
-        adcp_version: AdCP schema version for this request (default: 1.0.0)
         min_exposures: Minimum impressions needed for measurement validity (optional)
         filters: Structured filters for product discovery (optional)
         strategy_id: Optional strategy ID for linking operations (optional)

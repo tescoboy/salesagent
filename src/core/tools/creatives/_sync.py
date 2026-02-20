@@ -8,6 +8,7 @@ from typing import Any
 from adcp import PushNotificationConfig
 from adcp.types.generated_poc.core.context import ContextObject
 from adcp.types.generated_poc.core.creative_asset import CreativeAsset
+from adcp.types.generated_poc.enums.creative_action import CreativeAction
 from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 from pydantic import BaseModel
@@ -159,7 +160,7 @@ def _sync_creatives_impl(
                     creative_data.setdefault("assets", {})
                     creative = CreativeAsset(**creative_data)
                 else:
-                    creative = CreativeAsset(**raw_creative.model_dump())
+                    creative = CreativeAsset.model_validate(raw_creative, from_attributes=True)
 
                 # Validate the creative against schema and business rules
                 try:
@@ -222,7 +223,7 @@ def _sync_creatives_impl(
                         )
 
                         # Handle failed updates
-                        if update_result.action == "failed":
+                        if update_result.action == CreativeAction.failed:
                             failed_creatives.append(
                                 {
                                     "creative_id": existing_creative.creative_id,
@@ -235,7 +236,7 @@ def _sync_creatives_impl(
                             continue
 
                         # Track counts
-                        if update_result.action == "updated":
+                        if update_result.action == CreativeAction.updated:
                             updated_count += 1
                         else:
                             unchanged_count += 1
@@ -275,7 +276,7 @@ def _sync_creatives_impl(
                         )
 
                         # Handle failed creates
-                        if create_result.action == "failed":
+                        if create_result.action == CreativeAction.failed:
                             creative_id = creative.creative_id or "unknown"
                             failed_creatives.append(
                                 {
@@ -397,10 +398,8 @@ def _sync_creatives_impl(
         message += f", {len(creatives_needing_approval)} require approval"
 
     # Build AdCP-compliant response (per official spec)
-    # SyncCreativesResponse.context is dict[str, Any] | None — serialize model if needed
-    context_dict = context.model_dump() if isinstance(context, BaseModel) else context
-    return SyncCreativesResponse(
+    return SyncCreativesResponse(  # type: ignore[call-arg]  # RootModel auto-wrapping accepts variant kwargs
         creatives=results,
         dry_run=dry_run,
-        context=context_dict,
+        context=context,
     )
