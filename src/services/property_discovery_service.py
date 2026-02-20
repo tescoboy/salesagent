@@ -17,6 +17,7 @@ from adcp import (
     get_all_properties,
     get_all_tags,
 )
+from adcp.adagents import get_properties_by_agent, normalize_url
 from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
@@ -36,7 +37,11 @@ class PropertyDiscoveryService:
     """
 
     async def sync_properties_from_adagents(
-        self, tenant_id: str, publisher_domains: list[str] | None = None, dry_run: bool = False
+        self,
+        tenant_id: str,
+        publisher_domains: list[str] | None = None,
+        dry_run: bool = False,
+        agent_url: str | None = None,
     ) -> dict[str, Any]:
         """Fetch properties and tags from publisher adagents.json files.
 
@@ -45,6 +50,9 @@ class PropertyDiscoveryService:
             publisher_domains: List of domains to sync. If None, syncs all unique domains
                               from existing AuthorizedProperty records.
             dry_run: If True, fetch and process but don't commit to database
+            agent_url: Our agent's URL. When provided, uses get_properties_by_agent()
+                      which handles all authorization types (property_ids, property_tags,
+                      inline properties). Without this, only inline properties are found.
 
         Returns:
             Dict with sync stats: {
@@ -139,13 +147,21 @@ class PropertyDiscoveryService:
                     # others list them per-agent in "authorized_agents[].properties"
                     all_properties_from_file = adagents_data.get("properties", [])
 
-                    # Check if any agent has no property restrictions (means access to ALL properties)
+                    # Check if the relevant agent has no property restrictions (means access to ALL properties)
                     # Per AdCP spec: if property_ids/property_tags/properties/publisher_properties
                     # are all missing/empty, agent has access to ALL properties from this publisher
+                    #
+                    # When agent_url is provided, only check OUR agent — another agent being
+                    # unrestricted doesn't grant us access to all properties.
                     authorized_agents = adagents_data.get("authorized_agents", [])
                     has_unrestricted_agent = False
                     for agent in authorized_agents:
                         if not isinstance(agent, dict):
+                            continue
+                        # When agent_url is provided, only check the matching agent
+                        # Use normalize_url for protocol-agnostic comparison (same as
+                        # get_properties_by_agent in the adcp library)
+                        if agent_url and normalize_url(agent.get("url", "")) != normalize_url(agent_url):
                             continue
                         # Check if ALL authorization fields are missing/empty
                         has_property_ids = bool(agent.get("property_ids"))
@@ -162,8 +178,17 @@ class PropertyDiscoveryService:
                             break
 
                     # Extract properties using adcp library
-                    # This gets properties explicitly listed in authorized_agents[].properties
-                    properties_from_agents = get_all_properties(adagents_data)
+                    # When agent_url is provided, use get_properties_by_agent() which
+                    # handles all authorization types: property_ids, property_tags,
+                    # inline properties, and publisher_properties
+                    if agent_url:
+                        properties_from_agents = get_properties_by_agent(adagents_data, agent_url)
+                        # Filter out publisher_properties selectors (cross-domain refs
+                        # without property_type - these are unresolved references)
+                        properties_from_agents = [p for p in properties_from_agents if p.get("property_type")]
+                    else:
+                        # Fallback: only gets inline agent.properties arrays
+                        properties_from_agents = get_all_properties(adagents_data)
 
                     # If we have an unrestricted agent AND top-level properties exist,
                     # sync all top-level properties (since agent has access to all of them)
@@ -174,9 +199,40 @@ class PropertyDiscoveryService:
                         )
                         # Use top-level properties as the authoritative list
                         properties = all_properties_from_file
-                    else:
-                        # Use per-agent properties (standard case)
+                    elif properties_from_agents:
                         properties = properties_from_agents
+                    else:
+                        properties = []
+
+                    # Filter properties to only those belonging to this publisher domain.
+                    # An adagents.json may list properties for many domains (e.g., Prisma Media
+                    # lists capital.fr, geo.fr, etc. in one file). When syncing for "capital.fr",
+                    # we should only store the property whose domain identifier matches.
+                    # Properties without a domain identifier (e.g., mobile apps) are kept.
+                    if properties:
+                        filtered = []
+                        for prop in properties:
+                            identifiers = prop.get("identifiers", [])
+                            domain_identifiers = [
+                                ident.get("value", "") for ident in identifiers if ident.get("type") == "domain"
+                            ]
+                            if not domain_identifiers:
+                                # No domain identifier (e.g., mobile_app) - keep it
+                                filtered.append(prop)
+                            elif domain in domain_identifiers:
+                                # Domain matches this publisher
+                                filtered.append(prop)
+                            else:
+                                logger.debug(
+                                    f"Skipping property {prop.get('name', 'unknown')} - "
+                                    f"domain {domain_identifiers} doesn't match publisher {domain}"
+                                )
+                        if len(filtered) != len(properties):
+                            logger.info(
+                                f"Filtered {len(properties)} properties to {len(filtered)} "
+                                f"matching publisher domain {domain}"
+                            )
+                        properties = filtered
 
                     stats["properties_found"] += len(properties)
                     logger.info(f"Found {len(properties)} properties from {domain}")
@@ -491,7 +547,11 @@ class PropertyDiscoveryService:
         return True
 
     def sync_properties_from_adagents_sync(
-        self, tenant_id: str, publisher_domains: list[str] | None = None, dry_run: bool = False
+        self,
+        tenant_id: str,
+        publisher_domains: list[str] | None = None,
+        dry_run: bool = False,
+        agent_url: str | None = None,
     ) -> dict[str, Any]:
         """Synchronous wrapper for async sync_properties_from_adagents.
 
@@ -499,11 +559,14 @@ class PropertyDiscoveryService:
             tenant_id: Tenant ID
             publisher_domains: List of domains to sync (optional)
             dry_run: If True, fetch and process but don't commit
+            agent_url: Our agent's URL for property resolution (optional)
 
         Returns:
             Sync stats dictionary
         """
-        return asyncio.run(self.sync_properties_from_adagents(tenant_id, publisher_domains, dry_run))
+        return asyncio.run(
+            self.sync_properties_from_adagents(tenant_id, publisher_domains, dry_run, agent_url=agent_url)
+        )
 
 
 def get_property_discovery_service() -> PropertyDiscoveryService:
