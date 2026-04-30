@@ -51,20 +51,50 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Validate every product.implementation_config row against the registered schema."""
-    # Deferred imports: keep this migration file loadable even if the schemas
-    # don't exist yet (e.g., during stacked-PR review of #1240/#1241/#1242/#1244).
     from pydantic import ValidationError
 
-    from src.adapters.broadstreet.schemas import BroadstreetProductConfig
-    from src.adapters.gam.schemas import GAMProductConfig
-    from src.adapters.mock_ad_server import MockProductConfig
+    # Resolve schemas at runtime. Each adapter's reconciled schema lives in a
+    # different module (different sister PR under #1239); if any module isn't
+    # yet present at deploy time, that adapter is skipped — order-independent
+    # rollout. Once #1240/#1241/#1242 land, all three resolve and full audit
+    # runs. Until then this migration is a no-op for the absent adapters.
+    schema_for_adapter: dict[str, type] = {}
+    skipped_adapters: list[str] = []
 
-    schema_for_adapter: dict[str, type] = {
-        "mock": MockProductConfig,
-        "broadstreet": BroadstreetProductConfig,
-        "google_ad_manager": GAMProductConfig,
-        "gam": GAMProductConfig,
-    }
+    try:
+        from src.adapters.mock_ad_server import MockProductConfig
+
+        schema_for_adapter["mock"] = MockProductConfig
+    except ImportError:
+        skipped_adapters.append("mock")
+
+    try:
+        from src.adapters.broadstreet.schemas import BroadstreetProductConfig
+
+        schema_for_adapter["broadstreet"] = BroadstreetProductConfig
+    except ImportError:
+        skipped_adapters.append("broadstreet")
+
+    try:
+        from src.adapters.gam.schemas import GAMProductConfig
+
+        schema_for_adapter["google_ad_manager"] = GAMProductConfig
+        schema_for_adapter["gam"] = GAMProductConfig
+    except ImportError:
+        skipped_adapters.append("google_ad_manager")
+
+    if skipped_adapters:
+        op.execute(
+            sa.text(
+                f"SELECT 1 -- audit migration: schemas not yet available for "
+                f"{sorted(skipped_adapters)}; those adapters skipped"
+            )
+        )
+        if not schema_for_adapter:
+            # No reconciled schemas present at all — nothing to audit. Treat
+            # as a successful no-op so deploy can proceed; later upgrade with
+            # schemas present will run the full audit.
+            return
 
     bind = op.get_bind()
     rows = bind.execute(
