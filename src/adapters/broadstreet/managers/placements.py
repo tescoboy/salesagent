@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from src.adapters.broadstreet.client import BroadstreetClient
-from src.adapters.broadstreet.config_schema import parse_implementation_config
+from src.adapters.broadstreet.schemas import parse_implementation_config
 
 logger = logging.getLogger(__name__)
 

@@ -24,7 +24,6 @@ from src.adapters.base import (
     TargetingCapabilities,
 )
 from src.adapters.broadstreet.client import BroadstreetClient
-from src.adapters.broadstreet.config_schema import parse_implementation_config
 from src.adapters.broadstreet.managers import (
     BroadstreetAdvertisementManager,
     BroadstreetCampaignManager,
@@ -32,7 +31,11 @@ from src.adapters.broadstreet.managers import (
     BroadstreetPlacementManager,
     BroadstreetWorkflowManager,
 )
-from src.adapters.broadstreet.schemas import BroadstreetConnectionConfig, BroadstreetProductConfig
+from src.adapters.broadstreet.schemas import (
+    BroadstreetConnectionConfig,
+    BroadstreetProductConfig,
+    parse_implementation_config,
+)
 from src.adapters.constants import REQUIRED_UPDATE_ACTIONS
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
