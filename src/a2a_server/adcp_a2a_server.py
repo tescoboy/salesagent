@@ -98,6 +98,8 @@ from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
 
+ADCP_EXTENSION_SCHEMA_URI = "https://adcontextprotocol.org/schemas/2.5.0/protocols/adcp-extension.json"
+
 
 def _adcp_to_a2a_error(exc: AdCPError) -> InvalidParamsError | InvalidRequestError | InternalError:
     """Translate AdCPError to an A2A SDK error type preserving semantics.
@@ -2109,7 +2111,7 @@ class AdCPRequestHandler(RequestHandler):
                     "start_time": "2025-02-01T00:00:00Z",
                     "end_time": "2025-02-28T23:59:59Z",
                 },
-                "documentation": "https://adcontextprotocol.org/docs/",
+                "documentation": "https://docs.adcontextprotocol.org/",
             }
         except Exception as e:
             logger.error(f"Error in media buy creation: {e}")
@@ -2134,11 +2136,9 @@ def create_agent_card() -> AgentCard:
     sales_agent_version = get_version()
 
     # Create AdCP extension (AdCP 2.5 spec)
-    # As of adcp 2.12.1, get_adcp_version() returns the protocol version (e.g., "2.5.0")
-    # Previously it returned the schema version (e.g., "v1"), but this was fixed upstream
     protocol_version = get_adcp_version()
     adcp_extension = AgentExtension(
-        uri=f"https://adcontextprotocol.org/schemas/{protocol_version}/protocols/adcp-extension.json",
+        uri=ADCP_EXTENSION_SCHEMA_URI,
         description="AdCP protocol version and supported domains",
         params={
             "adcp_version": protocol_version,
@@ -2265,7 +2265,7 @@ def create_agent_card() -> AgentCard:
             # Note: legacy get_pricing/get_targeting removed - use get_products and get_adcp_capabilities instead
         ],
         url=server_url,
-        documentation_url="https://github.com/your-org/adcp-sales-agent",
+        documentation_url="https://github.com/prebid/salesagent",
     )
 
     return agent_card
