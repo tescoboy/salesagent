@@ -98,6 +98,10 @@ from src.services.protocol_webhook_service import get_protocol_webhook_service
 
 logger = logging.getLogger(__name__)
 
+# FIXME(upstream-adcp-extension-url): Pinned to 2.5.0 because upstream stopped
+# republishing /protocols/adcp-extension.json per-version after that release.
+# Restore dynamic interpolation when upstream publishes a per-version path
+# again or a stable /latest/ alias that resolves.
 ADCP_EXTENSION_SCHEMA_URI = "https://adcontextprotocol.org/schemas/2.5.0/protocols/adcp-extension.json"
 
 
