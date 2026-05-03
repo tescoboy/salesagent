@@ -765,7 +765,7 @@ class CreativeAgentRegistry:
                     preview_data = json.loads(preview_data)
                 return preview_data
 
-            return {}
+            raise AdCPAdapterError(f"No parseable preview result in MCP response from {agent_url}")
 
     async def build_creative(
         self,
@@ -828,7 +828,7 @@ class CreativeAgentRegistry:
                     creative_data = json.loads(creative_data)
                 return creative_data
 
-            return {}
+            raise AdCPAdapterError(f"No parseable build result in MCP response from {agent_url}")
 
 
 # Global registry instance

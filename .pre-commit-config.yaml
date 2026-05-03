@@ -272,15 +272,16 @@ repos:
       - id: check-ast
       - id: debug-statements
 
-  - repo: https://github.com/psf/black
-    rev: 25.1.0
-    hooks:
-      - id: black
-        language_version: python3
-
+  # Formatting + linting via ruff. Black was removed because it disagreed
+  # with ruff format on multi-line dict-with-assignment wrapping — the two
+  # would oscillate on every commit, breaking `make quality` (which runs
+  # `ruff format --check`). ruff-format is the project's source of truth
+  # for formatting; running it as a pre-commit hook keeps commits aligned
+  # with the make quality gate.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.10
     hooks:
+      - id: ruff-format
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
 
