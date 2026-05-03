@@ -71,4 +71,11 @@ def _add_v2_compat_keys(pricing_option: dict[str, Any]) -> None:
     if fixed_price is not None:
         pricing_option["rate"] = fixed_price
     if floor_price is not None:
-        pricing_option.setdefault("price_guidance", {})["floor"] = floor_price
+        # Defensive: callers normally pass model_dump(mode="json") output, which
+        # omits None-valued optional fields, so price_guidance is either absent
+        # or a real dict. A user-constructed dict could carry an explicit None,
+        # which `setdefault` would return verbatim and fail on item assignment.
+        # Coalesce explicitly to avoid that contract surprise.
+        price_guidance = pricing_option.get("price_guidance") or {}
+        pricing_option["price_guidance"] = price_guidance
+        price_guidance["floor"] = floor_price

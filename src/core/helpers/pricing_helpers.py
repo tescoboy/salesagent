@@ -59,11 +59,11 @@ def pricing_option_is_priced(pricing_option: Any) -> bool:
     if isinstance(pricing_option, dict):
         return any(pricing_option.get(field) is not None for field in rate_bearing_fields)
 
-    # adcp 2.14.0+ wraps pricing options in PricingOption(RootModel) — unwrap
-    # explicitly via hasattr (not `or`) to avoid the truthiness pitfall when
-    # `.root` is a legitimately falsy value. The defensive `hasattr` is
-    # required here because this helper accepts five heterogeneous input
-    # shapes (dict, library RootModel, library typed option, internal Pydantic
-    # PricingOption, ORM model) — the caller's type is genuinely unknown.
+    # The defensive `hasattr` is required here (and is the documented exception
+    # to the rootmodel-access lint rule) because this helper accepts five
+    # heterogeneous input shapes — dict, adcp library RootModel, library typed
+    # option, internal Pydantic PricingOption, ORM model — and the caller's
+    # type is genuinely unknown. `hasattr` rather than `or` also avoids the
+    # truthiness pitfall if `.root` is ever a legitimately falsy value.
     target = pricing_option.root if hasattr(pricing_option, "root") else pricing_option  # noqa: rootmodel
     return any(getattr(target, field, None) is not None for field in rate_bearing_fields)

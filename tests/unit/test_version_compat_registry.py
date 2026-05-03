@@ -123,6 +123,35 @@ class TestAddGetProductsV2Compat:
         result = add_get_products_v2_compat(response, "2.0.0")
         assert result is response
 
+    def test_handles_explicit_none_price_guidance_defensively(self) -> None:
+        """A user-constructed dict with explicit ``price_guidance: None`` doesn't crash.
+
+        Production callers pass ``model_dump(mode="json")`` output, which omits
+        None-valued optional fields entirely — so this shape isn't currently
+        produced. But the function's contract is "operate on any v3-shaped
+        dict", so we coalesce explicitly rather than assuming model_dump's
+        omission semantics.
+        """
+        response = {
+            "products": [
+                {
+                    "pricing_options": [
+                        {
+                            "pricing_option_id": "x",
+                            "pricing_model": "cpm",
+                            "currency": "USD",
+                            "floor_price": 5.0,
+                            "price_guidance": None,
+                        }
+                    ]
+                }
+            ]
+        }
+        result = add_get_products_v2_compat(response, "2.0.0")
+        po = result["products"][0]["pricing_options"][0]
+        assert po["price_guidance"] == {"floor": 5.0}
+        assert po["is_fixed"] is False
+
     def test_multiple_products_each_get_v2_keys(self) -> None:
         """Every product in the list is walked, not just the first."""
         response = _make_response_dict(fixed_price=5.0)
