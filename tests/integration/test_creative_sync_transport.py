@@ -1084,8 +1084,22 @@ class TestStaticPreviewFailed:
             assert_envelope(result, transport)
             creative_result = result.payload.creatives[0]
             assert creative_result.action == CreativeAction.failed
+            # Error must surface either the new agent-failure message (preview_creative
+            # raised AdCPAdapterError → outer handler at _processing.py:739 wraps as
+            # "Creative agent unreachable or validation error: ...") or the legacy
+            # "no previews / no media_url" path (still hit when preview_creative
+            # legitimately returns previews=[] without raising).
             assert any(
-                "no previews" in e.lower() or "no media_url" in e.lower() for e in (creative_result.errors or [])
+                any(
+                    keyword in e.lower()
+                    for keyword in (
+                        "no previews",
+                        "no media_url",
+                        "unreachable",
+                        "no parseable preview",
+                    )
+                )
+                for e in (creative_result.errors or [])
             )
 
 
