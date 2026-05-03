@@ -49,10 +49,13 @@ class TestSyncCreativesAccountCoercion:
         return captured.get("account")
 
     def test_dict_account_is_wrapped_in_account_reference(self):
-        """A raw dict account is coerced to AccountReference — .root no longer raises."""
+        """A raw dict account is coerced to AccountReference with field values preserved."""
         account_dict = {"brand": {"domain": "example.com"}, "operator": "op-1", "sandbox": False}
         result = self._call_handler_with_account(account_dict)
         assert isinstance(result, LibraryAccountReference)
+        assert result.root.brand.domain == "example.com"
+        assert result.root.operator == "op-1"
+        assert result.root.sandbox is False
 
     def test_none_account_passes_through_as_none(self):
         """None account is passed through unchanged."""
@@ -60,9 +63,9 @@ class TestSyncCreativesAccountCoercion:
         assert result is None
 
     def test_already_typed_account_passes_through(self):
-        """An already-validated AccountReference is not double-wrapped."""
+        """An already-validated AccountReference is forwarded by identity, not re-validated."""
         typed = LibraryAccountReference.model_validate(
             {"brand": {"domain": "example.com"}, "operator": "op-1", "sandbox": False}
         )
         result = self._call_handler_with_account(typed)
-        assert isinstance(result, LibraryAccountReference)
+        assert result is typed
