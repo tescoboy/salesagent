@@ -3315,11 +3315,12 @@ async def _create_media_buy_impl(
                                                 f"continuing without format hints",
                                                 exc_info=True,
                                             )
-                                        if not format_spec:
-                                            logger.warning(
-                                                f"[AUTO-APPROVAL] Could not fetch format {creative.format} "
-                                                f"from {creative.agent_url}"
-                                            )
+                                        else:
+                                            if not format_spec:
+                                                logger.warning(
+                                                    f"[AUTO-APPROVAL] Could not fetch format {creative.format} "
+                                                    f"from {creative.agent_url}"
+                                                )
 
                                     # Extract URL and dimensions using shared helper
                                     url, width, height = extract_media_url_and_dimensions(creative_data, format_spec)
