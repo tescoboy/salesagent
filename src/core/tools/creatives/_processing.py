@@ -24,6 +24,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _handle_creative_agent_error(
+    e: AdCPAdapterError,
+    creative: CreativeAsset,
+    data: dict[str, Any],
+    *,
+    operation: str,
+    path: str,
+) -> None:
+    """Re-raise unless buyer supplied a fallback media_url; then log and return."""
+    has_media_url = bool(getattr(creative, "url", None) or data.get("url"))
+    if not has_media_url:
+        raise e
+    logger.warning(
+        f"[sync_creatives] Creative agent unreachable for {operation} ({path}): {e}; "
+        f"continuing with buyer-provided media_url"
+    )
+
+
 def _update_existing_creative(
     creative: CreativeAsset,
     existing_creative: Any,
@@ -244,14 +262,7 @@ def _update_existing_creative(
                                 )
                             )
                         except AdCPAdapterError as e:
-                            # Graceful degrade only if buyer provided their own media_url.
-                            has_media_url = bool(getattr(creative, "url", None) or data.get("url"))
-                            if not has_media_url:
-                                raise
-                            logger.warning(
-                                f"[sync_creatives] Creative agent unreachable for build (update): {e}; "
-                                f"continuing with buyer-provided media_url"
-                            )
+                            _handle_creative_agent_error(e, creative, data, operation="build", path="update")
                             build_result = None
 
                         # Store build result in data
@@ -357,14 +368,7 @@ def _update_existing_creative(
                             )
                         )
                     except AdCPAdapterError as e:
-                        # Graceful degrade only if buyer provided their own media_url.
-                        has_media_url = bool(getattr(creative, "url", None) or data.get("url"))
-                        if not has_media_url:
-                            raise
-                        logger.warning(
-                            f"[sync_creatives] Creative agent unreachable for preview (update): {e}; "
-                            f"continuing with buyer-provided media_url"
-                        )
+                        _handle_creative_agent_error(e, creative, data, operation="preview", path="update")
                         preview_result = None
 
                 # Extract preview data and store in data field
@@ -614,14 +618,7 @@ def _create_new_creative(
                             )
                         )
                     except AdCPAdapterError as e:
-                        # Graceful degrade only if buyer provided their own media_url.
-                        has_media_url = bool(getattr(creative, "url", None) or data.get("url"))
-                        if not has_media_url:
-                            raise
-                        logger.warning(
-                            f"[sync_creatives] Creative agent unreachable for build (new): {e}; "
-                            f"continuing with buyer-provided media_url"
-                        )
+                        _handle_creative_agent_error(e, creative, data, operation="build", path="new")
                         build_result = None
 
                     # Store build result
@@ -705,14 +702,7 @@ def _create_new_creative(
                             )
                         )
                     except AdCPAdapterError as e:
-                        # Graceful degrade only if buyer provided their own media_url.
-                        has_media_url = bool(getattr(creative, "url", None) or data.get("url"))
-                        if not has_media_url:
-                            raise
-                        logger.warning(
-                            f"[sync_creatives] Creative agent unreachable for preview (new): {e}; "
-                            f"continuing with buyer-provided media_url"
-                        )
+                        _handle_creative_agent_error(e, creative, data, operation="preview", path="new")
                         preview_result = None
 
                 # Extract preview data and store in data field
