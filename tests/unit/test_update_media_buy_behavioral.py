@@ -2584,7 +2584,8 @@ class TestUC003ExtPCancellation:
         """Buyer sends `canceled=true` alone; impl persists status=canceled
         and returns spec-shaped success.
 
-        Covers: UC-003-EXT-P-CANCEL-SUCCESS
+        Covers: UC-003-EXT-P-01
+        Covers: BR-RULE-080-01
         """
         _setup_cancel_mocks(standard_mocks)
         identity = _make_identity()
@@ -2616,7 +2617,7 @@ class TestUC003ExtPCancellation:
         `model_fields_set` discriminator, every constructed request would
         falsely report cancel intent.
 
-        Covers: UC-003-EXT-P-CANCEL-DEFAULT-QUIRK
+        Covers: UC-003-EXT-P-06
         """
         bare = UpdateMediaBuyRequest(media_buy_id="mb_x")
         assert bare.canceled is True, "library default makes the field always truthy"
@@ -2633,7 +2634,7 @@ class TestUC003ExtPCancellation:
         """Re-cancel of an already-canceled buy raises AdCPNotCancellableError
         (idempotent acceptance is NOT conformant per spec).
 
-        Covers: UC-003-EXT-P-RECANCEL-NOT-CANCELLABLE
+        Covers: UC-003-EXT-P-02
         """
         from src.core.exceptions import AdCPNotCancellableError
 
@@ -2651,7 +2652,7 @@ class TestUC003ExtPCancellation:
         """Updating a canceled buy with anything other than cancel raises
         AdCPInvalidStateError.
 
-        Covers: UC-003-EXT-P-PAUSE-CANCELED-INVALID-STATE
+        Covers: UC-003-EXT-P-03
         """
         from src.core.exceptions import AdCPInvalidStateError
 
@@ -2666,7 +2667,7 @@ class TestUC003ExtPCancellation:
         """Cancelling a completed buy raises AdCPInvalidStateError, not
         NOT_CANCELLABLE — the latter is reserved for re-cancel of canceled.
 
-        Covers: UC-003-EXT-P-CANCEL-COMPLETED-INVALID-STATE
+        Covers: UC-003-EXT-P-04
         """
         from src.core.exceptions import AdCPInvalidStateError
 
@@ -2682,7 +2683,7 @@ class TestUC003ExtPCancellation:
         `canceled` to prevent buyers from accidentally suggesting a reason
         for a non-cancel update.
 
-        Covers: UC-003-EXT-P-REASON-WITHOUT-CANCELED
+        Covers: UC-003-EXT-P-05
         """
         with pytest.raises(ValidationError):
             UpdateMediaBuyRequest(media_buy_id="mb_x", cancellation_reason="oops")
