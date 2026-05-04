@@ -739,6 +739,8 @@ class TestErrorCodeVocabularyConsistency:
         "ADAPTER_ERROR",  # HTTP 502 (salesagent extension)
         "CONFIGURATION_ERROR",  # HTTP 500 — decryption/config broken (salesagent extension)
         "SERVICE_UNAVAILABLE",  # adcp-req: Service/Infrastructure Errors
+        "INVALID_STATE",  # adcp-req: terminal-state enforcement (BR-RULE-080)
+        "NOT_CANCELLABLE",  # adcp-req: re-cancel of canceled buy (BR-RULE-080)
     }
 
     def test_all_exception_error_codes_are_canonical(self):

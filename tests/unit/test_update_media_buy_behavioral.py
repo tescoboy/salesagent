@@ -2600,17 +2600,25 @@ class TestUC003ExtPCancellation:
         assert result.status is not None and result.status.value == "canceled"
         # valid_actions is empty for terminal state
         assert result.valid_actions == []
-        # Repository .cancel() is the only path that writes the canceled status
-        standard_mocks["uow_instance"].media_buys.cancel.assert_called_once()
-        cancel_kwargs = standard_mocks["uow_instance"].media_buys.cancel.call_args.kwargs
-        assert cancel_kwargs["canceled_by"] == "buyer"
-        assert cancel_kwargs["reason"] == "Buyer no longer needs"
+        # Repository .cancel() is the only path that writes the canceled status.
+        # Use ANY for `when` (datetime.now) and assert_called_once_with for the
+        # other kwargs — no split assert_called_once + call_args inspection.
+        standard_mocks["uow_instance"].media_buys.cancel.assert_called_once_with(
+            "mb_cancel_test", when=ANY, canceled_by="buyer", reason="Buyer no longer needs"
+        )
         # Assignments are soft-released
-        standard_mocks["uow_instance"].assignments.release_all_for_media_buy.assert_called_once()
+        standard_mocks["uow_instance"].assignments.release_all_for_media_buy.assert_called_once_with(
+            "mb_cancel_test", when=ANY
+        )
         # Adapter is invoked with the cancel action
-        adapter_call = standard_mocks["adapter_instance"].update_media_buy.call_args.kwargs
-        assert adapter_call["action"] == "cancel_media_buy"
-        assert adapter_call["cancellation_reason"] == "Buyer no longer needs"
+        standard_mocks["adapter_instance"].update_media_buy.assert_called_once_with(
+            media_buy_id="mb_cancel_test",
+            action="cancel_media_buy",
+            package_id=None,
+            budget=None,
+            today=ANY,
+            cancellation_reason="Buyer no longer needs",
+        )
 
     def test_canceled_field_default_quirk(self):
         """The library declares `canceled: Literal[True] = True`. Without the
