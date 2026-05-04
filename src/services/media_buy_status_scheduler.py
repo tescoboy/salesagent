@@ -89,6 +89,12 @@ class MediaBuyStatusScheduler:
                 )
 
                 for media_buy in media_buys:
+                    # Defensive: skip terminal statuses even if the query pulled
+                    # them in (e.g., a cancel committed between SELECT and our
+                    # iteration). Terminal states are immutable per spec.
+                    if media_buy.status in {"canceled", "completed", "rejected"}:
+                        continue
+
                     new_status = self._compute_new_status(media_buy, now, session)
 
                     if new_status and new_status != media_buy.status:
