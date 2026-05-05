@@ -261,7 +261,7 @@ class DeliveryWebhookScheduler:
 
             # Set webhook-specific metadata directly on the response model
             # These fields are defined on the library's GetMediaBuyDeliveryResponse
-            delivery_response.notification_type = NotificationType.scheduled
+            delivery_response.notification_type = NotificationType.scheduled  # type: ignore[assignment]
             delivery_response.next_expected_at = next_expected_at
             delivery_response.partial_data = False  # TODO: Check for reporting_delayed status
             delivery_response.unavailable_count = 0  # TODO: Count reporting_delayed/failed deliveries

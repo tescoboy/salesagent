@@ -887,7 +887,7 @@ def preview_adapter_endpoint():
     ``ok=false`` (renders inline) — only malformed bodies / missing API key
     surface as 4xx via the normal middleware path.
     """
-    req: PreviewAdapterRequest = request.context.json  # type: ignore[attr-defined]
+    req: PreviewAdapterRequest = request.context.json
     adapter_dict = _adapter_config_to_dict(req.adapter)
     preview = preview_adapter(adapter_dict["type"], adapter_dict)
     response = PreviewAdapterResponse(
@@ -1780,7 +1780,7 @@ def _spawn_refresh_workers(tenant_id: str, sync_run_ids: dict[str, str]) -> None
         try:
             from src.services.gam_advertisers_sync import sync_advertisers
 
-            def _run_advertisers_in_thread(tenant_id: str = tenant_id, sync_id: str = advertisers_id) -> None:
+            def _run_advertisers_in_thread(tenant_id: str = tenant_id, sync_id: str = advertisers_id) -> None:  # type: ignore[assignment]
                 """Wrap sync_advertisers so its re-raise (intentional for
                 direct callers + cron pickup) doesn't escape the daemon
                 thread. The worker has already marked the SyncJob row as
@@ -2860,7 +2860,7 @@ def test_webhook(tenant_id: str, webhook_id: str):
             tenant_id=tenant_id,
             data={"test": True, "subject_type": "tenant", "subject_id": tenant_id},
         )
-        status_code, latency_ms, error = asyncio.run(deliver_event_sync(_SubProxy, secret, envelope))
+        status_code, latency_ms, error = asyncio.run(deliver_event_sync(_SubProxy, secret, envelope))  # type: ignore[arg-type]
         delivered = status_code is not None and 200 <= status_code < 300
         if not delivered:
             overall_ok = False

@@ -255,7 +255,7 @@ def _build_sync_result(
     setup: Any | None = None,
 ) -> SyncResponseAccount:
     """Build an AdCP sync response Account object."""
-    return SyncResponseAccount(
+    return SyncResponseAccount(  # type: ignore[call-arg]  # account_id provided dynamically by caller
         brand=brand,
         operator=operator,
         action=action,
@@ -381,7 +381,9 @@ async def _sync_accounts_impl(
         SyncAccountsResponse with per-account action results.
     """
     if req is None:
-        req = SyncAccountsRequest(accounts=[])
+        # idempotency_key is library-required (adcp 4.4) but the no-op empty
+        # request handled below doesn't actually round-trip the field.
+        req = SyncAccountsRequest(accounts=[])  # type: ignore[call-arg]
 
     # BR-RULE-055: sync requires auth
     if identity is None or identity.principal_id is None or identity.tenant_id is None:
@@ -600,7 +602,7 @@ async def _sync_accounts_impl(
     audit_logger = get_audit_logger("sync_accounts", tenant_id)
     action_counts: dict[str, int] = {}
     for r in results:
-        act = _enum_to_str(r.action) or "unknown"
+        act = _enum_to_str(r.action) or "unknown"  # type: ignore[attr-defined]
         action_counts[act] = action_counts.get(act, 0) + 1
     audit_logger.log_info(f"sync_accounts completed: {action_counts} (dry_run={dry_run}, principal={principal_id})")
 

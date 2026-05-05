@@ -83,7 +83,7 @@ class Product(LibraryProduct):
     # ORM → Pydantic conversion of legacy rows doesn't ValidationError. New
     # products serialize the field when set; the buyer protocol still
     # surfaces real capabilities to clients that ask.
-    reporting_capabilities: Any | None = Field(default=None)
+    reporting_capabilities: Any | None = Field(default=None)  # type: ignore[assignment]
 
     # Internal-only fields (not in AdCP spec)
     implementation_config: dict[str, Any] | None = Field(

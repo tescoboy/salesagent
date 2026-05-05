@@ -27,6 +27,9 @@ from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     SupportedProtocol,
     Targeting,
 )
+from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
+    Idempotency as IdempotencySupported,
+)
 
 from src.core.auth import get_principal_object
 from src.core.database.repositories.uow import TenantConfigUoW
@@ -84,7 +87,10 @@ def _get_adcp_capabilities_impl(
     if not tenant:
         # Return minimal capabilities if no tenant context
         return GetAdcpCapabilitiesResponse(
-            adcp=Adcp(major_versions=[MajorVersion(root=3)]),
+            adcp=Adcp(
+                major_versions=[MajorVersion(root=3)],
+                idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=86400),
+            ),
             supported_protocols=[SupportedProtocol.media_buy],
         )
 
@@ -232,7 +238,10 @@ def _get_adcp_capabilities_impl(
 
     # Build response
     response = GetAdcpCapabilitiesResponse(
-        adcp=Adcp(major_versions=[MajorVersion(root=3)]),
+        adcp=Adcp(
+            major_versions=[MajorVersion(root=3)],
+            idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=86400),
+        ),
         supported_protocols=[SupportedProtocol.media_buy],
         media_buy=media_buy,
         last_updated=datetime.now(UTC),

@@ -61,6 +61,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
     # Sample signals for demonstration using local types (extend AdCP library types)
     sample_signals = [
         Signal(
+            signal_id={"source": "agent", "agent_url": "https://salesagent.adcontextprotocol.org/signals", "id": "auto_intenders_q1_2025"},
             signal_agent_segment_id="auto_intenders_q1_2025",
             name="Auto Intenders Q1 2025",
             description="Users actively researching new vehicles in Q1 2025",
@@ -71,6 +72,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(3.0),
         ),
         Signal(
+            signal_id={"source": "agent", "agent_url": "https://salesagent.adcontextprotocol.org/signals", "id": "luxury_travel_enthusiasts"},
             signal_agent_segment_id="luxury_travel_enthusiasts",
             name="Luxury Travel Enthusiasts",
             description="High-income individuals interested in premium travel experiences",
@@ -81,6 +83,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(5.0),
         ),
         Signal(
+            signal_id={"source": "agent", "agent_url": "https://salesagent.adcontextprotocol.org/signals", "id": "sports_content"},
             signal_agent_segment_id="sports_content",
             name="Sports Content Pages",
             description="Target ads on sports-related content",
@@ -91,6 +94,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(1.5),
         ),
         Signal(
+            signal_id={"source": "agent", "agent_url": "https://salesagent.adcontextprotocol.org/signals", "id": "finance_content"},
             signal_agent_segment_id="finance_content",
             name="Finance & Business Content",
             description="Target ads on finance and business content",
@@ -101,6 +105,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(2.0),
         ),
         Signal(
+            signal_id={"source": "agent", "agent_url": "https://salesagent.adcontextprotocol.org/signals", "id": "urban_millennials"},
             signal_agent_segment_id="urban_millennials",
             name="Urban Millennials",
             description="Millennials living in major metropolitan areas",
@@ -111,6 +116,7 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             pricing_options=_cpm_pricing_option(1.8),
         ),
         Signal(
+            signal_id={"source": "agent", "agent_url": "https://salesagent.adcontextprotocol.org/signals", "id": "pet_owners"},
             signal_agent_segment_id="pet_owners",
             name="Pet Owners",
             description="Households with dogs or cats",

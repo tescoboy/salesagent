@@ -2116,8 +2116,12 @@ PROPERTY_ERROR_MESSAGES = {
 
 # --- Authorized Properties (AdCP Spec) ---
 # Use library types directly - all fields inherited from AdCP spec
-# V3: Property uses property-specific Identifier, not generic Identifier
-from adcp.types import Identifier as PropertySpecificIdentifier
+# V3: Property uses property-specific Identifier, not generic Identifier.
+# adcp 4.4 ships two ``Identifier`` classes — the generic re-export at
+# ``adcp.types`` and the property-specific one used by ``Property``. The
+# inheritance guard ``test_property_identifier_is_library_type`` requires
+# the property-specific shape.
+from adcp.types.generated_poc.core.property import Identifier as PropertySpecificIdentifier
 
 PropertyIdentifier: TypeAlias = PropertySpecificIdentifier  # Property-specific identifier
 Property: TypeAlias = LibraryProperty

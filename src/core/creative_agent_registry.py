@@ -712,7 +712,7 @@ class CreativeAgentRegistry:
         if is_standard_agent(agent_url):
             cached = get_standard_format(format_id)
             if cached is not None:
-                return cached
+                return cached  # type: ignore[return-value]
 
         # Find agent
         agent = CreativeAgent(agent_url=agent_url, name="Unknown", enabled=True)

@@ -159,7 +159,7 @@ class Creative(LibraryCreative):
     # to empty list so legacy creatives still serialize without a forced
     # backfill. Tests asserting AdCP compliance now need to expect either an
     # empty list or omit the field — the override makes both work.
-    variants: list[Any] | None = Field(default=None, description="AdCP creative variants (v4.4.0+)")
+    variants: list[Any] | None = Field(default=None, description="AdCP creative variants (v4.4.0+)")  # type: ignore[assignment]
 
     # === AI Provenance (EU AI Act Article 50) ===
     provenance: Provenance | None = Field(default=None, description="AI provenance metadata per EU AI Act Article 50")
@@ -373,7 +373,7 @@ class SyncCreativeResult(LibrarySyncCreativeResult):
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     # Internal-only fields (not in AdCP spec)
-    status: str | None = Field(
+    status: str | None = Field(  # type: ignore[assignment]
         None, exclude=True, description="Current approval status of the creative (INTERNAL - excluded from responses)"
     )
     review_feedback: str | None = Field(
@@ -384,7 +384,7 @@ class SyncCreativeResult(LibrarySyncCreativeResult):
     changes: list[str] = Field(
         default_factory=list, description="List of field names that were modified (for 'updated' action)"
     )
-    errors: list[str] = Field(default_factory=list, description="Validation or processing errors (for 'failed' action)")
+    errors: list[str] = Field(default_factory=list, description="Validation or processing errors (for 'failed' action)")  # type: ignore[assignment]
     warnings: list[str] = Field(default_factory=list, description="Non-fatal warnings about this creative")
 
     def model_dump(self, **kwargs):
@@ -464,6 +464,16 @@ class SyncCreativesResponse(LibrarySyncCreativesSuccess):
 
     Design decision (salesagent-g3c): error variant never constructed.
     """
+
+    def model_dump(self, **kwargs):
+        """Pattern #4 nested serialization — re-serialize each ``SyncCreativeResult``
+        through its own ``model_dump()`` so the local ``status`` /
+        ``review_feedback`` fields with ``exclude=True`` are dropped.
+        """
+        result = super().model_dump(**kwargs)
+        if "creatives" in result and self.creatives:
+            result["creatives"] = [c.model_dump(**kwargs) for c in self.creatives]
+        return result
 
     def __str__(self) -> str:
         """Return human-readable summary message for protocol envelope."""
@@ -593,7 +603,7 @@ class ListCreativesResponse(NestedModelSerializerMixin, LibraryListCreativesResp
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     # Override with local subtypes (each extends its library counterpart)
-    query_summary: QuerySummary = Field(..., description="Summary of the query that was executed")
+    query_summary: QuerySummary = Field(..., description="Summary of the query that was executed")  # type: ignore[assignment]
     pagination: Pagination = Field(..., description="Pagination information for navigating results")
     creatives: list[Creative] = Field(..., description="Array of creative assets")  # type: ignore[assignment]
 

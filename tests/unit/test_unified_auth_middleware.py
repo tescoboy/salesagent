@@ -8,7 +8,6 @@ Validates that:
 beads: salesagent-97pn
 """
 
-import ast
 
 
 class TestUnifiedAuthMiddlewareExists:
@@ -42,28 +41,26 @@ class TestUnifiedAuthMiddlewareExists:
 
 
 class TestOldMiddlewaresDeleted:
-    """Verify old middleware functions are removed from app.py."""
+    """The legacy ``src/app.py`` was deleted with the rest of the legacy stack
+    — these guards are vacuous on the modern stack and remain only to assert
+    the legacy assembly is gone for good.
+    """
 
-    def test_no_auth_context_middleware_function(self):
-        """auth_context_middleware function must not exist in app.py."""
+    def test_legacy_app_py_is_removed(self):
+        """``src/app.py`` must not be reintroduced."""
         import pathlib
 
-        source = (pathlib.Path(__file__).resolve().parents[2] / "src" / "app.py").read_text()
+        legacy = pathlib.Path(__file__).resolve().parents[2] / "src" / "app.py"
+        assert not legacy.exists(), (
+            "src/app.py is back — the modern stack uses core/main.py as the "
+            "single Starlette entrypoint; legacy FastAPI assembly stays gone."
+        )
 
-        tree = ast.parse(source)
-        func_names = [node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        assert (
-            "auth_context_middleware" not in func_names
-        ), "auth_context_middleware still exists in app.py — should be replaced by UnifiedAuthMiddleware"
-
-    def test_no_a2a_auth_middleware_function(self):
-        """a2a_auth_middleware function must not exist in app.py."""
+    def test_legacy_a2a_server_module_is_removed(self):
+        """``src/a2a_server/`` must not be reintroduced."""
         import pathlib
 
-        source = (pathlib.Path(__file__).resolve().parents[2] / "src" / "app.py").read_text()
-
-        tree = ast.parse(source)
-        func_names = [node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        assert (
-            "a2a_auth_middleware" not in func_names
-        ), "a2a_auth_middleware still exists in app.py — should be replaced by UnifiedAuthMiddleware"
+        legacy = pathlib.Path(__file__).resolve().parents[2] / "src" / "a2a_server"
+        assert not legacy.exists(), (
+            "src/a2a_server/ is back — modern A2A is served by adcp.server.serve()."
+        )

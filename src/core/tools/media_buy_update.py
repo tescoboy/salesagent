@@ -608,8 +608,11 @@ def _update_media_buy_impl(
                             )
 
                     # Validate creative formats against package product formats
-                    # Get package and product to check supported formats
-                    from src.core.database.models import Product
+                    # Get package and product to check supported formats.
+                    # Aliased as ModelProduct to avoid colliding with the schema
+                    # Product class (the import-collision guard rejects bare
+                    # select-of-Product to keep model/schema queries unambiguous).
+                    from src.core.database.models import Product as ModelProduct
 
                     db_package = uow.media_buys.get_package(actual_media_buy_id, pkg_update.package_id)
 
@@ -622,8 +625,9 @@ def _update_media_buy_impl(
 
                     if product_id:
                         # Get product to check supported formats
-                        product_stmt = select(Product).where(
-                            Product.tenant_id == tenant["tenant_id"], Product.product_id == product_id
+                        product_stmt = select(ModelProduct).where(
+                            ModelProduct.tenant_id == tenant["tenant_id"],
+                            ModelProduct.product_id == product_id,
                         )
                         product = session.scalars(product_stmt).first()
 
@@ -788,7 +792,7 @@ def _update_media_buy_impl(
                     # Check for sync errors
                     failed_creatives = [r for r in sync_response.creatives if r.action == CreativeAction.failed]
                     if failed_creatives:
-                        error_msgs = [f"{r.creative_id}: {', '.join(r.errors or [])}" for r in failed_creatives]
+                        error_msgs = [f"{r.creative_id}: {', '.join(str(e) for e in (r.errors or []))}" for r in failed_creatives]
                         error_msg = f"Failed to sync creatives: {'; '.join(error_msgs)}"
                         response_data = UpdateMediaBuyError(
                             errors=[Error(code="creative_sync_failed", message=error_msg)],

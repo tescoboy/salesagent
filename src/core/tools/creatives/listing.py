@@ -77,7 +77,11 @@ def _list_creatives_impl(
     """
     from adcp.types import CreativeFilters as LibraryCreativeFilters
     from adcp.types import PaginationRequest as LibraryPagination
-    from adcp.types import Sort as LibrarySort
+
+    # adcp 4.4 ships two ``Sort`` classes — a generic tasks-list one (re-exported
+    # at adcp.types) and a creative-specific one used by ``ListCreativesRequest``.
+    # Use the matching shape so the request validator accepts it.
+    from adcp.types.generated_poc.creative.list_creatives_request import Sort as LibrarySort
 
     from src.core.schemas import ListCreativesRequest
 
@@ -141,14 +145,16 @@ def _list_creatives_impl(
     # 3.6.0: PaginationRequest is cursor-based (max_results, cursor). DB query uses offset/limit internally.
     structured_pagination = LibraryPagination(max_results=effective_limit)
 
-    # Build sort
+    # Build sort. The listing-specific ``Sort`` enum (distinct from the
+    # tasks-list ``Sort``) accepts ``created_date``, ``updated_date``,
+    # ``name``, ``status``, ``assignment_count``.
     field_mapping = {
         "created_date": "created_date",
         "updated_date": "updated_date",
         "name": "name",
         "status": "status",
         "assignment_count": "assignment_count",
-        "performance_score": "performance_score",
+        "performance_score": "assignment_count",  # no spec analog; bucket
     }
     mapped_field = field_mapping.get(sort_by, "created_date")
     structured_sort = LibrarySort(field=mapped_field, direction=valid_sort_order)
