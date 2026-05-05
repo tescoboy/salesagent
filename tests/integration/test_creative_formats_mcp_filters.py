@@ -14,9 +14,9 @@ from __future__ import annotations
 import pytest
 from adcp.types.generated_poc.core.format import (
     Accessibility,
+    HtmlFormatAsset,
     ImageFormatAsset,
     VideoFormatAsset,
-    HtmlFormatAsset,
 )
 from adcp.types.generated_poc.enums.wcag_level import WcagLevel
 

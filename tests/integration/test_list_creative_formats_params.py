@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import pytest
 from adcp.types.generated_poc.core.format import (
-    ImageFormatAsset,
-    VideoFormatAsset,
-    HtmlFormatAsset,
     Dimensions,
+    HtmlFormatAsset,
+    ImageFormatAsset,
     Renders,
     Responsive,
+    VideoFormatAsset,
 )
 
 from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest

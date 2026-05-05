@@ -6,11 +6,11 @@ All classes are re-exported from ``src.core.schemas`` for backward compatibility
 beads: salesagent-x79
 """
 
+from adcp.types import Account as LibraryAccountDomain
 from adcp.types import ListAccountsRequest as LibraryListAccountsRequest
 from adcp.types import ListAccountsResponse as LibraryListAccountsResponse
 from adcp.types import SyncAccountsRequest as LibrarySyncAccountsRequest
 from adcp.types.aliases import SyncAccountsSuccessResponse as LibrarySyncAccountsSuccess
-from adcp.types import Account as LibraryAccountDomain
 from pydantic import ConfigDict
 
 from src.core.config import get_pydantic_extra_mode

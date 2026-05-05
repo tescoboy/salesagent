@@ -34,7 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.core.database.database_session import get_db_session
-from src.core.database.models import AdapterConfig, GamAdvertiser, SyncJob, Tenant
+from src.core.database.models import AdapterConfig, GamAdvertiser, SyncJob
 
 logger = logging.getLogger(__name__)
 

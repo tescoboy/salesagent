@@ -18,7 +18,6 @@ from adcp.server.idempotency import IdempotencyStore, MemoryBackend, PgBackend
 
 import core.idempotency as idem
 
-
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 

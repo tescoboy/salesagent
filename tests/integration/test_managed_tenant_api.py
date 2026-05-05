@@ -2048,9 +2048,8 @@ class TestRefresh:
         so the real ``_spawn_refresh_workers`` runs (the test patches
         the leaf worker functions it calls).
         """
-        import src.admin.tenant_management_api as api_mod
-        import src.services.gam_advertisers_sync as gam_adv_mod
         import src.services.background_sync_service as bg_mod
+        import src.services.gam_advertisers_sync as gam_adv_mod
 
         inventory_calls = []
         advertisers_calls = []

@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import pytest
 from adcp.types.generated_poc.core.format import (
-    VideoFormatAsset,
     Assets18,
     Assets19,
     Assets22,
     Dimensions,
     Renders,
     Responsive,
+    VideoFormatAsset,
 )
 
 from src.core.exceptions import AdCPAuthenticationError
