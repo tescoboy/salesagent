@@ -39,10 +39,16 @@ from typing import TYPE_CHECKING, Any
 
 from adcp.signing import (
     SignatureVerificationError,
+    StaticJwksResolver,
     VerifierCapability,
     VerifyOptions,
+    parse_signature_input_header,
     unauthorized_response_headers,
     verify_starlette_request,
+)
+from adcp.signing.errors import (
+    REQUEST_SIGNATURE_HEADER_MALFORMED,
+    REQUEST_SIGNATURE_KEY_UNKNOWN,
 )
 
 if TYPE_CHECKING:
@@ -73,6 +79,34 @@ def _is_buyer_protocol_path(path: str) -> bool:
         if path == prefix or path.startswith(prefix + "/"):
             return True
     return False
+
+
+def _peek_kid_from_signature_input(headers: dict[str, str]) -> str | None:
+    """Extract ``keyid`` from the ``Signature-Input`` header, or ``None`` on parse failure.
+
+    The library's :func:`parse_signature_input_header` does the structured-fields
+    parsing for us. We use it as a one-shot to learn which kid the signer
+    claims so we can pre-resolve the JWK before handing off to the sync verifier.
+    """
+    raw = None
+    for k, v in headers.items():
+        if k.lower() == "signature-input":
+            raw = v
+            break
+    if raw is None:
+        return None
+    try:
+        labels = parse_signature_input_header(raw)
+    except (ValueError, KeyError):
+        return None
+    # The library defaults the label to "sig" — but a buyer may pick any.
+    # Take the first label's keyid; if a buyer signs with multiple labels,
+    # PR 2C extends this to handle them.
+    if not labels:
+        return None
+    parsed = next(iter(labels.values()))
+    keyid = parsed.params.get("keyid")
+    return str(keyid) if keyid is not None else None
 
 
 def _has_signature_headers(scope: dict) -> bool:
@@ -232,12 +266,31 @@ class SigningVerifyMiddleware:
         )
 
         cache = get_operator_brand_json_cache()
-        resolver = await cache.resolver_for(brand_json_url, agent_type="buying")
+        async_resolver = await cache.resolver_for(brand_json_url, agent_type="buying")
         replay_store = get_replay_store()
 
+        # Pre-resolve the JWK async (BrandJsonJwksResolver is async-only) and
+        # pass a sync StaticJwksResolver to the verifier. The library's
+        # verify_request_signature is sync; this is the canonical pattern for
+        # using an async resolver underneath it.
+        kid = _peek_kid_from_signature_input(headers)
+        if kid is None:
+            # Bad headers — let the library's verifier surface the precise code.
+            raise SignatureVerificationError(
+                REQUEST_SIGNATURE_HEADER_MALFORMED,
+                step=1,
+                message="could not parse keyid from Signature-Input",
+            )
+        jwk = await async_resolver(kid)
+        if jwk is None:
+            raise SignatureVerificationError(
+                REQUEST_SIGNATURE_KEY_UNKNOWN,
+                step=7,
+                message=f"kid {kid!r} not found in operator's brand.json JWKS",
+            )
+        sync_resolver = StaticJwksResolver({"keys": [jwk]})
+
         # Build a Starlette Request-shaped object the library accepts.
-        # The library's verify_starlette_request reads method/url/headers/body
-        # from the request — we reconstruct from the scope.
         from starlette.requests import Request
 
         request: Request = Request(scope, receive)
@@ -251,7 +304,7 @@ class SigningVerifyMiddleware:
             now=time.time(),
             capability=capability,
             operation=operation,
-            jwks_resolver=resolver,  # type: ignore[arg-type]  # async resolver, library accepts both shapes
+            jwks_resolver=sync_resolver,
             replay_store=replay_store,
             max_skew_seconds=self._max_skew,
             max_window_seconds=self._max_window,
@@ -263,7 +316,7 @@ class SigningVerifyMiddleware:
         # AsyncCachingJwksResolver inside BrandJsonJwksResolver exposes
         # ``agent_url`` after a successful resolve — the lib's docstring
         # promises it's populated when known.
-        agent_url = getattr(resolver, "agent_url", None) or brand_json_url
+        agent_url = getattr(async_resolver, "agent_url", None) or brand_json_url
 
         return {
             "operator_id": operator_id,
