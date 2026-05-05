@@ -148,6 +148,7 @@ test-results/
 .claude/commands/code-review.md
 .claude/skills/code-review/
 .claude/skills/.agent-db.env
+.claude/scheduled_tasks.lock
 .claude/reports
 .perles/
 
