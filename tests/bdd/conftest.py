@@ -45,6 +45,7 @@ pytest_plugins = [
     "tests.bdd.steps.domain.uc011_accounts",
     "tests.bdd.steps.domain.admin_accounts",
     "tests.bdd.steps.domain.uc_get_products_inventory",
+    "tests.bdd.steps.domain.uc_get_products_buying_mode",
     "tests.bdd.steps.domain.compat_normalization",
 ]
 

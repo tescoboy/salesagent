@@ -358,6 +358,93 @@ jobs:
       if: always()
       run: |
         docker compose -f docker-compose.e2e.yml down -v 2>/dev/null || true
+
+  storyboard-compliance:
+    name: AdCP Storyboard Compliance (refine_products)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    # Runs the @adcp/sdk storyboard runner against a docker-compose tenant on every
+    # PR. Locks in the buying_mode/refine wireup against spec 3.0.6 so a regression
+    # in the get_products surface is caught at PR review time, not when a downstream
+    # buyer agent calls the production tenant.
+    #
+    # See:
+    # - .claude/notes/buying-mode-refine-wireup/PLAN.md §4.4
+    # - Issue #1247 item 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Start salesagent stack with docker compose
+      run: |
+        docker compose up -d --wait --wait-timeout 180
+
+    - name: Verify health
+      run: |
+        for i in $(seq 1 30); do
+          if curl -fs http://localhost:8000/health > /dev/null; then
+            echo "salesagent healthy"
+            break
+          fi
+          sleep 2
+        done
+        curl -fs http://localhost:8000/health || {
+          echo "salesagent failed to come up"
+          docker compose logs --tail=50
+          exit 1
+        }
+
+    - name: Run refine_products storyboard via @adcp/sdk
+      env:
+        ADCP_AUTH_TOKEN: test123
+      run: |
+        # The salesagent local stack accepts password 'test123' for the default tenant.
+        # The @adcp/sdk@6.11.0 storyboard runner ships compliance/cache/3.0.6/protocols/
+        # media-buy/scenarios/refine_products.yaml — we exercise that scenario against
+        # the running tenant.
+        npx -y @adcp/sdk@6.11.0 storyboard run \
+          mcp \
+          http://localhost:8000/mcp/ \
+          --auth "$ADCP_AUTH_TOKEN" \
+          --scenario media_buy_seller/refine_products \
+          --json > storyboard-result.json || true
+
+        # Inspect the result. The runner writes a JSON envelope; we fail the job if
+        # phases that we explicitly support reported a hard failure. Extra failures
+        # in not-yet-implemented phases (e.g., proposal_finalize) are tolerated until
+        # #1073 lands.
+        cat storyboard-result.json | jq '.'
+        FAILURES=$(jq -r '
+          [
+            .phases[]?
+            | select(.id == "brief" or .id == "refine")
+            | .steps[]?
+            | select(.status == "failed")
+          ] | length
+        ' storyboard-result.json)
+        if [ "$FAILURES" -gt 0 ]; then
+          echo "::error::Storyboard refine_products reported $FAILURES failures in brief/refine phases"
+          exit 1
+        fi
+        echo "✅ Storyboard refine_products: brief and refine phases passed"
+
+    - name: Upload storyboard result
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: storyboard-refine-products-${{ github.run_id }}
+        path: storyboard-result.json
+        retention-days: 7
+
+    - name: Cleanup
+      if: always()
+      run: docker compose down -v
+
   lint:
     name: Lint & Type Check
     runs-on: ubuntu-latest
@@ -396,15 +483,15 @@ jobs:
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [security-audit, smoke-tests, unit-tests, integration-tests, quickstart-test, e2e-tests, lint]
+    needs: [security-audit, smoke-tests, unit-tests, integration-tests, quickstart-test, e2e-tests, storyboard-compliance, lint]
     if: always()
 
     steps:
     - name: Check test results
       run: |
-        if [ "${{ needs.security-audit.result }}" = "failure" ] || [ "${{ needs.unit-tests.result }}" = "failure" ] || [ "${{ needs.integration-tests.result }}" = "failure" ] || [ "${{ needs.quickstart-test.result }}" = "failure" ] || [ "${{ needs.e2e-tests.result }}" = "failure" ] || [ "${{ needs.lint.result }}" = "failure" ]; then
+        if [ "${{ needs.security-audit.result }}" = "failure" ] || [ "${{ needs.unit-tests.result }}" = "failure" ] || [ "${{ needs.integration-tests.result }}" = "failure" ] || [ "${{ needs.quickstart-test.result }}" = "failure" ] || [ "${{ needs.e2e-tests.result }}" = "failure" ] || [ "${{ needs.storyboard-compliance.result }}" = "failure" ] || [ "${{ needs.lint.result }}" = "failure" ]; then
           echo "❌ Tests failed"
           exit 1
         else
-          echo "✅ All tests passed (security-audit, smoke, unit, integration x5, quickstart, e2e, lint+mypy)"
+          echo "✅ All tests passed (security-audit, smoke, unit, integration x5, quickstart, e2e, storyboard-compliance, lint+mypy)"
         fi

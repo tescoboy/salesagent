@@ -7,10 +7,9 @@ Covers Layer 6 of the buying_mode/refine wireup:
 - Audit log extension (buying_mode, refine_count, defaulted_to_brief)
 - Outbound 3.0.6 wire compat in GetProductsResponse.model_dump (Layer 7)
 
-Behavioral obligations:
-    Covers: BR-UC-001-MAIN-BRIEF-MODE-02
-    Covers: BR-UC-001-ALT-WHOLESALE-MODE-02
-    Covers: BR-UC-001-ALT-REFINE-MODE-02
+Covers: UC-001-MODE-BRIEF-01
+Covers: UC-001-MODE-WHOLESALE-01
+Covers: UC-001-MODE-REFINE-01
 """
 
 from __future__ import annotations

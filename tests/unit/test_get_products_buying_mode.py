@@ -4,10 +4,7 @@ Covers the AdCP 3.0 three-mode contract (brief / wholesale / refine) and the rc.
 wire-rename compatibility for refine entry id fields. See
 .claude/notes/buying-mode-refine-wireup/PLAN.md Layer 1 for context.
 
-Behavioral obligations:
-    Covers: BR-UC-001-MAIN-BRIEF-MODE-01
-    Covers: BR-UC-001-ALT-WHOLESALE-MODE-01
-    Covers: BR-UC-001-ALT-REFINE-MODE-01
+Covers: UC-001-MODE-VALIDATION-01
 """
 
 from __future__ import annotations
