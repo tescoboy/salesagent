@@ -424,27 +424,96 @@ def _webhook_capture(port: int):
 # ---------------------------------------------------------------------------
 
 
-async def _mcp_call(token: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Call an MCP tool against the running stack.
+def _tool_models() -> dict[str, tuple[type, type]]:
+    """Map tool name → (RequestModel, ResponseModel) from the adcp Python SDK.
 
-    Uses fastmcp's StreamableHttpTransport — the same transport the real
-    SDK clients use. Auth via x-adcp-auth header (the Principal.access_token).
+    Lazy-imported because adcp is a heavy import; the verify script touches
+    only a handful of buyer-protocol tools so we register them explicitly.
+    Tools not in the registry pass through without validation.
+    """
+    from adcp.client import (
+        CreateMediaBuyRequest,
+        CreateMediaBuyResponse,
+        GetMediaBuyDeliveryRequest,
+        GetMediaBuyDeliveryResponse,
+        GetProductsRequest,
+        GetProductsResponse,
+        ListCreativesRequest,
+        ListCreativesResponse,
+        SyncCreativesRequest,
+        SyncCreativesResponse,
+        UpdateMediaBuyRequest,
+        UpdateMediaBuyResponse,
+    )
+
+    return {
+        "get_products": (GetProductsRequest, GetProductsResponse),
+        "create_media_buy": (CreateMediaBuyRequest, CreateMediaBuyResponse),
+        "update_media_buy": (UpdateMediaBuyRequest, UpdateMediaBuyResponse),
+        "sync_creatives": (SyncCreativesRequest, SyncCreativesResponse),
+        "list_creatives": (ListCreativesRequest, ListCreativesResponse),
+        "get_media_buy_delivery": (GetMediaBuyDeliveryRequest, GetMediaBuyDeliveryResponse),
+    }
+
+
+async def _mcp_call(token: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Call an MCP tool with typed request/response validation via the adcp SDK.
+
+    The wire goes through fastmcp's StreamableHttpTransport so we can pass
+    ``x-adcp-tenant`` for embedded-mode tenant routing — the adcp SDK's
+    ``AgentConfig`` doesn't expose arbitrary headers (upstream:
+    adcp-client-python#583, adcp-client#1563). The SDK's typed request
+    and response models do the schema-drift validation we want:
+
+    - ``RequestModel(**args)`` runs Pydantic validation against the AdCP
+      spec types before the request hits the wire — missing required
+      fields or wrong types fail here, not as a 4xx from the server.
+    - ``ResponseModel(**result)`` validates the response shape, so server
+      regressions (missing required fields, wrong types) surface here as
+      a ``ValidationError`` instead of a downstream ``KeyError`` or
+      ``AttributeError`` 50 lines later.
+
+    Both request and response models use ``extra='allow'`` so the script
+    keeps working as the spec adds new optional fields.
     """
     from fastmcp.client import Client
     from fastmcp.client.transports import StreamableHttpTransport
+    from pydantic import TypeAdapter
+
+    models = _tool_models()
+    if tool in models:
+        req_cls, _ = models[tool]
+        # Validate outbound. TypeAdapter handles both BaseModel subclasses
+        # and Union types uniformly (some SDK Response/Request types are
+        # discriminated unions, e.g. CreateMediaBuyResponse).
+        validated_req = TypeAdapter(req_cls).validate_python(args)
+        # Re-emit as dict — mode='json' coerces enums/datetimes to primitives;
+        # exclude_none keeps the wire payload identical to what was sent before.
+        wire_args = TypeAdapter(req_cls).dump_python(validated_req, mode="json", exclude_none=True)
+    else:
+        wire_args = args
 
     headers = {"x-adcp-auth": token}
     if ACTIVE_TENANT_ID:
         headers["x-adcp-tenant"] = ACTIVE_TENANT_ID
     transport = StreamableHttpTransport(url=f"{BASE}/mcp/", headers=headers)
     async with Client(transport=transport) as client:
-        result = await client.call_tool(tool, args)
+        result = await client.call_tool(tool, wire_args)
         if hasattr(result, "structured_content") and result.structured_content:
-            return result.structured_content
-        if hasattr(result, "content") and result.content:
-            # fallback to text content
+            data: dict[str, Any] = result.structured_content
+        elif hasattr(result, "content") and result.content:
+            # Fallback to text content — error responses from MCP land here.
             return {"_raw": str(result.content)}
-        return {}
+        else:
+            return {}
+
+    if tool in models:
+        _, resp_cls = models[tool]
+        # Validate inbound: missing required fields or wrong types in the
+        # response surface here, not as a downstream KeyError on .get().
+        validated_resp = TypeAdapter(resp_cls).validate_python(data)
+        return TypeAdapter(resp_cls).dump_python(validated_resp, mode="json", exclude_none=True)
+    return data
 
 
 def _mcp(token: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -521,12 +590,16 @@ def _verify_get_products(token: str) -> str | None:
 
 
 def _verify_create_media_buy(
-    token: str, tenant_id: str, product_id: str, *, idempotency_key: str | None = None,
+    token: str,
+    tenant_id: str,
+    product_id: str,
+    *,
+    idempotency_key: str,
     webhook_url: str | None = None,
 ) -> tuple[str | None, dict | None]:
     pricing_option_id = "cpm_usd_fixed"
     start_time, end_time = _date_range()
-    request = {
+    request: dict[str, Any] = {
         "brand": {"domain": "verify.example"},
         "account": {"account_id": f"{tenant_id}:default"},
         "packages": [
@@ -538,9 +611,8 @@ def _verify_create_media_buy(
         ],
         "start_time": start_time,
         "end_time": end_time,
+        "idempotency_key": idempotency_key,
     }
-    if idempotency_key is not None:
-        request["idempotency_key"] = idempotency_key
     if webhook_url is not None:
         request["reporting_webhook"] = {
             "url": webhook_url,
