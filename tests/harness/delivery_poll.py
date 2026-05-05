@@ -57,10 +57,6 @@ class DeliveryPollEnv(DeliveryPollMixin, IntegrationEnv):
     def _configure_mocks(self) -> None:
         self._configure_adapter_mock()
 
-    def call_a2a(self, **kwargs: Any) -> GetMediaBuyDeliveryResponse:
-        """Call get_media_buy_delivery via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("get_media_buy_delivery", GetMediaBuyDeliveryResponse, **kwargs)
-
     def call_mcp(self, **kwargs: Any) -> GetMediaBuyDeliveryResponse:
         """Call get_media_buy_delivery via Client(mcp) — full pipeline dispatch."""
         return self._run_mcp_client("get_media_buy_delivery", GetMediaBuyDeliveryResponse, **kwargs)

@@ -14,7 +14,6 @@ Subclasses override:
     call_impl(**kwargs): Any           -- call production function
 
 Multi-transport support (subclasses may also override):
-    call_a2a(**kwargs): Any            -- call _raw() A2A wrapper
     REST_ENDPOINT: str                 -- POST endpoint path for REST dispatch
     build_rest_body(**kwargs): dict    -- convert kwargs to REST body
     parse_rest_response(data): model  -- parse JSON dict to Pydantic model
@@ -148,44 +147,6 @@ def _unwrap_mcp_tool_error(exc: Exception) -> Exception:
     return exc
 
 
-def _unwrap_a2a_server_error(exc: Exception) -> Exception:
-    """Translate a2a ServerError back to the corresponding AdCPError.
-
-    The A2A handler wraps AdCPError → ServerError (via _adcp_to_a2a_error).
-    This reverses that translation so callers can ``pytest.raises(AdCPAuthenticationError)``
-    instead of catching the transport-level wrapper.
-
-    If the exception is not a ServerError or lacks enough info, returns it unchanged.
-    """
-    from a2a.types import InternalError, InvalidParamsError, InvalidRequestError
-    from a2a.utils.errors import ServerError
-
-    if not isinstance(exc, ServerError):
-        return exc
-
-    error = exc.error
-    message = getattr(error, "message", str(exc))
-    data = getattr(error, "data", None) or {}
-
-    # If _adcp_to_a2a_error stored the error_code, reconstruct the exact subclass.
-    error_code = data.get("error_code")
-    if error_code:
-        return _adcp_error_from_code(error_code, message, data.get("recovery"))
-
-    from src.core.exceptions import (
-        AdCPAuthenticationError,
-        AdCPValidationError,
-    )
-
-    if isinstance(error, InvalidRequestError):
-        return AdCPAuthenticationError(message)
-    if isinstance(error, InvalidParamsError):
-        return AdCPValidationError(message)
-    if isinstance(error, InternalError):
-        return RuntimeError(message)
-    return exc
-
-
 class BaseTestEnv:
     """Base test environment for _impl function testing.
 
@@ -213,7 +174,7 @@ class BaseTestEnv:
 
     Usage (multi-transport)::
 
-        @pytest.mark.parametrize("transport", [Transport.IMPL, Transport.A2A, Transport.REST])
+        @pytest.mark.parametrize("transport", [Transport.IMPL, Transport.MCP, Transport.REST])
         def test_something(self, integration_db, transport):
             with CreativeSyncEnv() as env:
                 result = env.call_via(transport, creatives=[...])
@@ -354,16 +315,6 @@ class BaseTestEnv:
         """
         raise NotImplementedError
 
-    def call_a2a(self, **kwargs: Any) -> Any:
-        """Call the _raw() A2A wrapper function.
-
-        Override in subclass. Should call the _raw() function with
-        the same kwargs as call_impl but through the A2A wrapper.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement call_a2a(). Override to enable Transport.A2A dispatch."
-        )
-
     def call_mcp(self, **kwargs: Any) -> Any:
         """Call the async MCP wrapper with a mock Context.
 
@@ -380,100 +331,6 @@ class BaseTestEnv:
         raise NotImplementedError(
             f"{type(self).__name__} does not implement call_mcp(). Override to enable Transport.MCP dispatch."
         )
-
-    def _run_a2a_handler(
-        self,
-        skill_name: str,
-        response_cls: type,
-        **kwargs: Any,
-    ) -> Any:
-        """A2A dispatch via real AdCPRequestHandler — exercises full A2A pipeline.
-
-        Dispatches through the real AdCPRequestHandler.on_message_send(), which
-        exercises: message parsing → skill routing → normalize_request_params →
-        handler dispatch → _serialize_for_a2a → Task/Artifact framing.
-
-        Identity is injected by monkey-patching ``_resolve_a2a_identity`` and
-        ``_get_auth_token`` on the handler instance — single mock point, same
-        as the MCP Client approach patches resolve_identity_from_context.
-
-        Args:
-            skill_name: A2A skill name (e.g., "get_products").
-            response_cls: Pydantic model class to parse artifact data into.
-            **kwargs: Skill parameters. ``identity`` is popped and used for
-                the identity mock; remaining kwargs become skill parameters.
-        """
-        import asyncio
-
-        from a2a.types import MessageSendParams, Task
-
-        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-        from tests.harness.transport import Transport
-        from tests.utils.a2a_helpers import create_a2a_message_with_skill, extract_data_from_artifact
-
-        self._commit_factory_data()
-
-        # Pop identity — used for the handler mock, not sent as a skill parameter.
-        _NO_OVERRIDE = object()
-        identity = kwargs.pop("identity", _NO_OVERRIDE)
-        a2a_identity = self.identity_for(Transport.A2A) if identity is _NO_OVERRIDE else identity
-
-        # The real A2A handler writes audit logs which require the tenant to exist
-        # in the DB. Ensure the tenant record exists (idempotent) so audit logging
-        # doesn't fail with FK violations on discovery endpoints.
-        if self.use_real_db and a2a_identity and a2a_identity.tenant_id:
-            self._ensure_tenant_for_audit(a2a_identity.tenant_id)
-
-        # Unpack req object into flat parameters if present.
-        # A2A skills accept a flat parameter dict, not a request model.
-        req = kwargs.pop("req", None)
-        if req is not None and hasattr(req, "model_dump"):
-            req_fields = req.model_dump(mode="json", exclude_none=True)
-            parameters = {**req_fields, **kwargs}
-        else:
-            parameters = dict(kwargs)
-
-        handler = AdCPRequestHandler()
-        # Single mock point: identity resolution.
-        # _get_auth_token must return a non-None value when identity exists,
-        # otherwise the handler rejects the request before _resolve_a2a_identity
-        # is called. Use auth_token from identity, falling back to a sentinel.
-        handler._resolve_a2a_identity = lambda *args, **kw: a2a_identity  # type: ignore[assignment]
-        handler._get_auth_token = lambda *args, **kw: (  # type: ignore[assignment]
-            (a2a_identity.auth_token or "harness-test-token") if a2a_identity else None
-        )
-
-        # Set tenant ContextVar so production code can read it
-        if a2a_identity and a2a_identity.tenant:
-            from src.core.config_loader import set_current_tenant
-
-            set_current_tenant(a2a_identity.tenant)
-
-        message = create_a2a_message_with_skill(skill_name=skill_name, parameters=parameters)
-        params = MessageSendParams(message=message)
-
-        async def _call():
-            return await handler.on_message_send(params)
-
-        try:
-            task_result = asyncio.run(_call())
-        except Exception as exc:
-            # Translate ServerError back to AdCPError for callers that catch
-            # domain exceptions (e.g., pytest.raises(AdCPAuthenticationError)).
-            raise _unwrap_a2a_server_error(exc) from exc
-
-        # Parse Task.artifacts[0] into response_cls
-        if not isinstance(task_result, Task):
-            raise TypeError(f"Expected Task, got {type(task_result).__name__}: {task_result}")
-        if not task_result.artifacts:
-            raise ValueError(f"Task has no artifacts. Status: {task_result.status}")
-        artifact_data = extract_data_from_artifact(task_result.artifacts[0])
-        # Strip protocol fields added by _serialize_for_a2a (message, success).
-        # These are A2A-envelope fields, not part of the Pydantic response model,
-        # and cause ValidationError under extra="forbid" in non-production mode.
-        artifact_data.pop("message", None)
-        artifact_data.pop("success", None)
-        return response_cls(**artifact_data)
 
     def _run_mcp_client(
         self,
@@ -549,10 +406,11 @@ class BaseTestEnv:
                         # If a third module imports get_http_headers without being
                         # patched, this won't catch it — but at least we verify
                         # the known auth paths were exercised.
-                        assert patched_th.called or patched_mw.called, (
-                            f"Auth chain not exercised for {tool_name} — get_http_headers patches were not called"
-                        )
+                        assert (
+                            patched_th.called or patched_mw.called
+                        ), f"Auth chain not exercised for {tool_name} — get_http_headers patches were not called"
                         return response_cls(**result.structured_content)
+
         else:
             # Unit mode: inject identity directly.
             async def _call():
@@ -658,11 +516,11 @@ class BaseTestEnv:
     def call_rest(self, **kwargs: Any) -> Any:
         """Call the REST endpoint and parse the response.
 
-        Symmetric with ``call_impl``, ``call_a2a``, ``call_mcp``.
+        Symmetric with ``call_impl`` and ``call_mcp``.
         Pops identity, configures auth, POSTs, parses response.
         Raises on HTTP errors (dispatcher catches and wraps in TransportResult).
         """
-        endpoint = self.REST_ENDPOINT  # type: ignore[attr-defined]
+        endpoint = self.REST_ENDPOINT
         response = self._run_rest_request(endpoint, **kwargs)
 
         if response.status_code >= 400:
@@ -760,29 +618,6 @@ class BaseTestEnv:
         Called automatically by call_impl() before each test execution.
         """
         if self._session:
-            self._session.commit()
-
-    def _ensure_tenant_for_audit(self, tenant_id: str) -> None:
-        """Create a minimal tenant record if none exists (idempotent).
-
-        The real A2A handler writes audit logs which require the tenant FK.
-        Discovery endpoints (list_creative_formats, get_products, etc.) don't
-        need a tenant for their logic, but the handler's post-invocation audit
-        logging does. This creates a stub tenant so audit logging doesn't fail.
-
-        Uses ``self._session`` (env-managed), not ``get_db_session()``.
-        """
-        if not self._session:
-            return
-        from sqlalchemy import select
-
-        from src.core.database.models import Tenant
-
-        exists = self._session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
-        if not exists:
-            from tests.factories import TenantFactory
-
-            TenantFactory(tenant_id=tenant_id)
             self._session.commit()
 
     # -- Context manager protocol ------------------------------------------

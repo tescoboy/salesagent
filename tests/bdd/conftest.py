@@ -236,10 +236,21 @@ _REST_XFAIL_TAGS: set[str] = {
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Apply xfail markers to scenarios with unimplemented production features."""
+    """Apply xfail markers to scenarios with unimplemented production features.
+
+    Also skips @a2a-tagged scenarios — the legacy a2a_server was removed in #10.
+    A2A is now served by core/ via ``adcp.server.serve(transport="a2a")`` and
+    exercised end-to-end by storyboards in ``core/tests/storyboards/``.
+    """
+    skip_a2a = pytest.mark.skip(reason="A2A covered by core/ storyboards (legacy a2a_server removed)")
+
     for item in items:
         marker_names = {m.name for m in item.iter_markers()}
         nodeid = item.nodeid
+
+        if "a2a" in marker_names:
+            item.add_marker(skip_a2a)
+            continue
 
         # Detect transport from parametrized nodeid: [mcp], [mcp-...], [rest], [rest-...]
         is_mcp = "[mcp]" in nodeid or "[mcp-" in nodeid
@@ -552,8 +563,8 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
     metafunc.parametrize(
         "ctx",
-        [Transport.IMPL, Transport.A2A, Transport.MCP, Transport.REST],
-        ids=["impl", "a2a", "mcp", "rest"],
+        [Transport.IMPL, Transport.MCP, Transport.REST],
+        ids=["impl", "mcp", "rest"],
         indirect=True,
     )
 
@@ -564,8 +575,12 @@ def ctx(request: pytest.FixtureRequest) -> dict:
 
     When parametrized by pytest_generate_tests, ``request.param`` is a
     Transport enum injected as ctx["transport"]. Transport-specific
-    scenarios (tagged @rest/@mcp/@a2a) are NOT parametrized and get
+    scenarios (tagged @rest/@mcp) are NOT parametrized and get
     an empty ctx (When steps handle dispatch explicitly).
+
+    @a2a-tagged scenarios are skipped at collection — A2A is owned by
+    core/ via ``serve(transport="a2a")`` and exercised end-to-end by
+    storyboards in ``core/tests/storyboards/``.
     """
     d: dict = {}
     if hasattr(request, "param"):

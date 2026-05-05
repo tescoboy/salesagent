@@ -192,9 +192,6 @@ class TestBaseClassContract:
         impl_id = env.identity_for(Transport.IMPL)
         assert impl_id.protocol == "mcp"
 
-        a2a_id = env.identity_for(Transport.A2A)
-        assert a2a_id.protocol == "a2a"
-
         rest_id = env.identity_for(Transport.REST)
         assert rest_id.protocol == "rest"
 
@@ -202,7 +199,7 @@ class TestBaseClassContract:
         assert mcp_id.protocol == "mcp"
 
         # All share same principal/tenant
-        for ident in [impl_id, a2a_id, rest_id, mcp_id]:
+        for ident in [impl_id, rest_id, mcp_id]:
             assert ident.principal_id == "p1"
             assert ident.tenant_id == "t1"
 
@@ -223,17 +220,6 @@ class TestBaseClassContract:
         env = BaseTestEnv(principal_id="p1")
         assert env.identity.principal_id == "p1"
         assert env.identity.protocol == "mcp"
-
-    def test_call_via_raises_for_unimplemented_transport(self):
-        """call_via with Transport.A2A raises NotImplementedError if call_a2a not overridden."""
-
-        from tests.harness._base import BaseTestEnv
-        from tests.harness.transport import Transport
-
-        env = BaseTestEnv()
-        result = env.call_via(Transport.A2A)
-        assert result.is_error
-        assert isinstance(result.error, NotImplementedError)
 
     def test_call_via_mcp_raises_for_unimplemented(self):
         """call_via with Transport.MCP raises NotImplementedError if call_mcp not overridden."""
@@ -311,17 +297,17 @@ class TestEnvMethodNamingConsistency:
         """IntegrationEnv.setup_default_data creates tenant + principal via factories."""
         from tests.harness._base import IntegrationEnv
 
-        assert hasattr(IntegrationEnv, "setup_default_data"), (
-            "IntegrationEnv should have setup_default_data() to reduce boilerplate"
-        )
+        assert hasattr(
+            IntegrationEnv, "setup_default_data"
+        ), "IntegrationEnv should have setup_default_data() to reduce boilerplate"
 
     def test_base_env_has_run_mcp_wrapper(self):
         """BaseTestEnv exposes _run_mcp_wrapper for DRY MCP dispatch."""
         from tests.harness._base import BaseTestEnv
 
-        assert hasattr(BaseTestEnv, "_run_mcp_wrapper"), (
-            "BaseTestEnv should have _run_mcp_wrapper to reduce call_mcp duplication"
-        )
+        assert hasattr(
+            BaseTestEnv, "_run_mcp_wrapper"
+        ), "BaseTestEnv should have _run_mcp_wrapper to reduce call_mcp duplication"
 
     def test_creative_sync_env_has_set_run_async_result(self):
         """CreativeSyncEnv uses set_run_async_result, not set_registry_formats.
@@ -332,9 +318,9 @@ class TestEnvMethodNamingConsistency:
         """
         from tests.harness.creative_sync import CreativeSyncEnv
 
-        assert hasattr(CreativeSyncEnv, "set_run_async_result"), (
-            "CreativeSyncEnv should have set_run_async_result (not set_registry_formats)"
-        )
+        assert hasattr(
+            CreativeSyncEnv, "set_run_async_result"
+        ), "CreativeSyncEnv should have set_run_async_result (not set_registry_formats)"
         assert not hasattr(CreativeSyncEnv, "set_registry_formats"), (
             "CreativeSyncEnv should NOT have set_registry_formats — "
             "that name belongs to CreativeFormatsEnv (different mechanic)"

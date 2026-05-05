@@ -299,24 +299,6 @@ class TestGetAdcpCapabilitiesWithTenant:
             current_tenant.set(None)
 
 
-class TestGetAdcpCapabilitiesA2AIntegration:
-    """Test A2A integration for get_adcp_capabilities."""
-
-    def test_skill_in_discovery_skills(self):
-        """Test that get_adcp_capabilities is in DISCOVERY_SKILLS."""
-        from src.a2a_server.adcp_a2a_server import DISCOVERY_SKILLS
-
-        assert "get_adcp_capabilities" in DISCOVERY_SKILLS
-
-    def test_skill_handler_exists(self):
-        """Test that the skill handler method exists."""
-        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-
-        handler = AdCPRequestHandler.__new__(AdCPRequestHandler)
-        assert hasattr(handler, "_handle_get_adcp_capabilities_skill")
-        assert callable(handler._handle_get_adcp_capabilities_skill)
-
-
 # ===========================================================================
 # Channel mapping and adapter integration tests
 # Reference: beads salesagent-7xc7

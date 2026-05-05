@@ -27,8 +27,7 @@ from src.core.database.models import Creative as DBCreative
 from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError
 from tests.harness import CreativeSyncEnv, Transport, assert_envelope, make_identity
 
-# All four transports: IMPL, A2A, REST, MCP
-ALL_TRANSPORTS = [Transport.IMPL, Transport.A2A, Transport.REST, Transport.MCP]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.REST, Transport.MCP]
 
 
 @pytest.mark.requires_db
@@ -592,9 +591,9 @@ class TestGenerativeBuildUpdatePreserve:
             assert_envelope(result2, transport)
 
             # build_creative should NOT be called again (no prompt → skip build)
-            assert registry.build_creative.call_count == build_calls_after_create, (
-                "build_creative should not be called on update without prompt"
-            )
+            assert (
+                registry.build_creative.call_count == build_calls_after_create
+            ), "build_creative should not be called on update without prompt"
 
         # Verify existing generative data is preserved in DB
         with get_db_session() as session:

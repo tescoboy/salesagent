@@ -61,10 +61,6 @@ class CreativeListEnv(IntegrationEnv):
         kwargs.setdefault("identity", self.identity)
         return _list_creatives_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> ListCreativesResponse:
-        """Call list_creatives via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("list_creatives", ListCreativesResponse, **kwargs)
-
     def call_mcp(self, **kwargs: Any) -> ListCreativesResponse:
         """Call list_creatives via Client(mcp) — full pipeline dispatch."""
         return self._run_mcp_client("list_creatives", ListCreativesResponse, **kwargs)

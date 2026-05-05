@@ -1,21 +1,20 @@
 """Central FastAPI application.
 
-Mounts all sub-applications (MCP, A2A, Admin) into a single process.
-Replaces the previous multi-process architecture where MCP, A2A, and Admin
-ran as separate processes behind nginx.
+Mounts MCP and Admin into a single process. A2A is served by the core/
+stack via ``adcp.server.serve(transport="a2a")`` — this app is the legacy
+src/ stack, kept reachable for fallback only (RUN_STACK=src).
 """
 
 import asyncio
-import json
 import logging
 import os
-import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastmcp.utilities.lifespan import combine_lifespans
+from starlette.routing import Route
 
 from src.core.main import mcp
 
@@ -63,7 +62,7 @@ mcp_app = mcp.http_app(path="/")
 # future app-level startup/shutdown hooks fire correctly.
 app = FastAPI(
     title="AdCP Sales Agent",
-    description="Unified REST API for the AdCP Sales Agent. Also serves MCP at /mcp and A2A at /a2a.",
+    description="Unified REST API for the AdCP Sales Agent. Also serves MCP at /mcp.",
     version="1.0.0",
     lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
 )
@@ -86,193 +85,6 @@ async def adcp_error_handler(request: Request, exc: AdCPError) -> JSONResponse:
         status_code=exc.status_code,
         content=exc.to_dict(),
     )
-
-
-# ---------------------------------------------------------------------------
-# A2A Integration — add routes directly to the FastAPI app (not as sub-app)
-# so middleware and scope["state"] propagate correctly within the same ASGI app.
-# ---------------------------------------------------------------------------
-
-# NOTE: The hand-rolled A2A server (src/a2a_server/*) was authored against
-# a2a-sdk 0.3 and does not run on a2a-sdk 1.0+. Greenfield (core/) replaces
-# it via ``adcp.server.serve(transport="a2a")`` (M2). Until then, the legacy
-# A2A surface is disabled to keep test collection green; tests that exercise
-# the legacy a2a server are blocked on M2.
-from starlette.routing import Route  # noqa: E402
-
-A2A_LEGACY_AVAILABLE = False
-try:
-    from a2a.server.apps.jsonrpc.starlette_app import A2AStarletteApplication  # noqa: E402, F401
-
-    from src.a2a_server.adcp_a2a_server import (  # noqa: E402
-        AdCPRequestHandler,
-        create_agent_card,
-    )
-    from src.a2a_server.context_builder import AdCPCallContextBuilder  # noqa: E402
-    from src.core.domain_config import get_a2a_server_url, get_sales_agent_domain  # noqa: E402
-
-    A2A_LEGACY_AVAILABLE = True
-except ImportError as _a2a_import_error:
-    logger.info(f"Legacy A2A server disabled (a2a-sdk 1.0): {_a2a_import_error}. Use core/ + serve(transport='a2a') instead.")
-    AdCPRequestHandler = create_agent_card = AdCPCallContextBuilder = None  # type: ignore[assignment,misc]
-    A2AStarletteApplication = None  # type: ignore[assignment,misc]
-
-
-_agent_card = None
-a2a_app = None
-
-if A2A_LEGACY_AVAILABLE:
-    _agent_card = create_agent_card()
-    _request_handler = AdCPRequestHandler()
-
-    a2a_app = A2AStarletteApplication(
-        agent_card=_agent_card,
-        http_handler=_request_handler,
-        context_builder=AdCPCallContextBuilder(),
-    )
-
-    a2a_app.add_routes_to_app(
-        app,
-        agent_card_url="/.well-known/agent-card.json",
-        rpc_url="/a2a",
-        extended_agent_card_url="/agent.json",
-    )
-    logger.info("A2A routes added: /a2a, /.well-known/agent-card.json, /agent.json")
-
-
-@app.api_route("/a2a/", methods=["GET", "POST", "OPTIONS"])
-async def a2a_trailing_slash_redirect():
-    """Preserve historical /a2a/ compatibility.
-
-    The admin root fallback mount would otherwise catch `/a2a/` and hand it to
-    Flask, which returns 404. Redirecting here keeps A2A owned by FastAPI.
-    """
-
-    return RedirectResponse(url="/a2a", status_code=307)
-
-
-# ---------------------------------------------------------------------------
-# Dynamic agent card endpoints — override SDK defaults to support
-# tenant-specific URLs based on request headers.
-# ---------------------------------------------------------------------------
-
-
-from src.core.http_utils import get_header_case_insensitive as _get_header_case_insensitive
-
-_VALID_HOSTNAME_RE = re.compile(
-    r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*(\:\d{1,5})?$"
-)
-
-
-def _is_valid_hostname(value: str) -> bool:
-    """Validate that a string is a safe hostname (with optional port). Rejects path traversal and injection chars."""
-    return bool(value) and len(value) <= 253 and _VALID_HOSTNAME_RE.match(value) is not None
-
-
-def _create_dynamic_agent_card(request: Request):
-    """Create agent card with tenant-specific URL from request headers."""
-
-    def get_protocol(hostname: str) -> str:
-        return "http" if hostname.startswith("localhost") or hostname.startswith("127.0.0.1") else "https"
-
-    apx_incoming_host = _get_header_case_insensitive(request.headers, "Apx-Incoming-Host")
-    if apx_incoming_host and not _is_valid_hostname(apx_incoming_host):
-        logger.warning(f"Invalid Apx-Incoming-Host header value, ignoring: {apx_incoming_host!r}")
-        apx_incoming_host = None
-    if apx_incoming_host:
-        protocol = get_protocol(apx_incoming_host)
-        server_url = f"{protocol}://{apx_incoming_host}/a2a"
-    else:
-        host = _get_header_case_insensitive(request.headers, "Host") or ""
-        if host and not _is_valid_hostname(host):
-            logger.warning(f"Invalid Host header value, ignoring: {host!r}")
-            host = ""
-        sales_domain = get_sales_agent_domain()
-        if host and host != sales_domain:
-            protocol = get_protocol(host)
-            server_url = f"{protocol}://{host}/a2a"
-        else:
-            server_url = get_a2a_server_url() or "http://localhost:8080/a2a"
-
-    dynamic_card = _agent_card.model_copy()
-    dynamic_card.url = server_url
-    return dynamic_card
-
-
-# Override the SDK's static agent card endpoints with dynamic ones.
-# We replace routes by matching path — SDK routes were added above.
-
-_AGENT_CARD_PATHS = {"/.well-known/agent-card.json", "/.well-known/agent.json", "/agent.json"}
-
-
-def _replace_routes():
-    """Replace SDK agent card routes with dynamic versions that read request headers."""
-
-    async def dynamic_agent_card(request: Request):
-        card = _create_dynamic_agent_card(request)
-        return JSONResponse(card.model_dump(mode="json"))
-
-    replaced_paths: set[str] = set()
-    new_routes = []
-    for route in app.routes:
-        path = getattr(route, "path", None)
-        if path in _AGENT_CARD_PATHS:
-            new_routes.append(Route(path, dynamic_agent_card, methods=["GET", "OPTIONS"]))
-            replaced_paths.add(path)
-        else:
-            new_routes.append(route)
-    app.router.routes = new_routes
-
-    missing = _AGENT_CARD_PATHS - replaced_paths
-    if missing:
-        logger.warning(f"_replace_routes: expected SDK routes not found for paths: {sorted(missing)}")
-
-
-if A2A_LEGACY_AVAILABLE:
-    _replace_routes()
-
-# ---------------------------------------------------------------------------
-# A2A messageId compatibility middleware (body rewriting, unrelated to auth)
-# ---------------------------------------------------------------------------
-
-
-@app.middleware("http")
-async def a2a_messageid_compatibility_middleware(request: Request, call_next):
-    """Handle both numeric and string messageId for backward compatibility."""
-    if request.url.path == "/a2a" and request.method == "POST":
-        body = await request.body()
-        try:
-            data = json.loads(body)
-
-            if isinstance(data, dict) and "params" in data:
-                params = data.get("params", {})
-                if "message" in params and isinstance(params["message"], dict):
-                    message = params["message"]
-                    if "messageId" in message and isinstance(message["messageId"], (int, float)):
-                        logger.warning(
-                            f"Converting numeric messageId {message['messageId']} to string for compatibility"
-                        )
-                        message["messageId"] = str(message["messageId"])
-                        body = json.dumps(data).encode()
-
-            if "id" in data and isinstance(data["id"], (int, float)):
-                logger.warning(f"Converting numeric JSON-RPC id {data['id']} to string for compatibility")
-                data["id"] = str(data["id"])
-                body = json.dumps(data).encode()
-
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-        # Reconstruct request with potentially modified body
-        from starlette.requests import Request as StarletteRequest
-
-        async def _receive():
-            return {"type": "http.request", "body": body}
-
-        request = StarletteRequest(request.scope, receive=_receive)
-
-    response = await call_next(request)
-    return response
 
 
 # ---------------------------------------------------------------------------
@@ -368,4 +180,4 @@ async def _handle_landing_page(request: Request):
 app.router.routes.insert(0, Route("/", _handle_landing_page, methods=["GET"]))
 app.router.routes.insert(1, Route("/landing", _handle_landing_page, methods=["GET"]))
 
-logger.info("FastAPI app created: MCP at /mcp, A2A at /a2a, Admin at /admin")
+logger.info("FastAPI app created: MCP at /mcp, Admin at /admin")

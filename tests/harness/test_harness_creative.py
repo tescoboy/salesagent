@@ -71,15 +71,6 @@ class TestCreativeSyncEnvContract:
 
         assert CreativeSyncEnv.REST_ENDPOINT == "/api/v1/creatives/sync"
 
-    def test_has_call_a2a(self):
-        """CreativeSyncEnv implements call_a2a for A2A dispatch."""
-        from tests.harness.creative_sync import CreativeSyncEnv
-
-        env = CreativeSyncEnv()
-        assert hasattr(env, "call_a2a")
-        # Should not raise NotImplementedError (unlike base class)
-        assert env.call_a2a.__func__ is not env.call_impl.__func__
-
     def test_has_build_rest_body(self):
         """CreativeSyncEnv implements build_rest_body for REST dispatch."""
         from tests.harness.creative_sync import CreativeSyncEnv

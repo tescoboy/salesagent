@@ -1,9 +1,7 @@
 """Regression tests for REST tenant resolution and auth cleanup.
 
-Tests that the REST API uses proper 4-strategy tenant detection (same as MCP/A2A)
+Tests that the REST API uses proper 4-strategy tenant detection (same as MCP)
 instead of the broken heuristic that split principal_id on underscores.
-
-These tests also verify removal of MinimalContext and cast(ToolContext) patterns.
 """
 
 import inspect
@@ -28,9 +26,9 @@ class TestRestResolveAuthReturnsResolvedIdentity:
         with patch("src.core.resolved_identity.resolve_identity", return_value=mock_identity):
             identity = _resolve_auth_dep(auth_ctx)
 
-        assert isinstance(identity, ResolvedIdentity), (
-            f"_resolve_auth_dep returned {type(identity).__name__}, expected ResolvedIdentity"
-        )
+        assert isinstance(
+            identity, ResolvedIdentity
+        ), f"_resolve_auth_dep returned {type(identity).__name__}, expected ResolvedIdentity"
         assert identity.principal_id == "test_principal"
 
     def test_resolve_auth_non_admin_non_default_tenant(self):
@@ -58,40 +56,6 @@ class TestRestResolveAuthReturnsResolvedIdentity:
         )
 
 
-class TestNoMinimalContext:
-    """No MinimalContext classes should exist in the codebase."""
-
-    def test_no_minimal_context_in_a2a_server(self):
-        """MinimalContext should be removed from A2A server."""
-        import src.a2a_server.adcp_a2a_server as a2a_mod
-
-        assert not hasattr(a2a_mod, "MinimalContext"), (
-            "MinimalContext class still exists in adcp_a2a_server. "
-            "It should be replaced with resolve_identity_from_context()."
-        )
-
-
-class TestNoCastToolContext:
-    """No cast(ToolContext, ...) type-unsafe patterns should exist."""
-
-    def test_a2a_server_does_not_import_cast(self):
-        """A2A server should not need typing.cast (was used for cast(ToolContext, ...))."""
-
-        # Reload to get fresh module
-        import src.a2a_server.adcp_a2a_server as a2a_mod
-
-        # Check if 'cast' is imported at module level
-        # After removing cast(ToolContext, ...) calls, cast should no longer be needed
-        module_dict = vars(a2a_mod)
-        from typing import cast as typing_cast
-
-        has_cast = "cast" in module_dict and module_dict["cast"] is typing_cast
-        assert not has_cast, (
-            "A2A server still imports typing.cast, which was used for "
-            "cast(ToolContext, ...) unsafe patterns. Remove after cleanup."
-        )
-
-
 class TestVerifyPrincipalSimplified:
     """_verify_principal should work without get_principal_id_from_context fallback."""
 
@@ -103,9 +67,9 @@ class TestVerifyPrincipalSimplified:
         context_param = sig.parameters.get("context")
         assert context_param is not None
         ann = str(context_param.annotation)
-        assert "ResolvedIdentity" in ann, (
-            f"_verify_principal context param annotation is '{ann}', should include ResolvedIdentity"
-        )
+        assert (
+            "ResolvedIdentity" in ann
+        ), f"_verify_principal context param annotation is '{ann}', should include ResolvedIdentity"
 
     def test_verify_principal_no_get_principal_id_from_context_import(self):
         """_verify_principal should not fall back to get_principal_id_from_context."""
@@ -119,6 +83,6 @@ class TestVerifyPrincipalSimplified:
         # The function should accept ResolvedIdentity without isinstance fallback chains
         # We verify by checking it doesn't have more than 2 type options (was 3: Context|ToolContext|ResolvedIdentity)
         ann = str(sig.parameters["context"].annotation)
-        assert "Context |" not in ann or ann.count("|") <= 1, (
-            f"_verify_principal still has 3-way isinstance dispatch: {ann}. Simplify to accept ResolvedIdentity only."
-        )
+        assert (
+            "Context |" not in ann or ann.count("|") <= 1
+        ), f"_verify_principal still has 3-way isinstance dispatch: {ann}. Simplify to accept ResolvedIdentity only."
