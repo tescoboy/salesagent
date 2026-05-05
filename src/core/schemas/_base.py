@@ -42,9 +42,8 @@ from adcp.types.aliases import (
 from adcp.types.aliases import (
     UpdateMediaBuySuccessResponse as AdCPUpdateMediaBuySuccess,
 )
+from adcp.types import ContextObject, MediaBuyStatus
 from adcp.types.base import AdCPBaseModel as LibraryAdCPBaseModel
-from adcp.types.generated_poc.core.context import ContextObject
-from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
 
 from src.core.config import get_pydantic_extra_mode
 
@@ -1396,6 +1395,13 @@ class CreateMediaBuyRequest(LibraryCreateMediaBuyRequest):
     # layer (ResolvedIdentity), not from the request payload, so account is optional here.
     account: LibraryAccountReference | None = None  # type: ignore[assignment]
 
+    # Library v4.4.0 made idempotency_key required. Salesagent allows it
+    # optional — buyers that don't pass one fall through to the legacy
+    # MediaBuy.create_idempotency_key behavior. Override the field as
+    # optional with None default. Buyers who DO pass one still get
+    # PgBackend dedup via @IdempotencyStore.wrap on the platform method.
+    idempotency_key: str | None = None  # type: ignore[assignment]
+
     # Override packages to use our PackageRequest (which overrides targeting_overlay
     # to Targeting instead of library TargetingOverlay, enabling the legacy normalizer).
     # extra='forbid' prevents arbitrary field injection at buyer boundary.
@@ -1578,6 +1584,13 @@ class UpdateMediaBuyRequest(LibraryUpdateMediaBuyRequest):
     # Bare float is accepted so transport wrappers can preserve existing DB currency
     # when the caller updates only the amount.
     budget: Budget | float | None = None
+    # Library v4.4.0 made account + idempotency_key required. Salesagent
+    # resolves identity at the transport boundary (ResolvedIdentity), not from
+    # the request payload, so account stays optional. idempotency_key is
+    # optional for backward-compat with buyers that don't send one (the
+    # underlying impl is idempotent at the DB layer regardless).
+    account: LibraryAccountReference | None = None  # type: ignore[assignment]
+    idempotency_key: str | None = None  # type: ignore[assignment]
     # Internal testing field
     today: date | None = Field(None, exclude=True, description="For testing/simulation only - not part of AdCP spec")
 
@@ -2103,7 +2116,7 @@ PROPERTY_ERROR_MESSAGES = {
 # --- Authorized Properties (AdCP Spec) ---
 # Use library types directly - all fields inherited from AdCP spec
 # V3: Property uses property-specific Identifier, not generic Identifier
-from adcp.types.generated_poc.core.property import Identifier as PropertySpecificIdentifier
+from adcp.types import Identifier as PropertySpecificIdentifier
 
 PropertyIdentifier: TypeAlias = PropertySpecificIdentifier  # Property-specific identifier
 Property: TypeAlias = LibraryProperty

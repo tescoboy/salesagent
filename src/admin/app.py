@@ -35,6 +35,7 @@ from src.admin.blueprints.settings import settings_bp, tenant_management_setting
 from src.admin.blueprints.signals_agents import signals_agents_bp
 
 # from src.admin.blueprints.tasks import tasks_bp  # Disabled - tasks eliminated in favor of workflow system
+from src.admin.blueprints.buyer_routing import buyer_routing_bp
 from src.admin.blueprints.tenants import tenants_bp
 from src.admin.blueprints.users import users_bp
 from src.admin.blueprints.workflows import workflows_bp
@@ -67,12 +68,37 @@ class CustomProxyFix:
             script_name = environ.get("HTTP_X_FORWARDED_PREFIX", "")
 
         if script_name:
+            # Embedded-mode reverse-proxy quirk: when Storefront sets
+            # X-Forwarded-Prefix=/storefront/psa/tenant/<id> AND forwards the
+            # original /tenant/<id>/<page> path through unchanged, naively
+            # using the prefix as SCRIPT_NAME causes url_for() to emit
+            # /storefront/psa/tenant/<id>/tenant/<id>/<page> — the tenant
+            # segment doubles because both the prefix and the route URL
+            # reference it. Strip the overlapping /tenant/<id> tail from
+            # script_name so SCRIPT_NAME stops at the storefront mount and
+            # Flask's url_for produces correctly-nested paths.
+            #
+            # Heuristic: prefix ends with /tenant/<segment> AND PATH_INFO
+            # also starts with that exact /tenant/<segment>. Using <segment>
+            # generically (not regex-matching tenant_id format) keeps this
+            # robust to whatever id scheme the storefront uses.
+            path_info = environ.get("PATH_INFO", "")
+            if "/tenant/" in script_name:
+                _root, _, tail = script_name.rpartition("/tenant/")
+                tenant_segment = f"/tenant/{tail}"
+                if (
+                    _root  # there's something before /tenant/<id>
+                    and tail  # tenant_id non-empty
+                    and "/" not in tail  # tail is a single segment, not /tenant/X/foo
+                    and path_info.startswith(tenant_segment + "/")
+                ):
+                    script_name = _root  # drop the /tenant/<id> tail
+
             # Store for use in response wrapper
             self.active_script_name = script_name
             # Set SCRIPT_NAME so Flask knows it's mounted at this path
             environ["SCRIPT_NAME"] = script_name
             # Also ensure PATH_INFO is correct
-            path_info = environ.get("PATH_INFO", "")
             if path_info.startswith(script_name):
                 environ["PATH_INFO"] = path_info[len(script_name) :]
                 if not environ["PATH_INFO"]:
@@ -154,6 +180,19 @@ def create_app(config=None):
     app.jinja_env.filters["from_json"] = from_json_filter
     app.jinja_env.filters["markdown"] = markdown_filter
 
+    # Embed-mode breadcrumb root filter — see src/admin/utils/breadcrumbs.py.
+    # Templates compose: ``{% set crumbs = crumbs | with_embed_root %}``
+    # before including ``_breadcrumb.html``. The filter replaces the first
+    # crumb when an embed-mode override is active; pass-through otherwise.
+    from src.admin.utils.breadcrumbs import with_embed_root_filter
+
+    def _with_embed_root(crumbs):
+        from flask import g
+
+        return with_embed_root_filter(crumbs, getattr(g, "embed_breadcrumb_root", None))
+
+    app.jinja_env.filters["with_embed_root"] = _with_embed_root
+
     # Trust proxy headers in production
     if os.environ.get("PRODUCTION") == "true":
         app.config["PREFERRED_URL_SCHEME"] = "https"
@@ -190,7 +229,15 @@ def create_app(config=None):
         # 3. CustomProxyFix handles X-Forwarded-Prefix (runs first, before Fly headers)
         app.wsgi_app = CustomProxyFix(app.wsgi_app)
     else:
-        # In development, still apply custom proxy fix if needed
+        # In development, apply WerkzeugProxyFix too so X-Forwarded-Host /
+        # X-Forwarded-Proto from a embedded-mode upstream proxy (Scope3
+        # Storefront iframe) are honored. Without it, Flask's automatic
+        # redirects (e.g. trailing-slash 308 on /creatives → /creatives/)
+        # use ``request.host`` = ``localhost:3091``, leaking the upstream
+        # origin into the Location header. ProxyFix is a no-op when the
+        # forwarded headers are absent (pure local curl / non-proxied
+        # browser hits), so it's safe to always wire.
+        app.wsgi_app = WerkzeugProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=0)
         app.wsgi_app = CustomProxyFix(app.wsgi_app)
 
     # Initialize OAuth
@@ -298,7 +345,7 @@ def create_app(config=None):
     @app.context_processor
     def inject_context():
         """Make the script_name (e.g., /admin) and current tenant available in all templates."""
-        from flask import session
+        from flask import g, session
         from sqlalchemy import select
 
         from src.core.database.database_session import get_db_session
@@ -315,9 +362,31 @@ def create_app(config=None):
         # Inject sales agent domain for URL generation in templates
         context["sales_agent_domain"] = get_sales_agent_domain() or "example.com"
 
-        # Inject fresh tenant data if user is logged in with a tenant
+        # Embedded-mode chrome flag — true when this request authorized via
+        # the X-Identity-* bypass (sprint 2).
+        embedded_user = isinstance(getattr(g, "user", None), dict) and bool(g.user.get("embedded_mode"))
+        context["embedded_mode"] = embedded_user
+
+        # ``embedded`` is the broader iframe-rendering flag — true when:
+        # (a) the upstream proxy passes ``?embedded=1`` on the iframe URL
+        #     (explicit, per-load opt-in; works for any tenant), OR
+        # (b) the request authorized via X-Identity-* (embedded mode is
+        #     always embedded in the upstream proxy's chrome).
+        # Templates use this to hide the salesagent's own top nav strip
+        # and any global controls (logout / switch tenant) — the upstream
+        # proxy owns those in its outer chrome. Per-page sub-nav (breadcrumbs,
+        # action buttons) stays.
+        explicit_embed = request.args.get("embedded") in ("1", "true", "yes")
+        context["embedded"] = explicit_embed or embedded_user
+
+        # Inject fresh tenant data if user is logged in with a tenant.
+        # First check the session, then fall back to the URL ``tenant_id``
+        # route argument — admin pages are scoped to a tenant via the URL,
+        # not via the session, in test/embedded flows.
         tenant_id = session.get("tenant_id")
-        if tenant_id:
+        if not tenant_id and request.view_args:
+            tenant_id = request.view_args.get("tenant_id")
+        if tenant_id and tenant_id != "*":
             try:
                 with get_db_session() as db_session:
                     stmt = select(Tenant).filter_by(tenant_id=tenant_id)
@@ -327,7 +396,34 @@ def create_app(config=None):
             except Exception as e:
                 logger.warning(f"Could not load tenant {tenant_id} for context: {e}")
 
+        # Resolve the embed-mode breadcrumb root override (header > tenant
+        # column > None). Cached on ``g`` so the Jinja ``with_embed_root``
+        # filter can pull it without re-resolving per template render.
+        from src.admin.utils.breadcrumbs import resolve_embed_breadcrumb_root
+
+        tenant_for_breadcrumb = context.get("tenant") or getattr(g, "tenant", None)
+        embed_root = resolve_embed_breadcrumb_root(tenant_for_breadcrumb)
+        g.embed_breadcrumb_root = embed_root
+        context["embed_breadcrumb_root"] = embed_root
+
         return context
+
+    # Iframe embedding policy. ``MANAGED_MODE_FRAME_ANCESTORS`` is a CSP
+    # frame-ancestors directive value (e.g., ``'self' https://*.scope3.com``).
+    # Set on embedded-mode deployments to allow the upstream Storefront to
+    # embed the admin UI as an iframe; legacy deployments leave it unset
+    # and the existing X-Frame-Options-less behavior persists.
+    @app.after_request
+    def apply_frame_ancestors(response):
+        ancestors = os.environ.get("MANAGED_MODE_FRAME_ANCESTORS")
+        if ancestors:
+            existing = response.headers.get("Content-Security-Policy")
+            directive = f"frame-ancestors {ancestors}"
+            if existing:
+                response.headers["Content-Security-Policy"] = f"{existing}; {directive}"
+            else:
+                response.headers["Content-Security-Policy"] = directive
+        return response
 
     # Register blueprints
     app.register_blueprint(public_bp)  # Public routes (no auth required) - MUST BE FIRST
@@ -336,6 +432,7 @@ def create_app(config=None):
     app.register_blueprint(oidc_bp)  # OIDC/OAuth routes at /auth/oidc
     app.register_blueprint(tenant_management_settings_bp)  # Tenant management settings at /settings
     app.register_blueprint(tenants_bp, url_prefix="/tenant")
+    app.register_blueprint(buyer_routing_bp)  # /tenant/<tid>/buyer-routing — Sprint 5 workstream B
     app.register_blueprint(accounts_bp, url_prefix="/tenant/<tenant_id>/accounts")
     app.register_blueprint(products_bp, url_prefix="/tenant/<tenant_id>/products")
     app.register_blueprint(principals_bp, url_prefix="/tenant/<tenant_id>")
