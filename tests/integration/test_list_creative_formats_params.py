@@ -9,14 +9,12 @@ Refactored from raw ToolContext + manual patches to harness pattern.
 from __future__ import annotations
 
 import pytest
-from adcp.types.generated_poc.core.format import (
-    Dimensions,
+from adcp.types import (
     HtmlFormatAsset,
     ImageFormatAsset,
-    Renders,
-    Responsive,
     VideoFormatAsset,
 )
+from adcp.types.generated_poc.core.format import Dimensions, Renders, Responsive
 
 from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest
 from tests.factories import TenantFactory

@@ -151,9 +151,12 @@ async def _get_signals_impl(req: GetSignalsRequest, identity: ResolvedIdentity |
             if req.filters.data_providers and signal.data_provider not in req.filters.data_providers:
                 continue
 
-            # Filter by max_cpm (using signal's first pricing option CPM)
-            if req.filters.max_cpm is not None and signal.pricing and signal.pricing.cpm > req.filters.max_cpm:
-                continue
+            # Filter by max_cpm against the first pricing option (adcp 4.4
+            # replaced the singleton ``pricing`` field with ``pricing_options``).
+            if req.filters.max_cpm is not None and signal.pricing_options:
+                first_cpm = signal.pricing_options[0].cpm
+                if first_cpm is not None and first_cpm > req.filters.max_cpm:
+                    continue
 
             # Filter by min_coverage_percentage
             if (

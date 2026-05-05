@@ -145,19 +145,17 @@ def _list_creatives_impl(
     # 3.6.0: PaginationRequest is cursor-based (max_results, cursor). DB query uses offset/limit internally.
     structured_pagination = LibraryPagination(max_results=effective_limit)
 
-    # Build sort. The listing-specific ``Sort`` enum (distinct from the
-    # tasks-list ``Sort``) accepts ``created_date``, ``updated_date``,
-    # ``name``, ``status``, ``assignment_count``.
-    field_mapping = {
-        "created_date": "created_date",
-        "updated_date": "updated_date",
-        "name": "name",
-        "status": "status",
-        "assignment_count": "assignment_count",
-        "performance_score": "assignment_count",  # no spec analog; bucket
-    }
-    mapped_field = field_mapping.get(sort_by, "created_date")
-    structured_sort = LibrarySort(field=mapped_field, direction=valid_sort_order)
+    # Build sort. The listing-specific ``Sort`` enum accepts the spec values
+    # below; reject anything else explicitly so callers don't get silently
+    # remapped (CLAUDE.md "No Quiet Failures").
+    _SPEC_SORT_FIELDS = {"created_date", "updated_date", "name", "status", "assignment_count"}
+    if sort_by not in _SPEC_SORT_FIELDS:
+        raise AdCPValidationError(
+            f"Unsupported sort_by={sort_by!r}. Must be one of: "
+            f"{sorted(_SPEC_SORT_FIELDS)}",
+            recovery="correctable",
+        )
+    structured_sort = LibrarySort(field=sort_by, direction=valid_sort_order)
 
     try:
         req = ListCreativesRequest(

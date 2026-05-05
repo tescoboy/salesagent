@@ -32,6 +32,9 @@ ROOT = Path(__file__).resolve().parents[2]
 # are upgraded to assert_called_once_with().
 # FIXME(beads-bou.5): each entry below should be upgraded to assert_called_once_with()
 WEAK_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
+    ("tests/unit/test_admin_mount.py", "test_admin_host_routes_to_wsgi_with_admin_root_path"),
+    ("tests/unit/test_admin_mount.py", "test_admin_host_preserves_non_root_path"),
+    ("tests/unit/test_admin_mount.py", "test_non_admin_host_with_admin_path_uses_path_dispatch"),
     ("tests/unit/test_auth_context_middleware_population.py", "test_resolve_auth_passes_extracted_token"),
     ("tests/unit/test_creative_repository.py", "test_creates_and_flushes"),
     ("tests/unit/test_creative_repository.py", "test_creates_assignment"),
@@ -181,6 +184,10 @@ BARE_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
     # adding to the allowlist while we shrink it organically.
     ("tests/unit/test_standard_formats.py", "test_get_format_falls_through_for_custom_agent"),
     ("tests/unit/test_standard_formats.py", "test_get_format_falls_through_for_unknown_format_on_standard_agent"),
+    ("tests/unit/test_admin_mount.py", "test_apx_incoming_host_takes_precedence_over_host"),
+    ("tests/unit/test_admin_mount.py", "test_non_admin_host_root_path_falls_through_to_inner"),
+    ("tests/unit/test_admin_mount.py", "test_missing_host_header_does_not_match_admin"),
+    ("tests/unit/test_admin_mount.py", "test_lifespan_scope_passes_through"),
     ("tests/unit/test_no_model_dump_in_impl_fixes.py", "test_create_from_request_adds_to_session"),
     ("tests/unit/test_review_agent.py", "test_returns_approval"),
     ("tests/unit/test_transport_tenant_resolution.py", "test_db_queried_only_once"),

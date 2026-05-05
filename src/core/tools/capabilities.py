@@ -40,6 +40,14 @@ from src.core.resolved_identity import ResolvedIdentity
 logger = logging.getLogger(__name__)
 
 
+#: Idempotency replay window advertised in capabilities. 24h matches the
+#: PgBackend's default cache window. Sourced here as a constant rather than
+#: re-derived in each capability response — and re-imported by
+#: ``core/main.py`` so the platform-router and the per-tool capabilities
+#: report the same value.
+IDEMPOTENCY_REPLAY_TTL_SECONDS = 86400
+
+
 # Mapping from adapter channel names to MediaChannel enum values
 CHANNEL_MAPPING: dict[str, MediaChannel] = {
     "display": MediaChannel.display,
@@ -89,7 +97,7 @@ def _get_adcp_capabilities_impl(
         return GetAdcpCapabilitiesResponse(
             adcp=Adcp(
                 major_versions=[MajorVersion(root=3)],
-                idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=86400),
+                idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=IDEMPOTENCY_REPLAY_TTL_SECONDS),
             ),
             supported_protocols=[SupportedProtocol.media_buy],
         )
@@ -240,7 +248,7 @@ def _get_adcp_capabilities_impl(
     response = GetAdcpCapabilitiesResponse(
         adcp=Adcp(
             major_versions=[MajorVersion(root=3)],
-            idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=86400),
+            idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=IDEMPOTENCY_REPLAY_TTL_SECONDS),
         ),
         supported_protocols=[SupportedProtocol.media_buy],
         media_buy=media_buy,
