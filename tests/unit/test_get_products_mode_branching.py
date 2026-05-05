@@ -1,0 +1,279 @@
+"""Unit tests for buying_mode behavior in _get_products_impl.
+
+Covers Layer 6 of the buying_mode/refine wireup:
+- Mode branching (brief / wholesale / refine)
+- brief_relevance plumbing from ranker output (brief mode only)
+- refinement_applied builder (refine mode)
+- Audit log extension (buying_mode, refine_count, defaulted_to_brief)
+- Outbound 3.0.6 wire compat in GetProductsResponse.model_dump (Layer 7)
+
+Behavioral obligations:
+    Covers: BR-UC-001-MAIN-BRIEF-MODE-02
+    Covers: BR-UC-001-ALT-WHOLESALE-MODE-02
+    Covers: BR-UC-001-ALT-REFINE-MODE-02
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from src.core.schemas import GetProductsResponse
+from src.core.tools.products import _build_refinement_applied_unable
+from tests.harness.product_unit import ProductEnv
+
+# ---------------------------------------------------------------------------
+# refinement_applied builder (Layer 6.4)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildRefinementAppliedUnable:
+    """Helper builds the refinement_applied list with status='unable' for each entry."""
+
+    def test_empty_refine_returns_empty_list(self):
+        assert _build_refinement_applied_unable(None) == []
+        assert _build_refinement_applied_unable([]) == []
+
+    def test_request_scope_entry_has_no_id_field(self):
+        items = _build_refinement_applied_unable([_fake_entry("request", None)])
+
+        assert len(items) == 1
+        assert items[0].status.value == "unable"
+        assert items[0].scope.value == "request"
+        assert items[0].id is None
+
+    def test_product_scope_entry_id_echoed(self):
+        items = _build_refinement_applied_unable([_fake_entry("product", "sports_preroll_q2")])
+
+        assert items[0].scope.value == "product"
+        assert items[0].id == "sports_preroll_q2"
+        assert items[0].status.value == "unable"
+
+    def test_proposal_scope_entry_id_echoed(self):
+        items = _build_refinement_applied_unable([_fake_entry("proposal", "prop_abc")])
+
+        assert items[0].scope.value == "proposal"
+        assert items[0].id == "prop_abc"
+
+    def test_positional_matching_with_three_entries(self):
+        entries = [_fake_entry("request"), _fake_entry("product", "p1"), _fake_entry("proposal", "pp1")]
+
+        items = _build_refinement_applied_unable(entries)
+
+        assert len(items) == 3
+        assert [i.scope.value for i in items] == ["request", "product", "proposal"]
+        assert [i.id for i in items] == [None, "p1", "pp1"]
+        # Every status is 'unable' until #1073 lands
+        assert all(i.status.value == "unable" for i in items)
+        # Notes reference the umbrella issue
+        assert all(i.notes and "#1073" in i.notes for i in items)
+
+
+# ---------------------------------------------------------------------------
+# Outbound wire compatibility (Layer 7)
+# ---------------------------------------------------------------------------
+
+
+class TestOutboundWireCompat:
+    """GetProductsResponse.model_dump renames refinement_applied id field per spec 3.0.6."""
+
+    def test_request_scope_serializes_without_id(self):
+        items = _build_refinement_applied_unable([_fake_entry("request", None)])
+        resp = GetProductsResponse(products=[], refinement_applied=items)
+
+        applied = resp.model_dump(mode="json")["refinement_applied"]
+
+        assert applied[0]["scope"] == "request"
+        assert "id" not in applied[0]
+        assert "product_id" not in applied[0]
+        assert "proposal_id" not in applied[0]
+
+    def test_product_scope_serializes_as_product_id(self):
+        items = _build_refinement_applied_unable([_fake_entry("product", "p1")])
+        resp = GetProductsResponse(products=[], refinement_applied=items)
+
+        applied = resp.model_dump(mode="json")["refinement_applied"]
+
+        assert applied[0]["product_id"] == "p1"
+        assert "id" not in applied[0]
+        assert "proposal_id" not in applied[0]
+
+    def test_proposal_scope_serializes_as_proposal_id(self):
+        items = _build_refinement_applied_unable([_fake_entry("proposal", "pp1")])
+        resp = GetProductsResponse(products=[], refinement_applied=items)
+
+        applied = resp.model_dump(mode="json")["refinement_applied"]
+
+        assert applied[0]["proposal_id"] == "pp1"
+        assert "id" not in applied[0]
+        assert "product_id" not in applied[0]
+
+    def test_no_refinement_applied_passes_through(self):
+        # When refinement_applied is None (brief/wholesale modes), nothing changes
+        resp = GetProductsResponse(products=[], refinement_applied=None)
+        result = resp.model_dump(mode="json")
+        assert result.get("refinement_applied") is None
+
+    def test_mixed_scopes_each_gets_correct_field(self):
+        entries = [_fake_entry("request"), _fake_entry("product", "p1"), _fake_entry("proposal", "pp1")]
+        items = _build_refinement_applied_unable(entries)
+        resp = GetProductsResponse(products=[], refinement_applied=items)
+
+        applied = resp.model_dump(mode="json")["refinement_applied"]
+
+        assert applied[0]["scope"] == "request"
+        assert "id" not in applied[0] and "product_id" not in applied[0] and "proposal_id" not in applied[0]
+        assert applied[1]["product_id"] == "p1"
+        assert applied[2]["proposal_id"] == "pp1"
+
+
+# ---------------------------------------------------------------------------
+# Mode branching at the impl level (Layer 6.1, 6.2)
+# ---------------------------------------------------------------------------
+
+
+class TestModeBranching:
+    """_get_products_impl branches on req.buying_mode for ranker, brief_relevance, refinement_applied."""
+
+    async def test_wholesale_mode_skips_ranker_and_omits_brief_relevance(self):
+        # tenant_overrides go through ProductEnv kwargs
+        with ProductEnv(product_ranking_prompt="rank these") as env:
+            env.add_product(product_id="prod_001", name="Display Ad")
+
+            response = await env.call_impl(buying_mode="wholesale", brief="")
+
+            # No ranker call (wholesale skips ranking)
+            assert env.mock["ranking_factory"].called is False  # type: ignore[attr-defined]
+            # No brief_relevance on products (wholesale: no brief)
+            assert all(p.brief_relevance is None for p in response.products)
+            # No refinement_applied on wholesale response
+            assert response.refinement_applied is None
+
+    async def test_refine_mode_returns_refinement_applied_unable(self):
+        with ProductEnv() as env:
+            env.add_product(product_id="prod_001")
+
+            response = await env.call_impl(
+                buying_mode="refine",
+                brief="",
+                refine=[{"scope": "request", "ask": "more video"}],
+            )
+
+            assert response.refinement_applied is not None
+            assert len(response.refinement_applied) == 1
+            assert response.refinement_applied[0].status.value == "unable"
+            assert response.refinement_applied[0].scope.value == "request"
+            # Refine mode does not run the ranker until #1073
+            assert all(p.brief_relevance is None for p in response.products)
+
+    async def test_brief_mode_runs_ranker_when_configured(self):
+        """Brief mode invokes the ranker when tenant has product_ranking_prompt + AI enabled."""
+        with ProductEnv(product_ranking_prompt="rank these") as env:
+            env.add_product(product_id="prod_001", name="High-relevance product")
+
+            # Wire the ranker mock to claim AI is enabled and return a ranking
+            mock_factory = MagicMock()
+            mock_factory.is_ai_enabled.return_value = True
+            mock_factory.create_model.return_value = MagicMock()
+            env.mock["ranking_factory"].return_value = mock_factory  # type: ignore[attr-defined]
+
+            with (
+                patch(
+                    "src.services.ai.agents.ranking_agent.create_ranking_agent",
+                    return_value=MagicMock(),
+                ),
+                patch(
+                    "src.services.ai.agents.ranking_agent.rank_products_async",
+                    new_callable=AsyncMock,
+                    return_value=_ranking_result_for(["prod_001"], reason="explains the brief match"),
+                ),
+            ):
+                response = await env.call_impl(buying_mode="brief", brief="display ads")
+
+            assert len(response.products) == 1
+            # brief_relevance is plumbed from ranker.reason
+            assert response.products[0].brief_relevance == "explains the brief match"
+            assert response.refinement_applied is None
+
+
+# ---------------------------------------------------------------------------
+# Audit log extension (Layer 6.5)
+# ---------------------------------------------------------------------------
+
+
+class TestAuditLogExtension:
+    """Audit log details include buying_mode, refine_count, defaulted_to_brief."""
+
+    async def test_brief_mode_audit_includes_new_fields(self):
+        with ProductEnv() as env, patch("src.core.tools.products.get_audit_logger") as mock_get_audit:
+            mock_audit = MagicMock()
+            mock_get_audit.return_value = mock_audit
+
+            await env.call_impl(buying_mode="brief", brief="display ads")
+
+            # Find the get_products audit call (other operations may also log)
+            calls = [c for c in mock_audit.log_operation.call_args_list if c.kwargs.get("operation") == "get_products"]
+            assert calls, "Expected at least one get_products audit call"
+            details = calls[0].kwargs["details"]
+
+            assert details["buying_mode"] == "brief"
+            assert details["refine_count"] == 0
+            assert details["defaulted_to_brief"] is False
+
+    async def test_refine_mode_audit_records_refine_count(self):
+        with ProductEnv() as env, patch("src.core.tools.products.get_audit_logger") as mock_get_audit:
+            mock_audit = MagicMock()
+            mock_get_audit.return_value = mock_audit
+
+            await env.call_impl(
+                buying_mode="refine",
+                brief="",
+                refine=[
+                    {"scope": "request", "ask": "more video"},
+                    {"scope": "product", "product_id": "p1", "ask": "include this"},
+                ],
+            )
+
+            calls = [c for c in mock_audit.log_operation.call_args_list if c.kwargs.get("operation") == "get_products"]
+            assert calls
+            details = calls[0].kwargs["details"]
+            assert details["buying_mode"] == "refine"
+            assert details["refine_count"] == 2
+
+    async def test_defaulted_to_brief_flag_propagates(self):
+        with ProductEnv() as env, patch("src.core.tools.products.get_audit_logger") as mock_get_audit:
+            mock_audit = MagicMock()
+            mock_get_audit.return_value = mock_audit
+
+            await env.call_impl(buying_mode="brief", brief="display ads", defaulted_to_brief=True)
+
+            calls = [c for c in mock_audit.log_operation.call_args_list if c.kwargs.get("operation") == "get_products"]
+            assert calls
+            assert calls[0].kwargs["details"]["defaulted_to_brief"] is True
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+
+def _fake_entry(scope: str, entry_id: str | None = None) -> Any:
+    """Build a minimal stand-in for a Refine variant with .scope and .id attributes."""
+    e = MagicMock()
+    e.scope = scope
+    e.id = entry_id
+    return e
+
+
+def _ranking_result_for(product_ids: list[str], reason: str = "matched") -> Any:
+    """Build a fake ProductRankingResult with rankings for the given product_ids."""
+    rankings = []
+    for pid in product_ids:
+        r = MagicMock()
+        r.product_id = pid
+        r.relevance_score = 0.9
+        r.reason = reason
+        rankings.append(r)
+    result = MagicMock()
+    result.rankings = rankings
+    return result

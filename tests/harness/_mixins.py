@@ -461,6 +461,8 @@ class ProductMixin:
         property_list: dict[str, Any] | None = None,
         context: dict[str, Any] | None = None,
         buying_mode: str | None = None,
+        refine: list[dict[str, Any]] | None = None,
+        defaulted_to_brief: bool = False,
         **extra: Any,
     ) -> GetProductsResponse:
         """Call _get_products_impl with the given parameters.
@@ -493,7 +495,10 @@ class ProductMixin:
         # Default buying_mode based on whether brief is provided so the v3 cross-mode
         # invariants are satisfied. Tests can override by passing buying_mode explicitly.
         if buying_mode is None:
-            buying_mode = "brief" if (brief and brief.strip()) else "wholesale"
+            if refine is not None:
+                buying_mode = "refine"
+            else:
+                buying_mode = "brief" if (brief and brief.strip()) else "wholesale"
 
         # Brief is forbidden in wholesale/refine; clear it if the mode says so.
         effective_brief: str | None = brief
@@ -507,6 +512,7 @@ class ProductMixin:
             property_list=property_list,
             context=context,
             buying_mode=buying_mode,
+            refine=refine,
             **extra,
         )
-        return await _get_products_impl(req, identity)
+        return await _get_products_impl(req, identity, defaulted_to_brief=defaulted_to_brief)

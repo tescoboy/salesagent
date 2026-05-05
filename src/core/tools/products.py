@@ -15,6 +15,7 @@ from adcp import Product as LibraryProduct
 from adcp.types import PropertyListReference, PushNotificationConfig
 from adcp.types.generated_poc.core.brand_ref import BrandReference
 from adcp.types.generated_poc.core.context import ContextObject
+from adcp.types.generated_poc.media_buy.get_products_response import RefinementAppliedItem
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
 from pydantic import ValidationError
@@ -142,6 +143,43 @@ def filter_products_by_property_list(
     return [p for p in products if should_include_product_for_property_list(p, allowed_properties)]
 
 
+_REFINE_NOT_PERSISTED_NOTES = (
+    "Proposal-state persistence is not yet implemented; refinement cannot be applied. Tracked in #1073."
+)
+
+
+def _build_refinement_applied_unable(
+    refine_entries: list[Any] | None,
+) -> list[RefinementAppliedItem]:
+    """Build a refinement_applied response for buying_mode='refine'.
+
+    Until #1073 implements proposal persistence and intelligent refinement, every entry
+    reports status='unable' with a notes field that names the umbrella issue. The response
+    matches the request's refine array by position per AdCP spec.
+
+    Each item echoes the corresponding request entry's scope and id (when present) so
+    orchestrators can cross-validate alignment.
+    """
+    if not refine_entries:
+        return []
+
+    items: list[RefinementAppliedItem] = []
+    for entry in refine_entries:
+        # Entry can be one of three discriminated variants (Refine | Refine1 | Refine2).
+        # Read scope and id defensively — request scope has no id; product/proposal do.
+        scope = getattr(entry, "scope", None)
+        entry_id = getattr(entry, "id", None)
+        items.append(
+            RefinementAppliedItem(
+                scope=scope,
+                id=entry_id,
+                status="unable",
+                notes=_REFINE_NOT_PERSISTED_NOTES,
+            )
+        )
+    return items
+
+
 async def _get_products_impl(
     req: GetProductsRequestGenerated,
     identity: ResolvedIdentity | None,
@@ -164,8 +202,15 @@ async def _get_products_impl(
     """
     start_time = time.time()
 
-    # Require at least one search criterion (brief, brand, or filters)
-    if not req.brief and not req.brand and not req.filters:
+    # Resolve effective buying mode. The schema validator on GetProductsRequest enforces
+    # cross-mode invariants (brief required in brief mode, refine required in refine mode,
+    # mutual exclusion across modes). Default to "brief" defensively if validator was
+    # bypassed (it shouldn't be in normal flows).
+    mode: str = req.buying_mode or "brief"
+
+    # Wholesale and refine modes legitimately omit brief/brand/filters; only brief mode
+    # needs a discovery criterion, and the validator already enforces brief presence there.
+    if mode == "brief" and not req.brief and not req.brand and not req.filters:
         raise AdCPValidationError("At least one of 'brief', 'brand', or 'filters' is required")
 
     # Extract identity fields
@@ -668,9 +713,10 @@ async def _get_products_impl(
                     filtered_products.append(product)
         eligible_products = filtered_products
 
-    # AI-powered product ranking (when tenant has product_ranking_prompt configured)
+    # AI-powered product ranking (brief mode only; wholesale and refine bypass the ranker
+    # per AdCP spec — wholesale returns raw inventory, refine iterates on prior state).
     product_ranking_prompt = tenant.get("product_ranking_prompt")
-    if product_ranking_prompt and brief_text and eligible_products:
+    if mode == "brief" and product_ranking_prompt and brief_text and eligible_products:
         try:
             from src.services.ai.agents.ranking_agent import (
                 create_ranking_agent,
@@ -704,6 +750,15 @@ async def _get_products_impl(
 
                 # Filter out products with very low relevance (score < 0.1)
                 eligible_products = [p for p in eligible_products if ranking_map.get(p.product_id, (0.0, ""))[0] >= 0.1]
+
+                # Surface the ranker's reason on each surviving product as brief_relevance
+                # per AdCP 3.0 Product schema ("Explanation of why this product matches the
+                # brief (only included when brief is provided)"). Spec-compliant since brief
+                # mode requires a brief.
+                for product in eligible_products:
+                    reason = ranking_map.get(product.product_id, (0.0, ""))[1]
+                    if reason:
+                        product.brief_relevance = reason
 
                 # Log the ranking results
                 for r in ranking_result.rankings:
@@ -756,6 +811,12 @@ async def _get_products_impl(
         for product in eligible_products:
             product.pricing_options = []
 
+    # Build refinement_applied for buying_mode='refine'. Until #1073 implements proposal
+    # persistence and intelligent refinement, every entry reports status='unable' with a
+    # notes field that names the umbrella issue. The response still carries products so
+    # the storyboard's `field_present: products` validation passes.
+    refinement_applied = _build_refinement_applied_unable(req.refine) if mode == "refine" else None
+
     # Our Product extends LibraryProduct - cast for type safety since list is invariant
     # When serialized, Pydantic automatically uses library Product fields
     # Internal-only fields (implementation_config) excluded by model_dump()
@@ -768,6 +829,7 @@ async def _get_products_impl(
         products=cast(list[LibraryProduct], eligible_products),
         errors=None,
         context=req.context,
+        refinement_applied=refinement_applied,
     )
 
     # Log successful get_products call
@@ -784,6 +846,9 @@ async def _get_products_impl(
             "brief_length": len(brief_text),
             "has_filters": req.filters is not None,
             "has_brand": req.brand is not None,
+            "buying_mode": mode,
+            "refine_count": len(req.refine) if req.refine else 0,
+            "defaulted_to_brief": defaulted_to_brief,
             "elapsed_ms": elapsed_ms,
         },
     )

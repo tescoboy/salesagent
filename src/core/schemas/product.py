@@ -367,6 +367,15 @@ class GetProductsResponse(NestedModelSerializerMixin, LibraryGetProductsResponse
     Per AdCP PR #113, this response contains ONLY domain data.
     Protocol fields (status, task_id, message, context_id) are added by the
     protocol layer (MCP, A2A, REST) via ProtocolEnvelope wrapper.
+
+    Outbound wire compatibility (rc.3 -> 3.0.6):
+    - The installed adcp library (rc.3) serializes RefinementAppliedItem.id as `id`.
+    - Spec 3.0.6 (and the @adcp/sdk@6.11.0 storyboard validator) expect `product_id`
+      / `proposal_id` based on the item's scope.
+    - model_dump() below renames `id` -> `product_id` for product-scope items and
+      `id` -> `proposal_id` for proposal-scope items in refinement_applied. Removable
+      when the installed adcp library targets 3.0.6+; detected by the rc.3 <-> 3.0.6
+      skew fitness function.
     """
 
     def __str__(self) -> str:
@@ -395,6 +404,36 @@ class GetProductsResponse(NestedModelSerializerMixin, LibraryGetProductsResponse
             return f"{base_msg} Please connect through an authorized buying agent for pricing data."
 
         return base_msg
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Serialize the response with rc.3 -> 3.0.6 wire compatibility for refinement_applied.
+
+        The library's RefinementAppliedItem.id field becomes `product_id` (scope=product)
+        or `proposal_id` (scope=proposal) on the wire to satisfy spec 3.0.6 schema
+        validation. Items with scope=request have no id and pass through unchanged.
+        """
+        result = super().model_dump(**kwargs)
+        applied = result.get("refinement_applied")
+        if not applied:
+            return result
+
+        for item in applied:
+            if not isinstance(item, dict):
+                continue
+            scope = item.get("scope")
+            entry_id = item.get("id")
+            if entry_id is None:
+                # Drop empty id field for cleaner output
+                item.pop("id", None)
+                continue
+            if scope == "product":
+                item["product_id"] = entry_id
+                item.pop("id", None)
+            elif scope == "proposal":
+                item["proposal_id"] = entry_id
+                item.pop("id", None)
+            # scope == "request" or unknown -> id stays as-is (request scope has no id field)
+        return result
 
 
 class ProductCatalog(SalesAgentBaseModel):
