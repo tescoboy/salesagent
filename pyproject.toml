@@ -250,4 +250,4 @@ ignore-signatures = true
 # v4.4.2 regressed the pin back to <1.0.2; avoid it until v4.4.3+ ships with
 # the corrected pin.
 [tool.uv.sources]
-adcp = { git = "https://github.com/adcontextprotocol/adcp-client-python.git", tag = "v4.4.2" }
+adcp = { git = "https://github.com/adcontextprotocol/adcp-client-python.git", tag = "v4.4.3" }

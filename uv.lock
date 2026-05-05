@@ -74,8 +74,8 @@ wheels = [
 
 [[package]]
 name = "adcp"
-version = "4.4.2"
-source = { git = "https://github.com/adcontextprotocol/adcp-client-python.git?tag=v4.4.2#4a6b8f5a16d309770666eb4b3bdd45d7763dcd01" }
+version = "4.4.3"
+source = { git = "https://github.com/adcontextprotocol/adcp-client-python.git?tag=v4.4.3#8dc4670f6cfcb938be67f465027d4a3c222cc4c4" }
 dependencies = [
     { name = "a2a-sdk" },
     { name = "cryptography" },
@@ -202,7 +202,7 @@ requires-dist = [
     { name = "a2a-cli", specifier = ">=0.2.0" },
     { name = "a2a-sdk", extras = ["http-server"], specifier = ">=0.3.19" },
     { name = "a2wsgi", specifier = ">=1.10.0" },
-    { name = "adcp", git = "https://github.com/adcontextprotocol/adcp-client-python.git?tag=v4.4.2" },
+    { name = "adcp", git = "https://github.com/adcontextprotocol/adcp-client-python.git?tag=v4.4.3" },
     { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "allure-pytest", marker = "extra == 'ui-tests'", specifier = "==2.13.5" },
