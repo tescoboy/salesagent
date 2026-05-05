@@ -8,7 +8,7 @@ Usage::
     from tests.factories.format import FormatFactory, make_asset
 
     # Simple format
-    fmt = FormatFactory.build(name="banner", type=FormatCategory.display)
+    fmt = FormatFactory.build(name="banner")
 
     # With assets
     fmt = FormatFactory.build(
@@ -26,18 +26,16 @@ Usage::
 from __future__ import annotations
 
 import factory
-from adcp.types.generated_poc.core.format import (
-    Assets,
-    Assets5,
-    Assets6,
-    Assets7,
-    Assets8,
-    Assets9,
-    Dimensions,
-    Renders,
+from adcp.types import (
+    AudioFormatAsset,
+    HtmlFormatAsset,
+    ImageFormatAsset,
+    MarkdownFormatAsset,
     Responsive,
+    TextFormatAsset,
+    VideoFormatAsset,
 )
-from adcp.types.generated_poc.enums.format_category import FormatCategory
+from adcp.types import Dimensions, Renders
 
 from src.core.schemas import Format, FormatId
 
@@ -46,23 +44,23 @@ AGENT_URL = "https://creative.adcontextprotocol.org"
 # ── Asset class mapping ──────────────────────────────────────────────
 
 _ASSET_CLASS_MAP = {
-    "image": Assets,
-    "video": Assets5,
-    "audio": Assets6,
-    "text": Assets7,
-    "markdown": Assets8,
-    "html": Assets9,
+    "image": ImageFormatAsset,
+    "video": VideoFormatAsset,
+    "audio": AudioFormatAsset,
+    "text": TextFormatAsset,
+    "markdown": MarkdownFormatAsset,
+    "html": HtmlFormatAsset,
 }
 
 
-def make_asset(asset_type: str, asset_id: str | None = None) -> Assets:
+def make_asset(asset_type: str, asset_id: str | None = None) -> ImageFormatAsset:
     """Create a typed asset object from an asset type string.
 
     >>> a = make_asset("video")
     >>> a.asset_type
     'video'
     """
-    cls = _ASSET_CLASS_MAP.get(asset_type, Assets)
+    cls = _ASSET_CLASS_MAP.get(asset_type, ImageFormatAsset)
     return cls(asset_id=asset_id or f"{asset_type}_asset", required=True)
 
 
@@ -129,16 +127,18 @@ class FormatFactory(factory.Factory):
 
     format_id = factory.SubFactory(FormatIdFactory)
     name = factory.Sequence(lambda n: f"format_{n}")
-    type = FormatCategory.display
     is_standard = True
 
 
-# ── Category mapping ─────────────────────────────────────────────────
+# ── Category mapping (compat shim) ──────────────────────────────────
+# FormatCategory was removed in adcp 3.12. Format.type no longer exists.
+# BDD steps still pass type= as an extra field (Pydantic ignores in dev mode).
+# This mapping provides string values so existing step code doesn't crash.
 
-CATEGORY_MAP: dict[str, FormatCategory] = {
-    "display": FormatCategory.display,
-    "video": FormatCategory.video,
-    "audio": FormatCategory.audio,
-    "native": FormatCategory.native,
-    "dooh": FormatCategory.dooh,
+CATEGORY_MAP: dict[str, str | None] = {
+    "display": "display",
+    "video": "video",
+    "audio": "audio",
+    "native": "native",
+    "dooh": "dooh",
 }

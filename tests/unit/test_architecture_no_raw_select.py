@@ -114,6 +114,19 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/admin/blueprints/auth.py", "tenant_login"),
     ("src/admin/blueprints/auth.py", "test_auth"),
     ("src/admin/blueprints/authorized_properties.py", "_construct_agent_url"),
+    # FIXME(embedded-mode-sprint-5-piece-B): fold into BuyerRoutingRepository
+    # when workstream C lands the editor + repository.
+    ("src/admin/blueprints/buyer_routing.py", "buyer_routing_page"),
+    # FIXME(embedded-mode-sprint-5-piece-C): fold into BuyerRoutingService —
+    # session-authenticated CRUD endpoints called by the page's in-page JS
+    # (the tenant-management API key is server-to-server only and must
+    # not reach the browser, so the page hits these instead).
+    ("src/admin/blueprints/buyer_routing.py", "_resolve_advertiser_names"),
+    ("src/admin/blueprints/buyer_routing.py", "search_advertisers"),
+    ("src/admin/blueprints/buyer_routing.py", "update_default_advertiser"),
+    ("src/admin/blueprints/buyer_routing.py", "create_rule"),
+    ("src/admin/blueprints/buyer_routing.py", "patch_rule"),
+    ("src/admin/blueprints/buyer_routing.py", "delete_rule"),
     ("src/admin/blueprints/authorized_properties.py", "_save_properties_batch"),
     ("src/admin/blueprints/authorized_properties.py", "create_property"),
     ("src/admin/blueprints/authorized_properties.py", "create_property_tag"),
@@ -146,12 +159,14 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/admin/blueprints/inventory.py", "check_inventory_sync"),
     ("src/admin/blueprints/inventory.py", "get_inventory_list"),
     ("src/admin/blueprints/inventory.py", "get_inventory_sizes"),
+    ("src/admin/blueprints/inventory.py", "_batch_fetch_ancestors"),  # FIXME(salesagent-y6n3): extract to repository
     ("src/admin/blueprints/inventory.py", "get_inventory_tree"),
     ("src/admin/blueprints/inventory.py", "get_order_details"),
     ("src/admin/blueprints/inventory.py", "get_orders"),
     ("src/admin/blueprints/inventory.py", "get_sync_status"),
     ("src/admin/blueprints/inventory.py", "get_targeting_data"),
     ("src/admin/blueprints/inventory.py", "get_targeting_values"),
+    ("src/admin/blueprints/inventory.py", "_load_tenant_for_inventory"),
     ("src/admin/blueprints/inventory.py", "inventory_browser"),
     ("src/admin/blueprints/inventory.py", "orders_browser"),
     ("src/admin/blueprints/inventory.py", "sync_inventory"),
@@ -257,6 +272,69 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/admin/tenant_management_api.py", "delete_tenant"),
     ("src/admin/tenant_management_api.py", "get_tenant"),
     ("src/admin/tenant_management_api.py", "update_tenant"),
+    # FIXME(salesagent-managed-tenant-mode): sprint-1 endpoints land before TenantRepository exists.
+    # These will fold into a repository when the publisher-managed-surface API arrives in sprint 2/3.
+    ("src/admin/tenant_management_api.py", "_resolve_default_currency"),
+    ("src/admin/tenant_management_api.py", "_persist_adapter_config"),
+    ("src/admin/tenant_management_api.py", "list_tenants"),
+    ("src/admin/tenant_management_api.py", "provision_tenant"),
+    ("src/admin/tenant_management_api.py", "patch_tenant"),
+    ("src/admin/tenant_management_api.py", "deactivate_tenant"),
+    ("src/admin/tenant_management_api.py", "reactivate_tenant"),
+    ("src/admin/tenant_management_api.py", "get_adapter_config"),
+    ("src/admin/tenant_management_api.py", "put_adapter_config"),
+    ("src/admin/tenant_management_api.py", "adapter_test_connection"),
+    # FIXME(embedded-mode-sprint-1.6/1.8): Account + buyer-advertiser-mappings + recent-buyers
+    # + refresh endpoints landed before AccountRoutingRule / SyncJob / Tenant repositories
+    # existed. Fold into repositories alongside the auto_provision_advertisers retirement
+    # follow-up once Sprint 1.8 is end-to-end verified in production.
+    ("src/admin/tenant_management_api.py", "_find_account_by_natural_key"),
+    ("src/admin/tenant_management_api.py", "upsert_account"),
+    ("src/admin/tenant_management_api.py", "list_managed_accounts"),
+    ("src/admin/tenant_management_api.py", "list_buyer_advertiser_mappings"),
+    ("src/admin/tenant_management_api.py", "create_buyer_advertiser_mapping"),
+    ("src/admin/tenant_management_api.py", "patch_buyer_advertiser_mapping"),
+    ("src/admin/tenant_management_api.py", "delete_buyer_advertiser_mapping"),
+    ("src/admin/tenant_management_api.py", "list_recent_buyers"),
+    ("src/admin/tenant_management_api.py", "refresh_tenant"),
+    # FIXME(refresh-worker-spawn): selects pending SyncJobs to decide which
+    # workers to spawn. Folds into a SyncJobRepository alongside the existing
+    # /refresh endpoint debt.
+    ("src/admin/tenant_management_api.py", "_spawn_refresh_workers"),
+    # FIXME(embedded-mode-sprint-1.8-piece-G): shared /refresh helper used
+    # by both refresh_tenant and provision_tenant (first-sync-on-provision).
+    # Reads Tenant for adapter_type + SyncJob for idempotency window. Folds
+    # into a SyncJobRepository alongside the existing /refresh debt.
+    ("src/admin/tenant_management_api.py", "_create_and_spawn_refresh"),
+    # FIXME(embedded-mode-sprint-5-piece-A): gam_advertisers cache list endpoint —
+    # fold into GamAdvertiserRepository follow-up.
+    ("src/admin/tenant_management_api.py", "list_gam_advertisers"),
+    # FIXME(embedded-mode-sprint-5-piece-D): GamAdvertiserRepository TBD —
+    # the cache table is read raw from the endpoint + the routing-rule
+    # validator until the repository class lands.
+    ("src/admin/tenant_management_api.py", "list_gam_advertisers"),
+    ("src/services/gam_advertisers_sync.py", "_build_gam_client_for_tenant"),
+    ("src/services/gam_advertisers_sync.py", "_upsert_advertisers"),
+    ("src/services/gam_advertisers_sync.py", "sync_advertisers"),
+    ("src/services/gam_advertisers_sync.py", "sync_advertisers_pending_jobs"),
+    # FIXME(embedded-mode-sprint-1.5): tenant_status_service aggregates 5 ORM models
+    # for the /status snapshot. Fold into a StatusRepository or per-block repos.
+    ("src/admin/services/tenant_status_service.py", "get_tenant_status"),
+    ("src/admin/services/tenant_status_service.py", "_adapter_block"),
+    ("src/admin/services/tenant_status_service.py", "_syncs_block"),
+    ("src/admin/services/tenant_status_service.py", "_workflows_block"),
+    ("src/admin/services/tenant_status_service.py", "_setup_tasks_block"),
+    # FIXME(embedded-mode-sprint-2): managed/embedded mode auth bypass loads tenant
+    # by tenant_id from header. TenantRepository will fold this in.
+    ("src/admin/utils/embedded_mode_auth.py", "_load_tenant"),
+    # FIXME(embedded-mode-sprint-1.8): buyer-advertiser routing chain reads Tenant +
+    # AdapterConfig + AdvertiserRoutingRule. AdvertiserRoutingRuleRepository TBD.
+    ("src/services/buyer_advertiser_routing.py", "ensure_sandbox_advertiser"),
+    ("src/services/buyer_advertiser_routing.py", "_find_rule"),
+    ("src/services/buyer_advertiser_routing.py", "resolve_advertiser_for_buy"),
+    # FIXME(sync-accounts-advertiser-mapping): sprint 1.6 piece C reads Account at
+    # buy-time. Folds into AccountRepository (which exists) — open follow-up.
+    ("src/core/helpers/account_provisioning.py", "resolve_account_advertiser"),
     ("src/admin/utils/helpers.py", "decorated_function"),
     ("src/admin/utils/helpers.py", "decorator"),
     ("src/admin/utils/helpers.py", "get_custom_targeting_mappings"),
@@ -356,6 +434,15 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("src/services/order_approval_service.py", "_update_approval_progress"),
     ("src/services/order_approval_service.py", "get_approval_status"),
     ("src/services/order_approval_service.py", "start_order_approval_background"),
+    # FIXME(embedded-mode-sprint-5-piece-B): fold into BuyerRoutingRepository
+    # alongside the editor's CRUD repo in workstream C.
+    ("src/services/recent_buyers_service.py", "compute_recent_buyers"),
+    # FIXME(embedded-mode-sprint-5-piece-A): gam_advertisers cache sync —
+    # fold into GamAdvertiserRepository / SyncJobRepository follow-up.
+    ("src/services/gam_advertisers_sync.py", "_build_gam_client_for_tenant"),
+    ("src/services/gam_advertisers_sync.py", "_upsert_advertisers"),
+    ("src/services/gam_advertisers_sync.py", "sync_advertisers"),
+    ("src/services/gam_advertisers_sync.py", "sync_advertisers_pending_jobs"),
     ("src/services/policy_service.py", "_update_currencies"),
     ("src/services/policy_service.py", "get_policies"),
     ("src/services/policy_service.py", "update_policies"),

@@ -10,6 +10,12 @@
 {% endblock %}
 
 {% block content %}
+{% set crumbs = [
+    {"label": tenant.name, "url": url_for('tenants.dashboard', tenant_id=tenant.tenant_id)},
+    {"label": "Settings"}
+] %}
+{% set crumbs = crumbs | with_embed_root %}
+{% include "_breadcrumb.html" %}
 <style>
     /* Spinning animation for sync button */
     @keyframes spin {
@@ -19,151 +25,116 @@
 
     .settings-layout {
         display: grid;
-        grid-template-columns: 250px 1fr;
-        gap: 2rem;
+        grid-template-columns: 240px 1fr;
+        gap: var(--sa-space-6);
         min-height: 600px;
     }
 
     .settings-nav {
-        background: white;
-        border-radius: 12px;
-        padding: 1rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        background: var(--sa-bg-surface);
+        border: 1px solid var(--sa-border);
+        border-radius: var(--sa-radius-xl);
+        padding: var(--sa-space-3);
+        box-shadow: var(--sa-shadow-sm);
         height: fit-content;
         position: sticky;
-        top: 1rem;
+        top: var(--sa-space-4);
     }
 
     .settings-nav-item {
         display: flex;
         align-items: center;
-        gap: 0.75rem;
-        padding: 0.75rem 1rem;
-        margin-bottom: 0.25rem;
-        border-radius: 8px;
+        gap: var(--sa-space-3);
+        padding: var(--sa-space-3) var(--sa-space-4);
+        margin-bottom: var(--sa-space-1);
+        border-radius: var(--sa-radius-md);
         cursor: pointer;
-        transition: all 0.2s;
-        font-size: 0.875rem;
-        color: #4b5563;
+        transition: background var(--sa-duration-fast) var(--sa-easing),
+                    color var(--sa-duration-fast) var(--sa-easing);
+        font-size: var(--sa-text-sm);
+        color: var(--sa-text-default);
         text-decoration: none;
     }
 
     .settings-nav-item:hover {
-        background: #f3f4f6;
-        color: #111827;
+        background: var(--sa-gray-100);
+        color: var(--sa-text-strong);
+        text-decoration: none;
     }
 
     .settings-nav-item.active {
-        background: #eff6ff;
-        color: #2563eb;
+        background: var(--sa-primary-tint);
+        color: var(--sa-primary);
         font-weight: 600;
     }
 
     .settings-nav-icon {
         width: 20px;
         text-align: center;
+        flex-shrink: 0;
     }
 
     .settings-nav-separator {
         height: 1px;
-        background: #e5e7eb;
-        margin: 1rem 0;
+        background: var(--sa-border);
+        margin: var(--sa-space-3) 0;
     }
 
     .settings-content {
-        background: white;
-        border-radius: 12px;
-        padding: 2rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        background: var(--sa-bg-surface);
+        border: 1px solid var(--sa-border);
+        border-radius: var(--sa-radius-xl);
+        padding: var(--sa-space-6);
+        box-shadow: var(--sa-shadow-sm);
     }
 
-    .settings-section {
-        display: none;
-    }
-
-    .settings-section.active {
-        display: block;
-    }
+    .settings-section { display: none; }
+    .settings-section.active { display: block; }
 
     .settings-header {
-        margin-bottom: 2rem;
-        padding-bottom: 1rem;
-        border-bottom: 1px solid #e5e7eb;
+        margin-bottom: var(--sa-space-6);
+        padding-bottom: var(--sa-space-4);
+        border-bottom: 1px solid var(--sa-border);
     }
 
     .settings-header h2 {
-        margin: 0 0 0.5rem 0;
-        font-size: 1.5rem;
+        margin: 0 0 var(--sa-space-2) 0;
+        font-size: var(--sa-text-xl);
         font-weight: 700;
-        color: #111827;
+        color: var(--sa-text-strong);
+        letter-spacing: -0.01em;
     }
 
     .settings-header p {
         margin: 0;
-        color: #6b7280;
-        font-size: 0.875rem;
+        color: var(--sa-text-muted);
+        font-size: var(--sa-text-sm);
     }
 
     .form-section {
-        margin-bottom: 2rem;
+        margin-bottom: var(--sa-space-6);
     }
 
     .form-section h3 {
-        margin: 0 0 1rem 0;
-        font-size: 1.125rem;
+        margin: 0 0 var(--sa-space-4) 0;
+        font-size: var(--sa-text-lg);
         font-weight: 600;
-        color: #111827;
+        color: var(--sa-text-strong);
     }
 
     .form-grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 1rem;
+        gap: var(--sa-space-4);
     }
 
-    .form-group {
-        margin-bottom: 1rem;
-    }
-
-    .form-group label {
-        display: block;
-        margin-bottom: 0.375rem;
-        font-size: 0.875rem;
-        font-weight: 500;
-        color: #374151;
-    }
-
-    .form-group input,
-    .form-group select,
-    .form-group textarea {
-        width: 100%;
-        padding: 0.5rem 0.75rem;
-        border: 1px solid #d1d5db;
-        border-radius: 6px;
-        font-size: 0.875rem;
-        transition: all 0.2s;
-    }
-
-    .form-group input:focus,
-    .form-group select:focus,
-    .form-group textarea:focus {
-        outline: none;
-        border-color: #3b82f6;
-        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-    }
-
-    .form-group small {
-        display: block;
-        margin-top: 0.25rem;
-        font-size: 0.75rem;
-        color: #6b7280;
-    }
+    /* form-group / form-group input rules live in admin.css */
 
     .checkbox-group {
         display: flex;
         align-items: center;
-        gap: 0.5rem;
-        margin-bottom: 1rem;
+        gap: var(--sa-space-2);
+        margin-bottom: var(--sa-space-4);
     }
 
     .checkbox-group input[type="checkbox"] {
@@ -173,237 +144,163 @@
 
     .checkbox-group label {
         margin: 0;
-        font-size: 0.875rem;
-        color: #374151;
+        font-size: var(--sa-text-sm);
+        color: var(--sa-text-default);
     }
 
     .status-card {
-        background: #f9fafb;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 1rem;
-        margin-bottom: 1rem;
+        background: var(--sa-gray-50);
+        border: 1px solid var(--sa-border);
+        border-radius: var(--sa-radius-lg);
+        padding: var(--sa-space-4);
+        margin-bottom: var(--sa-space-4);
     }
 
-    .status-card.success {
-        background: #f0fdf4;
-        border-color: #86efac;
-    }
-
-    .status-card.warning {
-        background: #fffbeb;
-        border-color: #fde047;
-    }
-
-    .status-card.error {
-        background: #fef2f2;
-        border-color: #fca5a5;
-    }
-
+    .status-card.success { background: var(--sa-success-tint); border-color: var(--sa-success-border); }
+    .status-card.warning { background: var(--sa-warning-tint); border-color: var(--sa-warning-border); }
+    .status-card.error   { background: var(--sa-danger-tint);  border-color: var(--sa-danger-border); }
     .status-card.danger {
-        background: #fef2f2;
-        border: 2px solid #dc2626;
-        border-left: 4px solid #dc2626;
+        background: var(--sa-danger-tint);
+        border: 1px solid var(--sa-danger-border);
+        border-left: 3px solid var(--sa-danger);
     }
 
     .adapter-cards {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-        gap: 1rem;
-        margin-bottom: 2rem;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: var(--sa-space-4);
+        margin-bottom: var(--sa-space-6);
     }
 
     .adapter-card {
-        border: 2px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 1rem;
+        border: 1px solid var(--sa-border);
+        border-radius: var(--sa-radius-lg);
+        padding: var(--sa-space-4);
         cursor: pointer;
-        transition: all 0.2s;
+        background: var(--sa-bg-surface);
+        transition: border-color var(--sa-duration-fast) var(--sa-easing),
+                    background var(--sa-duration-fast) var(--sa-easing),
+                    box-shadow var(--sa-duration-fast) var(--sa-easing);
         position: relative;
     }
 
     .adapter-card:hover {
-        border-color: #3b82f6;
-        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.1);
+        border-color: var(--sa-primary);
+        box-shadow: var(--sa-shadow-sm);
     }
 
     .adapter-card.selected {
-        border-color: #3b82f6;
-        background: #eff6ff;
+        border-color: var(--sa-primary);
+        background: var(--sa-primary-tint);
     }
 
     .adapter-card.current {
-        border-color: #10b981;
-        background: #f0fdf4;
+        border-color: var(--sa-success);
+        background: var(--sa-success-tint);
     }
 
     .adapter-card.disabled {
-        border-color: #d1d5db;
-        background: #f9fafb;
-        color: #9ca3af;
+        border-color: var(--sa-border);
+        background: var(--sa-gray-50);
+        color: var(--sa-text-faint);
         cursor: not-allowed;
         opacity: 0.6;
     }
 
     .adapter-card.disabled:hover {
-        border-color: #d1d5db;
+        border-color: var(--sa-border);
         box-shadow: none;
     }
 
     .adapter-card .prerequisite-notice {
-        font-size: 0.75rem;
-        color: #ef4444;
-        margin-top: 0.5rem;
+        font-size: var(--sa-text-xs);
+        color: var(--sa-danger);
+        margin-top: var(--sa-space-2);
         font-weight: 500;
     }
 
     .adapter-card h4 {
-        margin: 0 0 0.5rem 0;
-        font-size: 1rem;
+        margin: 0 0 var(--sa-space-2) 0;
+        font-size: var(--sa-text-base);
         font-weight: 600;
+        color: var(--sa-text-strong);
     }
 
     .adapter-card p {
         margin: 0;
-        font-size: 0.75rem;
-        color: #6b7280;
+        font-size: var(--sa-text-xs);
+        color: var(--sa-text-muted);
     }
 
     .adapter-badge {
         position: absolute;
-        top: 0.5rem;
-        right: 0.5rem;
-        padding: 0.125rem 0.5rem;
-        background: #10b981;
-        color: white;
+        top: var(--sa-space-2);
+        right: var(--sa-space-2);
+        padding: 0.125rem var(--sa-space-2);
+        background: var(--sa-success);
+        color: #fff;
         font-size: 0.625rem;
         font-weight: 600;
-        border-radius: 4px;
+        border-radius: var(--sa-radius-sm);
         text-transform: uppercase;
+        letter-spacing: 0.04em;
     }
 
     .button-group {
         display: flex;
-        gap: 0.75rem;
-        margin-top: 2rem;
-        padding-top: 2rem;
-        border-top: 1px solid #e5e7eb;
+        gap: var(--sa-space-3);
+        margin-top: var(--sa-space-6);
+        padding-top: var(--sa-space-6);
+        border-top: 1px solid var(--sa-border);
     }
 
     .config-code {
-        background: #1f2937;
-        color: #f3f4f6;
-        padding: 1rem;
-        border-radius: 8px;
-        font-family: 'Monaco', 'Courier New', monospace;
-        font-size: 0.75rem;
+        background: var(--sa-gray-800);
+        color: var(--sa-gray-100);
+        padding: var(--sa-space-4);
+        border-radius: var(--sa-radius-lg);
+        font-family: var(--sa-font-mono);
+        font-size: var(--sa-text-xs);
         overflow-x: auto;
         position: relative;
     }
 
     .copy-button {
         position: absolute;
-        top: 0.5rem;
-        right: 0.5rem;
-        padding: 0.25rem 0.5rem;
-        background: #374151;
-        color: white;
+        top: var(--sa-space-2);
+        right: var(--sa-space-2);
+        padding: var(--sa-space-1) var(--sa-space-2);
+        background: var(--sa-gray-700);
+        color: #fff;
         border: none;
-        border-radius: 4px;
-        font-size: 0.75rem;
+        border-radius: var(--sa-radius-sm);
+        font-size: var(--sa-text-xs);
         cursor: pointer;
     }
 
-    .copy-button:hover {
-        background: #4b5563;
-    }
+    .copy-button:hover { background: var(--sa-gray-600); }
 
-    .btn {
-        padding: 0.5rem 1rem;
-        border-radius: 6px;
-        font-size: 0.875rem;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.2s;
-        border: none;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    .btn-primary {
-        background: #3b82f6;
-        color: white;
-    }
-
-    .btn-primary:hover {
-        background: #2563eb;
-    }
-
-    .btn-secondary {
-        background: #6b7280;
-        color: white;
-    }
-
-    .btn-secondary:hover {
-        background: #4b5563;
-    }
-
-    .btn-success {
-        background: #10b981;
-        color: white;
-    }
-
-    .btn-success:hover {
-        background: #059669;
-    }
-
-    .btn-danger {
-        background: #ef4444;
-        color: white;
-    }
-
-    .btn-danger:hover {
-        background: #dc2626;
-    }
-
-    .alert {
-        padding: 1rem;
-        border-radius: 8px;
-        margin-bottom: 1rem;
-        border: 1px solid;
-    }
-
-    .alert-warning {
-        background: #fffbeb;
-        border-color: #fde047;
-        color: #92400e;
-    }
-
-    .alert-info {
-        background: #eff6ff;
-        border-color: #93c5fd;
-        color: #1e40af;
-    }
+    /* .btn / .btn-* / .alert-* are defined in admin.css; do not redeclare here. */
 
     .stat-card {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 1rem;
+        background: var(--sa-bg-surface);
+        border: 1px solid var(--sa-border);
+        border-radius: var(--sa-radius-lg);
+        padding: var(--sa-space-4);
         text-align: center;
     }
 
     .stat-value {
         font-size: 2rem;
         font-weight: 700;
-        color: #111827;
-        margin-bottom: 0.25rem;
+        color: var(--sa-text-strong);
+        margin-bottom: var(--sa-space-1);
+        line-height: var(--sa-leading-tight);
     }
 
     .stat-label {
-        font-size: 0.875rem;
-        color: #6b7280;
+        font-size: var(--sa-text-sm);
+        color: var(--sa-text-muted);
         font-weight: 500;
     }
 
@@ -429,44 +326,57 @@
 </style>
 
 <!-- Header -->
-<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
+<header class="sa-page-header">
     <div>
-        <h1 style="margin: 0; font-size: 1.875rem; font-weight: 700; color: #111827;">Settings</h1>
-        <p style="margin: 0.25rem 0 0 0; color: #6b7280; font-size: 0.875rem;">
-            Configure {{ tenant.name }}
-        </p>
+        <h1 class="sa-page-header__title">Settings</h1>
+        <p class="sa-page-header__subtitle">Configure {{ tenant.name }}</p>
     </div>
-    <a href="{{ request.script_root }}/tenant/{{ tenant.tenant_id }}" class="btn btn-secondary">
-        ← Back to Dashboard
-    </a>
-</div>
+    <div class="sa-page-header__actions">
+        <a href="{{ request.script_root }}/tenant/{{ tenant.tenant_id }}" class="btn btn-ghost">
+            ← Back to Dashboard
+        </a>
+    </div>
+</header>
+
+{# Single source of truth for the default-active settings section.
+   Embedded tenants land on Business Rules (Account / Ad Server are
+   platform-managed and rendered as banner stubs). Open-instance
+   tenants land on Account. Both nav-active and section-active read
+   off this variable so they can't drift out of sync. #}
+{% set default_section = "business-rules" if tenant.is_embedded else "account" %}
 
 <div class="settings-layout">
     <!-- Settings Navigation -->
     <nav class="settings-nav">
-        <a class="settings-nav-item active" data-section="account">
+        {% if not tenant.is_embedded %}
+        <a class="settings-nav-item{% if default_section == 'account' %} active{% endif %}" data-section="account">
             <span class="settings-nav-icon">🏢</span>
             <span>Account</span>
         </a>
+        {% endif %}
 
         <a class="settings-nav-item" href="{{ url_for('tenants.setup_checklist', tenant_id=tenant.tenant_id) }}">
             <span class="settings-nav-icon">✅</span>
             <span>Setup Checklist</span>
         </a>
 
+        {% if not tenant.is_embedded %}
         <a class="settings-nav-item" href="{{ url_for('users.list_users', tenant_id=tenant.tenant_id) }}">
             <span class="settings-nav-icon">👥</span>
             <span>Users & Access</span>
         </a>
+        {% endif %}
 
         <div class="settings-nav-separator"></div>
 
+        {% if not tenant.is_embedded %}
         <a class="settings-nav-item" data-section="adserver">
             <span class="settings-nav-icon">🖥️</span>
             <span>Ad Server</span>
         </a>
+        {% endif %}
 
-        <a class="settings-nav-item" data-section="business-rules">
+        <a class="settings-nav-item{% if default_section == 'business-rules' %} active{% endif %}" data-section="business-rules">
             <span class="settings-nav-icon">📋</span>
             <span>Policies & Workflows</span>
         </a>
@@ -478,10 +388,14 @@
 
         <div class="settings-nav-separator"></div>
 
+        {% if not tenant.is_embedded %}
+        {# AAO `/publisher/{domain}` is the canonical surface for partnership data;
+           embedded-mode publishers manage these via the upstream platform. #}
         <a class="settings-nav-item" data-section="publishers">
             <span class="settings-nav-icon">🌐</span>
             <span>Publishers</span>
         </a>
+        {% endif %}
 
         <a class="settings-nav-item" data-section="products">
             <span class="settings-nav-icon">📦</span>
@@ -500,7 +414,9 @@
             <span>Advertisers</span>
         </a>
 
-        {% if not single_tenant_mode %}
+        {% if not single_tenant_mode and not tenant.is_embedded %}
+        {# Scope3 owns tenant lifecycle (provision / deactivate / reactivate via
+           Tenant Management API) on embedded tenants. #}
         <div class="settings-nav-separator"></div>
 
         <a class="settings-nav-item" data-section="danger-zone">
@@ -512,8 +428,19 @@
 
     <!-- Settings Content -->
     <div class="settings-content">
+        {% if tenant.is_embedded %}
+        {# Embedded tenants: account/adserver/branding/access-control are platform-managed.
+           Render the lock banner so deep-links to these anchors land somewhere
+           explanatory rather than on a blank page. #}
+        <div id="account" class="settings-section">
+            {% include "_embedded_lock_banner.html" %}
+        </div>
+        <div id="adserver" class="settings-section">
+            {% include "_embedded_lock_banner.html" %}
+        </div>
+        {% else %}
         <!-- Account Settings (renamed from General) -->
-        <div id="account" class="settings-section active">
+        <div id="account" class="settings-section{% if default_section == 'account' %} active{% endif %}">
             <div class="settings-header">
                 <h2>Account</h2>
                 <p>Organization identity, virtual host configuration, and access control</p>
@@ -556,7 +483,7 @@
                             <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; padding: 1rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
                                 <div style="width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
                                     {% if tenant.favicon_url %}
-                                    <img src="{{ script_name }}{{ tenant.favicon_url }}" alt="Current favicon" style="max-width: 32px; max-height: 32px;">
+                                    <img src="{{ script_name }}{{ tenant.favicon_url }}?v={{ tenant.updated_at.timestamp() | int }}" alt="Current favicon" style="max-width: 32px; max-height: 32px;">
                                     {% else %}
                                     <img src="{{ script_name }}/static/favicons/default/favicon.jpg" alt="Default favicon" style="max-width: 32px; max-height: 32px;">
                                     {% endif %}
@@ -1166,9 +1093,10 @@
                 {% endif %}{# End legacy adapter config #}
             </div>
         </div>
+        {% endif %}{# End: not tenant.is_embedded — account + adserver sections #}
 
         <!-- Policies & Workflows Section -->
-        <div id="business-rules" class="settings-section">
+        <div id="business-rules" class="settings-section{% if default_section == 'business-rules' %} active{% endif %}">
             <div class="settings-header">
                 <h2>Policies & Workflows</h2>
                 <p>Configure how your organization operates: budgets, naming conventions, approval workflows</p>
@@ -1197,6 +1125,29 @@
                     </div>
                     {% endif %}
 
+                    {% if tenant.is_embedded %}
+                    {# Embedded tenants: currency is set at provision and owned by the
+                       upstream platform. Render read-only — no add/remove/edit UI. #}
+                    <div id="currency-limits-container" style="margin-bottom: 1.5rem;">
+                        {% if currency_limits %}
+                            {% for limit in currency_limits %}
+                            <div class="currency-limit-item" data-currency="{{ limit.currency_code }}" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; padding: 0.75rem 1rem; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;">
+                                <strong style="color: #1f2937;">Currency:</strong>
+                                <span style="font-weight: 600;">{{ limit.currency_code }}</span>
+                                <small style="color: #6b7280; margin-left: auto;">
+                                    Set by your platform at provisioning.
+                                </small>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div style="padding: 1rem; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;">
+                                <small style="color: #6b7280;">
+                                    No currencies configured by your platform yet.
+                                </small>
+                            </div>
+                        {% endif %}
+                    </div>
+                    {% else %}
                     <!-- Currency Limits Management -->
                     <div id="currency-limits-container" style="margin-bottom: 1.5rem;">
                         {% if currency_limits %}
@@ -1280,6 +1231,7 @@
                             Supports international advertisers. Common currencies: USD, EUR, GBP, CAD, AUD, JPY
                         </small>
                     </div>
+                    {% endif %}{# End currency lock for embedded tenants #}
                 </div>
 
                 <!-- Brand Manifest Policy -->
@@ -1377,7 +1329,7 @@
                                 <ul style="margin: 0.5rem 0; padding-left: 1.5rem;">
                                     <li><code>{campaign_name}</code> - Campaign name (optional - may be empty)</li>
                                     <li><code>{promoted_offering}</code> - What's being advertised (always present)</li>
-                                    <li><code>{buyer_ref}</code> - Buyer's internal reference (optional)</li>
+                                    <li><code>{media_buy_id}</code> - Media buy identifier (always present)</li>
                                     <li><code>{auto_name}</code> - 🤖 AI-generated name from full context (requires Gemini API key)</li>
                                     <li><code>{date_range}</code> - Flight dates (e.g., "Oct 7-14, 2025")</li>
                                     <li><code>{month_year}</code> - Month and year (e.g., "Oct 2025")</li>
@@ -1950,6 +1902,9 @@ Exclude any products that don't match the brand's tone.</pre>
         </div>
 
         <!-- Publishers Settings -->
+        {# AAO `/publisher/{domain}` is the canonical surface for partnership data;
+           embedded-mode publishers manage these via the upstream platform. #}
+        {% if not tenant.is_embedded %}
         <div id="publishers" class="settings-section">
             <div class="settings-header">
                 <h2>Publisher Partnerships</h2>
@@ -2016,6 +1971,7 @@ Exclude any products that don't match the brand's tone.</pre>
                 </div>
             </div>
         </div>
+        {% endif %}
 
         <!-- Products Settings -->
         <div id="products" class="settings-section">
@@ -2063,11 +2019,47 @@ Exclude any products that don't match the brand's tone.</pre>
         <!-- Formats are now fetched from creative agents via AdCP, not stored in local DB -->
 
         <!-- Advertisers Settings -->
+        {# Terminology note: "Advertiser" here = a Principal row (a buyer-protocol
+           identity bound to a GAM advertiser id via platform_mappings). It is NOT
+           a GAM CompanyService.createCompanies operation — the form attaches to
+           an existing GAM advertiser id, never mints a new one. The only path
+           that mints GAM companies is ensure_sandbox_advertiser (sandbox-only)
+           in src/services/buyer_advertiser_routing.py.
+
+           On embedded tenants the directory stays visible (publishers see who's
+           transacting + the resolved GAM advertiser) but write actions are
+           hidden because Principals are auto-created on first request by the
+           embedded-mode auth bypass, which reads X-Identity-Buyer-Principal-Id
+           from the request and provisions the row inline. Manual creation is
+           redundant in embedded mode, not dangerous. #}
         <div id="advertisers" class="settings-section">
             <div class="settings-header">
                 <h2>Advertiser Management</h2>
                 <p>Manage advertisers who can access your inventory</p>
             </div>
+
+            {% if tenant.is_embedded %}
+            <p class="text-muted">Advertisers (buyer identities) are auto-created from request headers when buys arrive. Routing rules and the default advertiser are managed in your platform's settings.</p>
+            {% else %}
+            {# Standalone-only banner: Sprint 5 demoted (operator, brand) → GAM
+               advertiser mapping out of this page and into Buyer Routing. The
+               directory below remains for buyer-protocol Principal admin
+               (access-token-bound buyer identities calling MCP / A2A). #}
+            <div class="alert alert-info" role="status" style="margin-bottom: 1rem;">
+                <strong>📍 Advertiser mapping moved to Buyer Routing.</strong>
+                <p class="mb-0">
+                    The new <a href="{{ url_for('buyer_routing.buyer_routing_page', tenant_id=tenant.tenant_id) }}">Buyer Routing</a>
+                    page is the canonical place to manage which GAM advertiser each (operator, brand) buyer routes to —
+                    with searchable advertiser picker, per-rule editing, and a recent-activity view.
+                </p>
+                <p class="mb-0" style="margin-top: 0.5rem; font-size: 0.9em; color: #555;">
+                    This page (Settings → Advertisers) remains for managing buyer-protocol
+                    Principal records (the access-token-bound buyer identity that calls
+                    your tenant's MCP / A2A endpoints). For most workflows you want
+                    Buyer Routing instead.
+                </p>
+            </div>
+            {% endif %}
 
             <div class="status-card">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -2077,9 +2069,11 @@ Exclude any products that don't match the brand's tone.</pre>
                             {{ active_advertisers }} active this month
                         </p>
                     </div>
+                    {% if not tenant.is_embedded %}
                     <a href="{{ request.script_root }}/tenant/{{ tenant.tenant_id }}/principals/create" class="btn btn-primary btn-small">
                         Add Advertiser
                     </a>
+                    {% endif %}
                 </div>
             </div>
 
@@ -2161,6 +2155,7 @@ Exclude any products that don't match the brand's tone.</pre>
                                         </div>
                                     </td>
                                     <td>
+                                        {% if not tenant.is_embedded %}
                                         <div class="btn-group btn-group-sm">
                                             <a href="{{ url_for('principals.edit_principal', tenant_id=tenant_id, principal_id=principal.principal_id) }}"
                                                class="btn btn-outline-secondary btn-sm"
@@ -2173,6 +2168,9 @@ Exclude any products that don't match the brand's tone.</pre>
                                                 🗑️
                                             </button>
                                         </div>
+                                        {% else %}
+                                        <span class="text-muted">—</span>
+                                        {% endif %}
                                     </td>
                                 </tr>
                                 {% endfor %}
@@ -2185,9 +2183,11 @@ Exclude any products that don't match the brand's tone.</pre>
             <div class="card" style="margin-top: 1rem;">
                 <div class="card-body text-center text-muted">
                     <p>No advertisers registered yet.</p>
+                    {% if not tenant.is_embedded %}
                     <a href="{{ request.script_root }}/tenant/{{ tenant.tenant_id }}/principals/create" class="btn btn-primary">
                         Create First Advertiser
                     </a>
+                    {% endif %}
                 </div>
             </div>
             {% endif %}
@@ -2690,6 +2690,9 @@ result = await client.tools.get_products(brief="video ads")</pre>
             </div>
         </div>
 
+        {# Scope3 owns tenant lifecycle (provision / deactivate / reactivate via
+           Tenant Management API) on embedded tenants. #}
+        {% if not tenant.is_embedded %}
         <!-- Danger Zone -->
         <div id="danger-zone" class="settings-section">
             <div class="settings-header">
@@ -2743,6 +2746,7 @@ result = await client.tools.get_products(brief="video ads")</pre>
             </div>
             {% endif %}
         </div>
+        {% endif %}
     </div>
 </div>
 
@@ -3235,6 +3239,7 @@ document.addEventListener('DOMContentLoaded', function() {
 // AXE Segment Targeting configuration moved to Inventory page (inventory_unified.html)
 </script>
 
+{% if not tenant.is_embedded %}
 <!-- Add Currency Modal -->
 <div class="modal fade" id="addCurrencyModal" tabindex="-1" aria-labelledby="addCurrencyModalLabel" aria-hidden="true">
     <div class="modal-dialog">
@@ -3283,6 +3288,7 @@ document.addEventListener('DOMContentLoaded', function() {
         </div>
     </div>
 </div>
+{% endif %}{# End: addCurrencyModal hidden for embedded tenants #}
 
 <!-- Edit Principal Mappings Modal -->
 <div class="modal fade" id="editPrincipalModal" tabindex="-1" aria-labelledby="editPrincipalModalLabel" aria-hidden="true">

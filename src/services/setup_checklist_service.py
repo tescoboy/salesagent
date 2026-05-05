@@ -328,9 +328,69 @@ class SetupChecklistService:
             "optional": [task.to_dict() for task in optional_tasks],
         }
 
+    def _build_aao_tasks(self, tenant: Tenant) -> list[SetupTask]:
+        """AAO checklist items (house_domain + public_agent_url).
+
+        Single source of truth for both the live-session path
+        (:meth:`_check_critical_tasks`) and the bulk path
+        (:meth:`_build_critical_tasks`). The bulk-path duplicate was a
+        DRY violation that allowed the two checklists to drift silently.
+
+        Sprint 1.8 §6: embedded tenants with both fields set don't see
+        these items — the platform (Scope3) owns them. Embedded tenants
+        with NULL values still see them so the gap surfaces to the host
+        product via the §7 setup_tasks scope=platform annotation.
+        """
+        aao_managed_and_complete = (
+            bool(tenant.is_embedded) and bool(tenant.house_domain) and bool(tenant.public_agent_url)
+        )
+        if aao_managed_and_complete:
+            return []
+
+        return [
+            SetupTask(
+                key="house_domain",
+                name="Publisher House Domain",
+                description=(
+                    "The domain where your brand.json lives "
+                    "(https://{house_domain}/.well-known/brand.json). "
+                    "Properties are looked up live from this file."
+                ),
+                is_complete=bool(tenant.house_domain),
+                action_url=f"/tenant/{self.tenant_id}/settings#aao",
+                details=(
+                    f"Configured: {tenant.house_domain}"
+                    if tenant.house_domain
+                    else "Set your publisher house domain to enable property discovery."
+                ),
+            ),
+            SetupTask(
+                key="public_agent_url",
+                name="Public Agent URL",
+                description=(
+                    "The agent URL publishers list in their adagents.json to "
+                    "authorize this tenant. Embedded-mode tenants share one "
+                    "(e.g., https://interchange.io); self-hosted publishers "
+                    "use their own salesagent's URL."
+                ),
+                is_complete=bool(tenant.public_agent_url),
+                action_url=f"/tenant/{self.tenant_id}/settings#aao",
+                details=(
+                    f"Configured: {tenant.public_agent_url}"
+                    if tenant.public_agent_url
+                    else "Set the agent URL that publishers will list in adagents.json."
+                ),
+            ),
+        ]
+
     def _check_critical_tasks(self, session, tenant: Tenant) -> list[SetupTask]:
         """Check critical tasks required before first order."""
         tasks = []
+
+        # 0. AAO model: house_domain + public_agent_url (sprint 1.7).
+        # First items in the checklist — the salesagent can't serve
+        # list_authorized_properties or verify adagents.json without them.
+        tasks.extend(self._build_aao_tasks(tenant))
 
         # 1. Ad Server FULLY CONFIGURED - CRITICAL BLOCKER
         # This is the most important task - nothing else can be done until ad server works
@@ -426,34 +486,56 @@ class SetupChecklistService:
                 )
             )
 
-        # 4. Authorized Properties
-        # Single source of truth: AuthorizedProperty table
-        # (Populated automatically when syncing verified PublisherPartners)
-        stmt = (
-            select(func.count()).select_from(AuthorizedProperty).where(AuthorizedProperty.tenant_id == self.tenant_id)
-        )
-        property_count = session.scalar(stmt) or 0
-
-        # Also check verified publisher count for better messaging
-        stmt_publishers = (
-            select(func.count())
-            .select_from(PublisherPartner)
-            .where(PublisherPartner.tenant_id == self.tenant_id, PublisherPartner.is_verified == True)  # noqa: E712
-        )
-        verified_publisher_count = session.scalar(stmt_publishers) or 0
-
-        is_complete = property_count > 0
-        details = (
-            f"{property_count} properties from {verified_publisher_count} verified publishers"
-            if property_count > 0
-            else "Add publishers and sync to discover properties"
-        )
+        # 4. Authorized Properties → brand.json reachability probe (sprint 1.7).
+        # When house_domain is set, the gate is "can we fetch brand.json?"
+        # — the property list itself is dynamic, not cached in our DB.
+        # Falls back to the legacy AuthorizedProperty count for tenants that
+        # haven't migrated to the AAO model yet.
+        if tenant.house_domain:
+            # Reachability is checked by the property_verification_service on
+            # a cron; setup checklist trusts the cached PublisherPartner state.
+            stmt_publishers = (
+                select(func.count())
+                .select_from(PublisherPartner)
+                .where(
+                    PublisherPartner.tenant_id == self.tenant_id,
+                    PublisherPartner.is_verified == True,  # noqa: E712
+                )
+            )
+            verified_publisher_count = session.scalar(stmt_publishers) or 0
+            # Treat "house_domain set" as the green state — actual brand.json
+            # validation runs out-of-band and surfaces via Admin UI banners.
+            is_complete = True
+            details = f"brand.json at {tenant.house_domain}; {verified_publisher_count} verified publisher partners"
+        else:
+            stmt = (
+                select(func.count())
+                .select_from(AuthorizedProperty)
+                .where(AuthorizedProperty.tenant_id == self.tenant_id)
+            )
+            property_count = session.scalar(stmt) or 0
+            stmt_publishers = (
+                select(func.count())
+                .select_from(PublisherPartner)
+                .where(
+                    PublisherPartner.tenant_id == self.tenant_id,
+                    PublisherPartner.is_verified == True,  # noqa: E712
+                )
+            )
+            verified_publisher_count = session.scalar(stmt_publishers) or 0
+            is_complete = property_count > 0
+            details = (
+                f"{property_count} properties from {verified_publisher_count} verified "
+                f"publishers (legacy mode — set house_domain to migrate to brand.json lookup)"
+                if property_count > 0
+                else "Set house_domain to enable brand.json property discovery, or use the legacy Add Publishers flow"
+            )
 
         tasks.append(
             SetupTask(
                 key="authorized_properties",
                 name="Authorized Properties",
-                description="Configure properties with adagents.json for verification",
+                description="brand.json + adagents.json — set house_domain on Settings to use the AAO model",
                 is_complete=is_complete,
                 action_url=f"/tenant/{self.tenant_id}/inventory#publishers-pane",
                 details=details,
@@ -770,8 +852,13 @@ class SetupChecklistService:
         product_count: int,
         principal_count: int,
     ) -> list[SetupTask]:
-        """Build critical tasks from pre-fetched data (no session queries)."""
-        tasks = []
+        """Build critical tasks from pre-fetched data (no session queries).
+
+        Mirrors :meth:`_check_critical_tasks` for the bulk path; the two
+        must stay in sync so single-tenant and bulk callers agree on
+        ``progress_percent`` and ``ready_for_orders``.
+        """
+        tasks = list(self._build_aao_tasks(tenant))
 
         # 1. Ad Server Configuration
         ad_server_selected = tenant.ad_server is not None and tenant.ad_server != ""
@@ -1207,12 +1294,19 @@ def get_incomplete_critical_tasks(tenant_id: str) -> list[dict[str, Any]]:
 def validate_setup_complete(tenant_id: str) -> None:
     """Validate that tenant has completed all critical setup tasks.
 
-    Args:
-        tenant_id: Tenant ID to validate
-
-    Raises:
-        SetupIncompleteError: If critical setup tasks are incomplete
+    Embedded-mode tenants skip this gate: platform-config tasks (ad server,
+    SSO, etc.) are owned by the host product (Storefront, Manticore, ...),
+    not the publisher, and surfacing them as buyer-protocol blockers would
+    be wrong.
     """
+    from src.core.database.database_session import get_db_session
+    from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+    with get_db_session() as session:
+        tenant = TenantConfigRepository(session, tenant_id).get_tenant()
+        if tenant and tenant.is_embedded:
+            return
+
     incomplete = get_incomplete_critical_tasks(tenant_id)
     if incomplete:
         task_names = ", ".join(task["name"] for task in incomplete)

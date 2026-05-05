@@ -11,19 +11,12 @@ Each test references its upstream BDD scenario ID for traceability.
 from unittest.mock import MagicMock, patch
 
 import pytest
-from adcp.types.generated_poc.core.format import (
-    Assets,
-    Assets5,
-    Dimensions,
-    Renders,
-)
+from adcp.types import Dimensions, ImageFormatAsset, Renders, VideoFormatAsset
 
-# adcp 3.9: Assets classes are type-discriminated by asset_type + item_type.
-# Assets = individual image, Assets5 = individual video
+# adcp 3.9: ImageFormatAsset classes are type-discriminated by asset_type + item_type.
+# ImageFormatAsset = individual image, VideoFormatAsset = individual video
 # Assets18 = repeatable_group (has nested assets, no asset_type)
 # Nested group assets: Assets19 (image), Assets20 (video), Assets22 (text), etc.
-from adcp.types.generated_poc.enums.format_category import FormatCategory
-
 from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest
 from tests.factories import PrincipalFactory
 
@@ -34,7 +27,6 @@ MOCK_TENANT = {"tenant_id": "test-tenant", "name": "Test Tenant"}
 def _make_format(
     format_id: str,
     name: str,
-    type: FormatCategory = FormatCategory.display,
     renders: list | None = None,
     assets: list | None = None,
 ) -> Format:
@@ -42,7 +34,6 @@ def _make_format(
     return Format(
         format_id=FormatId(agent_url=DEFAULT_AGENT_URL, id=format_id),
         name=name,
-        type=type,
         is_standard=True,
         renders=renders,
         assets=assets,
@@ -100,21 +91,21 @@ def _call_impl(
 # ---------------------------------------------------------------------------
 
 
-class TestSortOrderTypeThenName:
-    """T-UC-005-inv10: Results sorted by type.value then name.
+class TestSortOrderByName:
+    """T-UC-005-inv10: Results sorted by name.
 
-    Behavioral contract at creative_formats.py:296. Refactoring during
-    migration could silently reorder results.
+    Behavioral contract at creative_formats.py:337. Refactoring during
+    migration could silently reorder results. In adcp 3.12, type was removed
+    from Format, so sorting is now by name only.
     """
 
-    def test_sort_order_type_then_name(self):
-        """Formats must be sorted by (type.value, name) — display before video,
-        alphabetical within each type."""
+    def test_sort_order_by_name(self):
+        """Formats must be sorted alphabetically by name."""
         formats = [
-            _make_format("v_zebra", "Zebra Ad", type=FormatCategory.video),
-            _make_format("d_alpha", "Alpha Banner", type=FormatCategory.display),
-            _make_format("v_alpha", "Alpha Video", type=FormatCategory.video),
-            _make_format("d_zebra", "Zebra Banner", type=FormatCategory.display),
+            _make_format("v_zebra", "Zebra Ad"),
+            _make_format("d_alpha", "Alpha Banner"),
+            _make_format("v_alpha", "Alpha Video"),
+            _make_format("d_zebra", "Zebra Banner"),
         ]
 
         result = _call_impl(formats)
@@ -122,46 +113,46 @@ class TestSortOrderTypeThenName:
         names = [f.name for f in result]
         assert names == [
             "Alpha Banner",
-            "Zebra Banner",
             "Alpha Video",
             "Zebra Ad",
-        ], f"Expected display(alpha, zebra), video(alpha, zebra) but got {names}"
+            "Zebra Banner",
+        ], f"Expected alphabetical ordering but got {names}"
 
-    def test_sort_order_across_three_types(self):
-        """Sort order holds across more than two types."""
+    def test_sort_order_across_many_formats(self):
+        """Sort order holds across many formats."""
         formats = [
-            _make_format("n1", "Native B", type=FormatCategory.native),
-            _make_format("d1", "Display A", type=FormatCategory.display),
-            _make_format("v1", "Video C", type=FormatCategory.video),
-            _make_format("n2", "Native A", type=FormatCategory.native),
-            _make_format("d2", "Display B", type=FormatCategory.display),
+            _make_format("n1", "Native B"),
+            _make_format("d1", "Display A"),
+            _make_format("v1", "Video C"),
+            _make_format("n2", "Native A"),
+            _make_format("d2", "Display B"),
         ]
 
         result = _call_impl(formats)
 
         names = [f.name for f in result]
-        # display < native < video (alphabetical on .value)
         assert names == [
             "Display A",
             "Display B",
             "Native A",
             "Native B",
             "Video C",
-        ], f"Expected display, native, video ordering but got {names}"
+        ], f"Expected alphabetical ordering but got {names}"
 
     def test_sort_preserves_after_filtering(self):
         """Sort order is maintained even after filters reduce the set."""
         formats = [
-            _make_format("v2", "Zebra Video", type=FormatCategory.video),
-            _make_format("v1", "Alpha Video", type=FormatCategory.video),
-            _make_format("d1", "Display Ad", type=FormatCategory.display),
+            _make_format("v2", "Zebra Video"),
+            _make_format("v1", "Alpha Video"),
+            _make_format("d1", "Display Ad"),
         ]
 
-        req = ListCreativeFormatsRequest(type="video")
-        result = _call_impl(formats, req)
+        result = _call_impl(formats)
 
         names = [f.name for f in result]
-        assert names == ["Alpha Video", "Zebra Video"], f"Filtered results should still be sorted: {names}"
+        assert names == ["Alpha Video", "Display Ad", "Zebra Video"], (
+            f"Results should be sorted alphabetically: {names}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -169,24 +160,19 @@ class TestSortOrderTypeThenName:
 # ---------------------------------------------------------------------------
 
 
-class TestTypeFilterNoMatchReturnsEmpty:
-    """T-UC-005-inv2-violated: Type filter excludes non-matching formats."""
+class TestTypeFilterRemovedInAdcp312:
+    """T-UC-005-inv2-violated: Type filter removed in adcp 3.12."""
 
-    def test_type_filter_no_match_returns_empty(self):
-        """When no formats match the type filter, returns empty list without error."""
-        formats = [
-            _make_format("d1", "Display Banner", type=FormatCategory.display),
-            _make_format("d2", "Display Rectangle", type=FormatCategory.display),
-        ]
+    def test_type_filter_rejected(self):
+        """type= parameter is no longer accepted on ListCreativeFormatsRequest."""
+        from pydantic import ValidationError
 
-        req = ListCreativeFormatsRequest(type="audio")
-        result = _call_impl(formats, req)
+        with pytest.raises(ValidationError, match="type"):
+            ListCreativeFormatsRequest(type="audio")
 
-        assert result == [], f"Expected empty list for non-matching type, got {result}"
-
-    def test_type_filter_returns_empty_from_empty_catalog(self):
-        """Type filter on empty catalog returns empty list."""
-        result = _call_impl([], ListCreativeFormatsRequest(type="video"))
+    def test_empty_catalog_returns_empty(self):
+        """Empty catalog returns empty list."""
+        result = _call_impl([])
         assert result == []
 
 
@@ -228,7 +214,6 @@ class TestAssetTypesFilterChecksGroupAssets:
         format_with_group = Format(
             format_id=FormatId(agent_url=DEFAULT_AGENT_URL, id="native_carousel"),
             name="Native Carousel",
-            type=FormatCategory.native,
             is_standard=True,
             assets=[group_asset],
         )
@@ -262,7 +247,6 @@ class TestAssetTypesFilterChecksGroupAssets:
         format_with_text_group = Format(
             format_id=FormatId(agent_url=DEFAULT_AGENT_URL, id="text_only"),
             name="Text Only Native",
-            type=FormatCategory.native,
             is_standard=True,
             assets=[group_asset],
         )
@@ -275,12 +259,11 @@ class TestAssetTypesFilterChecksGroupAssets:
 
     def test_asset_types_filter_mixed_individual_and_group(self):
         """Format with both individual and group assets: filter checks both."""
-        # adcp 3.9: Assets5 = individual video, Assets18 = repeatable_group
+        # adcp 3.9: VideoFormatAsset = individual video, Assets18 = repeatable_group
         # Assets18 nested assets use Assets19+ classes (image=Assets19)
         from adcp.types.generated_poc.core.format import Assets18, Assets19
 
-        individual_asset = Assets5(
-            item_type="individual",
+        individual_asset = VideoFormatAsset(
             asset_id="hero_video",
             required=True,
         )
@@ -301,7 +284,6 @@ class TestAssetTypesFilterChecksGroupAssets:
         mixed_format = Format(
             format_id=FormatId(agent_url=DEFAULT_AGENT_URL, id="mixed_format"),
             name="Mixed Format",
-            type=FormatCategory.display,
             is_standard=True,
             assets=[individual_asset, group_asset],
         )
@@ -327,25 +309,15 @@ class TestAssetTypesFilterChecksGroupAssets:
 # ---------------------------------------------------------------------------
 
 
-class TestPartitionNativeTypeFilter:
-    """T-UC-005-partition-type-filter: native type row."""
+class TestPartitionTypeFilterRemovedInAdcp312:
+    """T-UC-005-partition-type-filter: type filter removed in adcp 3.12."""
 
-    def test_native_type_filter(self):
-        """Filter type=native returns only native formats."""
-        formats = [
-            _make_format("d1", "Display Banner", type=FormatCategory.display),
-            _make_format("n1", "Native Feed", type=FormatCategory.native),
-            _make_format("v1", "Video Pre-roll", type=FormatCategory.video),
-            _make_format("n2", "Native Recommendation", type=FormatCategory.native),
-        ]
+    def test_type_filter_no_longer_accepted(self):
+        """type= parameter is no longer accepted on ListCreativeFormatsRequest in adcp 3.12."""
+        from pydantic import ValidationError
 
-        req = ListCreativeFormatsRequest(type="native")
-        result = _call_impl(formats, req)
-
-        assert len(result) == 2
-        names = [f.name for f in result]
-        assert "Native Feed" in names
-        assert "Native Recommendation" in names
+        with pytest.raises(ValidationError, match="type"):
+            ListCreativeFormatsRequest(type="native")
 
 
 class TestPartitionFormatIdsNoMatch:
@@ -356,7 +328,7 @@ class TestPartitionFormatIdsNoMatch:
         formats = [
             _make_format("display_300x250", "Display 300x250"),
             _make_format("display_728x90", "Display 728x90"),
-            _make_format("video_16x9", "Video 16:9", type=FormatCategory.video),
+            _make_format("video_16x9", "Video 16:9"),
         ]
 
         non_existent_ids = [
@@ -445,8 +417,8 @@ class TestBoundaryNameSearchEmptyString:
         """Empty string name_search is treated as no filter (all formats returned)."""
         formats = [
             _make_format("d1", "Alpha Display"),
-            _make_format("v1", "Beta Video", type=FormatCategory.video),
-            _make_format("n1", "Gamma Native", type=FormatCategory.native),
+            _make_format("v1", "Beta Video"),
+            _make_format("n1", "Gamma Native"),
         ]
 
         req = ListCreativeFormatsRequest(name_search="")
@@ -465,15 +437,15 @@ class TestAssetTypesFilterExclusion:
 
     def test_format_with_non_matching_assets_excluded(self):
         """Format with assets that do not match any requested type is excluded."""
-        # adcp 3.6.0: use typed asset classes - Assets (image), Assets9 (html)
-        from adcp.types.generated_poc.core.format import Assets9
+        # adcp 3.6.0: use typed asset classes - ImageFormatAsset (image), HtmlFormatAsset (html)
+        from adcp.types import HtmlFormatAsset
 
         formats = [
             _make_format(
                 "image_banner",
                 "Image Banner",
                 assets=[
-                    Assets(
+                    ImageFormatAsset(
                         asset_id="main",
                         required=True,
                     ),
@@ -483,7 +455,7 @@ class TestAssetTypesFilterExclusion:
                 "html_widget",
                 "HTML Widget",
                 assets=[
-                    Assets9(
+                    HtmlFormatAsset(
                         asset_id="code",
                         required=True,
                     ),
@@ -499,13 +471,13 @@ class TestAssetTypesFilterExclusion:
 
     def test_format_with_assets_of_wrong_type_excluded_while_match_kept(self):
         """Only formats with at least one matching asset type are kept."""
-        # adcp 3.6.0: Assets (image), Assets5 (video)
+        # adcp 3.6.0: ImageFormatAsset (image), VideoFormatAsset (video)
         formats = [
             _make_format(
                 "image_only",
                 "Image Only",
                 assets=[
-                    Assets(
+                    ImageFormatAsset(
                         asset_id="photo",
                         required=True,
                     ),
@@ -515,7 +487,7 @@ class TestAssetTypesFilterExclusion:
                 "video_format",
                 "Video Format",
                 assets=[
-                    Assets5(
+                    VideoFormatAsset(
                         asset_id="clip",
                         required=True,
                     ),
@@ -533,10 +505,10 @@ class TestAssetTypesFilterExclusion:
 class TestBroadstreetTemplateAssetParsing:
     """Regression: Broadstreet templates must parse with real assets.
 
-    The production code uses _make_asset() to construct the correct Assets
-    variant class (Assets for image, Assets5 for video, etc.) for each
-    template asset. Previously, the code used Assets(asset_type=AssetContentType(...))
-    which failed because Assets.asset_type is Literal['image'], not an enum.
+    The production code uses _make_asset() to construct the correct ImageFormatAsset
+    variant class (ImageFormatAsset for image, VideoFormatAsset for video, etc.) for each
+    template asset. Previously, the code used ImageFormatAsset(asset_type=AssetContentType(...))
+    which failed because ImageFormatAsset.asset_type is Literal['image'], not an enum.
     """
 
     def test_all_broadstreet_templates_produce_formats_with_assets(self):
@@ -556,7 +528,6 @@ class TestBroadstreetTemplateAssetParsing:
             fmt = Format(
                 format_id=FormatId(id=f"broadstreet_{tid}", agent_url="broadstreet://test"),
                 name=str(tmpl["name"]),
-                type=FormatCategory.display,
                 assets=assets_list if assets_list else None,
                 is_standard=False,
             )
@@ -602,7 +573,7 @@ class TestMCPWrapperStringCoercion:
         # Calling with a raw string bypasses FastMCP's enum coercion
         # This should NOT raise AttributeError
         try:
-            await list_creative_formats(type="display", ctx=None)
+            await list_creative_formats(ctx=None)
         except AttributeError:
             pytest.fail("MCP wrapper crashed on raw string type — must coerce to enum first")
         except Exception:
@@ -829,7 +800,7 @@ class TestSuccessfulDiscoveryHasNoErrors:
         """
         formats = [
             _make_format("display_300x250", "Display 300x250"),
-            _make_format("video_16x9", "Video 16:9", type=FormatCategory.video),
+            _make_format("video_16x9", "Video 16:9"),
         ]
 
         response = _call_impl_raw(formats)

@@ -4,21 +4,20 @@
 
 {% block content %}
 <div class="container-fluid mt-4">
-    <!-- Breadcrumb Navigation -->
-    <nav aria-label="breadcrumb">
-        <ol class="breadcrumb">
-            <li class="breadcrumb-item"><a href="{{ url_for('core.index') }}">Dashboard</a></li>
-            <li class="breadcrumb-item"><a href="{{ url_for('tenants.tenant_settings', tenant_id=tenant.tenant_id) }}">{{ tenant.name }}</a></li>
-            <li class="breadcrumb-item active" aria-current="page">Inventory Browser</li>
-        </ol>
-    </nav>
+    {% set crumbs = [
+        {"label": "Dashboard", "url": url_for('core.index')},
+        {"label": tenant.name, "url": url_for('tenants.tenant_settings', tenant_id=tenant.tenant_id)},
+        {"label": "Inventory Browser"}
+    ] %}
+    {% set crumbs = crumbs | with_embed_root %}
+    {% include "_breadcrumb.html" %}
 
-    <div class="row">
-        <div class="col-12">
-            <h2>GAM Inventory Browser</h2>
-            <p class="text-muted">Browse and manage Google Ad Manager inventory for {{ tenant.name }}</p>
+    <header class="sa-page-header">
+        <div>
+            <h2 class="sa-page-header__title">GAM Inventory Browser</h2>
+            <p class="sa-page-header__subtitle">Browse and manage Google Ad Manager inventory for {{ tenant.name }}</p>
         </div>
-    </div>
+    </header>
 
     <!-- Sync Status -->
     <div class="row mt-3">
@@ -194,28 +193,30 @@
 
 /* Selected node highlight */
 #adUnitTree .tree-node-header.selected {
-    background-color: #e3f2fd;
-    border-left: 3px solid #1976d2;
+    background-color: var(--sa-primary-tint);
+    border-left: 3px solid var(--sa-primary);
 }
 
 .inventory-size {
     display: inline-block;
-    padding: 2px 8px;
+    padding: 2px var(--sa-space-2);
     margin: 2px;
-    background-color: #f8f9fa;
-    border: 1px solid #dee2e6;
-    border-radius: 3px;
+    background-color: var(--sa-gray-50);
+    border: 1px solid var(--sa-border);
+    border-radius: var(--sa-radius-sm);
     font-size: 0.85em;
+    color: var(--sa-text-default);
 }
 
 .search-result-item {
-    padding: 10px;
-    border-bottom: 1px solid #dee2e6;
+    padding: var(--sa-space-3);
+    border-bottom: 1px solid var(--sa-border);
     cursor: pointer;
+    transition: background-color var(--sa-duration-fast) var(--sa-easing);
 }
 
 .search-result-item:hover {
-    background-color: #f8f9fa;
+    background-color: var(--sa-gray-50);
 }
 </style>
 
@@ -226,8 +227,7 @@ const scriptRoot = '{{ request.script_root }}' || '';
 const tenantId = '{{ tenant.tenant_id }}';
 const treeApiUrl = `${scriptRoot}/api/tenant/${tenantId}/inventory/tree`;
 let selectedInventory = null;
-let inventoryTree = null;
-const inventoryCache = new Map();
+let adUnitTree = null;
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
@@ -238,43 +238,37 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('inventoryType').value = typeParam;
     }
 
-    loadTreeAndStats();
+    adUnitTree = initInventoryTree({
+        apiUrl: treeApiUrl,
+        containerId: 'adUnitTree',
+        showCheckboxes: false,
+        showSearch: false,
+        showStats: false,
+        onStatsLoaded: (data) => {
+            updateSyncStatus(data);
+            updateStats(data);
+        },
+        onRender: (nodeEl, nodeData) => {
+            // Click-to-select for detail panel
+            const label = nodeEl.querySelector('.tree-node-label');
+            label.style.cursor = 'pointer';
+            label.addEventListener('click', (e) => {
+                if (e.target.closest('.tree-toggle')) return;
+                e.preventDefault();
+                e.stopPropagation();
+                document.querySelectorAll('#adUnitTree .tree-node-header.selected')
+                    .forEach(n => n.classList.remove('selected'));
+                nodeEl.querySelector('.tree-node-header').classList.add('selected');
+                showInventoryDetail(nodeData, 'ad_unit');
+            });
+        },
+    });
 
     // If type is specified, do initial search
     if (typeParam) {
         searchInventory();
     }
 });
-
-function loadTreeAndStats() {
-    const container = document.getElementById('adUnitTree');
-    container.innerHTML = '<div class="tree-loading"><div class="spinner-border spinner-border-sm" role="status" style="margin-right: 0.5rem;"></div>Loading...</div>';
-
-    fetch(treeApiUrl, { credentials: 'same-origin' })
-        .then(response => response.json())
-        .then(data => {
-            inventoryTree = data;
-            updateSyncStatus(data);
-            updateStats(data);
-
-            if (!data.root_units || data.root_units.length === 0) {
-                container.innerHTML = '<div class="tree-empty">No ad units found. Try syncing inventory first.</div>';
-                return;
-            }
-
-            // Render tree using shared partial's renderTree()
-            container.innerHTML = renderTree(data.root_units, new Set(), 0, false, inventoryCache);
-
-            // Add click-to-select handlers on tree node labels
-            attachNodeClickHandlers();
-        })
-        .catch(error => {
-            console.error('Error loading inventory:', error);
-            container.innerHTML = '<div class="tree-empty text-danger">Error loading tree: ' + error.message + '</div>';
-            document.getElementById('syncStatus').innerHTML =
-                '<span class="text-danger">Error loading status</span>';
-        });
-}
 
 function updateSyncStatus(data) {
     const syncStatus = document.getElementById('syncStatus');
@@ -316,29 +310,6 @@ function updateStats(data) {
         <div><strong>Targeting Keys:</strong> ${data.custom_targeting_keys || 0}</div>
         <div><strong>Audience Segments:</strong> ${data.audience_segments || 0}</div>
     `;
-}
-
-function attachNodeClickHandlers() {
-    document.querySelectorAll('#adUnitTree .tree-node-label').forEach(label => {
-        label.addEventListener('click', function(e) {
-            // Don't interfere with toggle clicks
-            if (e.target.closest('.tree-toggle')) return;
-
-            e.preventDefault();
-            e.stopPropagation();
-
-            const nodeHeader = this.closest('.tree-node-header');
-            const node = this.closest('.tree-node');
-            const unitId = node.dataset.unitId;
-
-            // Update selection highlight
-            document.querySelectorAll('#adUnitTree .tree-node-header.selected').forEach(n => n.classList.remove('selected'));
-            nodeHeader.classList.add('selected');
-
-            // Show detail panel
-            selectNode(unitId);
-        });
-    });
 }
 
 function syncInventory() {
@@ -413,25 +384,6 @@ function pollInventorySyncStatus(syncId, btn) {
     };
 
     checkStatus();
-}
-
-function selectNode(unitId) {
-    // Find unit data from the tree
-    const unit = findUnitById(inventoryTree.root_units, unitId);
-    if (unit) {
-        showInventoryDetail(unit, 'ad_unit');
-    }
-}
-
-function findUnitById(units, unitId) {
-    for (const unit of units) {
-        if (unit.id === unitId) return unit;
-        if (unit.children) {
-            const found = findUnitById(unit.children, unitId);
-            if (found) return found;
-        }
-    }
-    return null;
 }
 
 function showInventoryDetail(item, type) {

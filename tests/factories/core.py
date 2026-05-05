@@ -11,7 +11,15 @@ from typing import Any
 import factory
 from factory import LazyAttribute, RelatedFactory, Sequence, SubFactory
 
-from src.core.database.models import AdapterConfig, CurrencyLimit, PropertyTag, PublisherPartner, Tenant
+from src.core.database.models import (
+    AdapterConfig,
+    CurrencyLimit,
+    GamAdvertiser,
+    GAMInventory,
+    PropertyTag,
+    PublisherPartner,
+    Tenant,
+)
 
 
 class TenantFactory(factory.alchemy.SQLAlchemyModelFactory):
@@ -90,6 +98,29 @@ class AdapterConfigFactory(factory.alchemy.SQLAlchemyModelFactory):
     adapter_type = "mock"
 
 
+class GAMInventoryFactory(factory.alchemy.SQLAlchemyModelFactory):
+    class Meta:
+        model = GAMInventory
+        sqlalchemy_session = None
+        sqlalchemy_session_persistence = "commit"
+
+    tenant = SubFactory(TenantFactory)
+    tenant_id = LazyAttribute(lambda o: o.tenant.tenant_id)
+    inventory_type = "ad_unit"
+    inventory_id = Sequence(lambda n: f"au_{n:04d}")
+    name = LazyAttribute(lambda o: f"Ad Unit {o.inventory_id}")
+    path = LazyAttribute(lambda o: [o.name])
+    status = "ACTIVE"
+    inventory_metadata = LazyAttribute(
+        lambda o: {
+            "parent_id": None,
+            "has_children": False,
+            "ad_unit_code": f"code_{o.inventory_id}",
+            "sizes": [{"width": 300, "height": 250}],
+        }
+    )
+
+
 class PropertyTagFactory(factory.alchemy.SQLAlchemyModelFactory):
     class Meta:
         model = PropertyTag
@@ -101,3 +132,24 @@ class PropertyTagFactory(factory.alchemy.SQLAlchemyModelFactory):
     tag_id = Sequence(lambda n: f"tag_{n:04d}")
     name = LazyAttribute(lambda o: f"Tag {o.tag_id}")
     description = LazyAttribute(lambda o: f"Description for {o.name}")
+
+
+class GamAdvertiserFactory(factory.alchemy.SQLAlchemyModelFactory):
+    """Sprint 5 piece D — synced GAM advertiser cache row.
+
+    Mirrors the Sprint 5 ``gam_advertisers`` table. Tenants get a
+    synced cache hydrated by ``sync_advertisers``; tests use this
+    factory to seed cache rows without re-running the worker.
+    """
+
+    class Meta:
+        model = GamAdvertiser
+        sqlalchemy_session = None
+        sqlalchemy_session_persistence = "commit"
+
+    tenant = SubFactory(TenantFactory)
+    tenant_id = LazyAttribute(lambda o: o.tenant.tenant_id)
+    advertiser_id = Sequence(lambda n: str(10000 + n))
+    name = LazyAttribute(lambda o: f"Advertiser {o.advertiser_id}")
+    currency_code = "USD"
+    status = "active"

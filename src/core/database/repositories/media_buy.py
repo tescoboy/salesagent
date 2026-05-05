@@ -16,7 +16,7 @@ import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from src.core.database.models import MediaBuy, MediaPackage
@@ -60,20 +60,25 @@ class MediaBuyRepository:
             )
         ).first()
 
-    def get_by_buyer_ref(self, buyer_ref: str) -> MediaBuy | None:
-        """Get a media buy by buyer reference within the tenant."""
+    def find_by_idempotency_key(self, idempotency_key: str, principal_id: str) -> MediaBuy | None:
+        """Find an existing media buy by idempotency_key within (tenant, principal).
+
+        Per adcp 3.12 spec: if a request with the same idempotency_key and account
+        has already been processed, return the existing media buy.
+        """
         return self._session.scalars(
             select(MediaBuy).where(
                 MediaBuy.tenant_id == self._tenant_id,
-                MediaBuy.buyer_ref == buyer_ref,
+                MediaBuy.principal_id == principal_id,
+                MediaBuy.idempotency_key == idempotency_key,
             )
         ).first()
 
-    def get_by_id_or_buyer_ref(self, identifier: str) -> MediaBuy | None:
-        """Get a media buy by ID first, then fall back to buyer_ref."""
+    def get_by_id_or_idempotency_key(self, identifier: str, principal_id: str) -> MediaBuy | None:
+        """Get a media buy by ID first, then fall back to idempotency_key."""
         result = self.get_by_id(identifier)
         if result is None:
-            result = self.get_by_buyer_ref(identifier)
+            result = self.find_by_idempotency_key(identifier, principal_id)
         return result
 
     # ------------------------------------------------------------------
@@ -85,7 +90,6 @@ class MediaBuyRepository:
         principal_id: str,
         *,
         media_buy_ids: list[str] | None = None,
-        buyer_refs: list[str] | None = None,
         statuses: list[str] | None = None,
     ) -> list[MediaBuy]:
         """Get media buys for a principal within the tenant.
@@ -98,8 +102,6 @@ class MediaBuyRepository:
         )
         if media_buy_ids is not None:
             stmt = stmt.where(MediaBuy.media_buy_id.in_(media_buy_ids))
-        if buyer_refs is not None:
-            stmt = stmt.where(MediaBuy.buyer_ref.in_(buyer_refs))
         if statuses is not None:
             stmt = stmt.where(MediaBuy.status.in_(statuses))
         return list(self._session.scalars(stmt).all())
@@ -256,6 +258,51 @@ class MediaBuyRepository:
             ).all()
         )
 
+    def list_filtered_with_cursor(
+        self,
+        *,
+        status: str | None = None,
+        principal_id: str | None = None,
+        from_date: datetime.date | None = None,
+        to_date: datetime.date | None = None,
+        cursor_created_at: datetime.datetime | None = None,
+        cursor_id: str | None = None,
+        limit: int = 50,
+    ) -> list[MediaBuy]:
+        """List media buys for ``GET /media-buys`` drill-down.
+
+        Sort: ``created_at desc, media_buy_id desc``. Cursor pagination uses
+        the same ``(created_at, id)`` tuple pattern as audit log + sync
+        history so concurrent inserts can't skip or duplicate rows.
+
+        ``from_date``/``to_date`` filter on ``start_date`` (the flight start),
+        not ``created_at`` — buyers ask "what was running in this window".
+        """
+        stmt = select(MediaBuy).where(MediaBuy.tenant_id == self._tenant_id)
+
+        if status:
+            stmt = stmt.where(MediaBuy.status == status)
+        if principal_id:
+            stmt = stmt.where(MediaBuy.principal_id == principal_id)
+        if from_date:
+            stmt = stmt.where(MediaBuy.start_date >= from_date)
+        if to_date:
+            stmt = stmt.where(MediaBuy.start_date <= to_date)
+
+        if cursor_created_at is not None and cursor_id is not None:
+            stmt = stmt.where(
+                or_(
+                    MediaBuy.created_at < cursor_created_at,
+                    and_(
+                        MediaBuy.created_at == cursor_created_at,
+                        MediaBuy.media_buy_id < cursor_id,
+                    ),
+                )
+            )
+
+        stmt = stmt.order_by(MediaBuy.created_at.desc(), MediaBuy.media_buy_id.desc()).limit(limit)
+        return list(self._session.scalars(stmt).all())
+
     # ------------------------------------------------------------------
     # MediaBuy writes
     # ------------------------------------------------------------------
@@ -317,7 +364,7 @@ class MediaBuyRepository:
             "media_buy_id": media_buy_id,
             "tenant_id": self._tenant_id,
             "principal_id": principal_id,
-            "buyer_ref": getattr(req, "buyer_ref", None),
+            "idempotency_key": getattr(req, "idempotency_key", None),
             "order_name": order_name or getattr(req, "po_number", None) or f"Order-{media_buy_id}",
             "advertiser_name": advertiser_name,
             "budget": budget,

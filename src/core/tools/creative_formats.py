@@ -10,17 +10,16 @@ from typing import TypeVar
 
 from adcp import FormatId
 from adcp.types import Format as AdcpFormat
-from adcp.types.generated_poc.core.context import ContextObject
-from adcp.types.generated_poc.core.format import (
-    Assets,
-    Assets5,
-    Assets6,
-    Assets7,
-    Assets9,
-    Assets14,
+from adcp.types import (
+    AssetContentType,
+    AudioFormatAsset,
+    ContextObject,
+    HtmlFormatAsset,
+    ImageFormatAsset,
+    TextFormatAsset,
+    UrlFormatAsset,
+    VideoFormatAsset,
 )
-from adcp.types.generated_poc.enums.asset_content_type import AssetContentType
-from adcp.types.generated_poc.enums.format_category import FormatCategory
 from adcp.utils.format_assets import get_format_assets
 
 # TypeVar for Format to preserve subclass type through backward compatibility function
@@ -82,20 +81,20 @@ def _infer_asset_type(asset_id: str) -> str:
 # Each adcp Assets variant uses a Literal discriminator for asset_type.
 # Map asset type strings to the correct class.
 _ASSET_TYPE_TO_CLASS: dict[str, type] = {
-    "image": Assets,
-    "video": Assets5,
-    "audio": Assets6,
-    "text": Assets7,
-    "html": Assets9,
-    "url": Assets14,
+    "image": ImageFormatAsset,
+    "video": VideoFormatAsset,
+    "audio": AudioFormatAsset,
+    "text": TextFormatAsset,
+    "html": HtmlFormatAsset,
+    "url": UrlFormatAsset,
 }
 
 
 def _make_asset(
     asset_id: str, asset_type: str, required: bool
-) -> Assets | Assets5 | Assets6 | Assets7 | Assets9 | Assets14:
-    """Build the correct Assets variant for a given asset type string."""
-    cls = _ASSET_TYPE_TO_CLASS.get(asset_type, Assets7)  # default to text
+) -> ImageFormatAsset | VideoFormatAsset | AudioFormatAsset | TextFormatAsset | HtmlFormatAsset | UrlFormatAsset:
+    """Build the correct FormatAsset variant for a given asset type string."""
+    cls = _ASSET_TYPE_TO_CLASS.get(asset_type, TextFormatAsset)  # default to text
     return cls(
         item_type="individual",
         asset_id=asset_id,
@@ -136,7 +135,7 @@ def _list_creative_formats_impl(
     try:
         registry = get_creative_agent_registry()
     except Exception as e:
-        from adcp.types.generated_poc.core.error import Error as AdCPResponseError
+        from adcp.types import Error as AdCPResponseError
 
         logger.error(f"Failed to create creative agent registry: {e}", exc_info=True)
         return ListCreativeFormatsResponse(
@@ -196,7 +195,9 @@ def _list_creative_formats_impl(
                         )
 
                         # Build assets list using the correct Assets variant per type
-                        assets_list: list[Assets | Assets5 | Assets6 | Assets7 | Assets9 | Assets14] = []
+                        assets_list: list[
+                            ImageFormatAsset | VideoFormatAsset | AudioFormatAsset | TextFormatAsset | HtmlFormatAsset | UrlFormatAsset
+                        ] = []
                         for asset_id in template.get("required_assets", []):
                             asset_type = _infer_asset_type(asset_id)
                             assets_list.append(_make_asset(asset_id, asset_type, required=True))
@@ -207,7 +208,6 @@ def _list_creative_formats_impl(
                         fmt = Format(
                             format_id=format_id,
                             name=str(template["name"]),
-                            type=FormatCategory.display,
                             description=str(template["description"]) if template.get("description") else None,
                             assets=assets_list if assets_list else None,
                             is_standard=False,
@@ -228,9 +228,6 @@ def _list_creative_formats_impl(
         logger.debug(f"Could not get adapter formats: {e}")
 
     # Apply filters from request
-    if req.type:
-        formats = [f for f in formats if f.type == req.type]
-
     if req.format_ids:
         # Filter to only the specified format IDs
         # Extract the 'id' field from each FormatId object
@@ -320,7 +317,7 @@ def _list_creative_formats_impl(
     # Filter by wcag_level - hierarchical: A < AA < AAA
     # Formats must meet at least the requested level; formats without accessibility are excluded
     if req.wcag_level is not None:
-        from adcp.types.generated_poc.enums.wcag_level import WcagLevel
+        from adcp.types import WcagLevel
 
         _WCAG_ORDER = {WcagLevel.A: 1, WcagLevel.AA: 2, WcagLevel.AAA: 3}
         min_level = _WCAG_ORDER.get(req.wcag_level, 0)
@@ -339,9 +336,9 @@ def _list_creative_formats_impl(
             requested = {fmt.id for fmt in req_ids}
             formats = [f for f in formats if getattr(f, attr) and {fid.id for fid in getattr(f, attr)} & requested]
 
-    # Sort formats by type and name for consistent ordering
-    # Use .value to convert enum to string for sorting (enums don't support < comparison)
-    formats.sort(key=lambda f: (f.type.value if f.type is not None else "", f.name))
+    # Sort formats by name for consistent ordering
+    # (type field removed in adcp 3.12)
+    formats.sort(key=lambda f: f.name or "")
 
     # Ensure backward compatibility: populate both assets and assets_required
     # This allows old clients (using assets_required) and new clients (using assets) to work
@@ -368,7 +365,7 @@ def _list_creative_formats_impl(
     page_formats = formats[start_index:end_index]
 
     # Build pagination response
-    from adcp.types.generated_poc.core.pagination_response import PaginationResponse
+    from adcp.types import PaginationResponse
 
     next_cursor = None
     if has_more:
@@ -383,10 +380,8 @@ def _list_creative_formats_impl(
     )
 
     # Build creative_agents referrals from registry (POST-S4)
-    from adcp.types.generated_poc.enums.creative_agent_capability import CreativeAgentCapability
-    from adcp.types.generated_poc.media_buy.list_creative_formats_response import (
-        CreativeAgent as AdcpCreativeAgent,
-    )
+    from adcp.types import CreativeAgent as AdcpCreativeAgent
+    from adcp.types import CreativeAgentCapability
 
     creative_agents_list: list[AdcpCreativeAgent] | None = None
     try:
@@ -422,7 +417,7 @@ def _list_creative_formats_impl(
             "total_count": total_count,
             "standard_formats": len([f for f in page_formats if f.is_standard]),
             "custom_formats": len([f for f in page_formats if not f.is_standard]),
-            "format_types": list({f.type.value for f in page_formats if f.type is not None}),
+            "format_count_standard": len([f for f in page_formats if f.is_standard]),
         },
     )
 
@@ -442,7 +437,6 @@ def _list_creative_formats_impl(
 
 
 async def list_creative_formats(
-    type: FormatCategory | None = None,
     format_ids: list[FormatId] | None = None,
     is_responsive: bool | None = None,
     name_search: str | None = None,
@@ -460,7 +454,6 @@ async def list_creative_formats(
     FastMCP automatically validates and coerces JSON inputs to Pydantic models.
 
     Args:
-        type: Filter by format type (audio, video, display)
         format_ids: Filter by FormatId objects
         is_responsive: Filter for responsive formats (True/False)
         name_search: Search formats by name (case-insensitive partial match)
@@ -478,12 +471,10 @@ async def list_creative_formats(
     try:
         # Coerce raw strings to enums at the transport boundary (Pattern #5).
         # FastMCP normally coerces, but direct callers may pass raw strings.
-        type_str = (type if isinstance(type, FormatCategory) else FormatCategory(type)).value if type else None
         asset_types_strs = (
             [at.value if isinstance(at, AssetContentType) else str(at) for at in asset_types] if asset_types else None
         )
         req = ListCreativeFormatsRequest(
-            type=type_str,
             format_ids=format_ids,
             is_responsive=is_responsive,
             name_search=name_search,

@@ -1,15 +1,22 @@
 """Utility functions shared across admin UI modules."""
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 from functools import wraps
+from typing import NamedTuple, TypeVar
 
 from flask import abort, g, jsonify, redirect, session, url_for
 from sqlalchemy import select
+from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantManagementConfig, User
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +261,31 @@ def require_auth(admin_only=False):
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
+            from flask import request
+
+            # Embedded-mode bypass — checked BEFORE session-based auth.
+            # Routes registered under /tenant/<tenant_id>/... receive
+            # tenant_id as a kwarg; if MANAGED_INSTANCE=true and the
+            # tenant is embedded, X-Identity-* headers from
+            # the upstream proxy authorize the request without OAuth.
+            # See docs/integration/managed-mode-identity-contract.md.
+            tenant_id_kw = kwargs.get("tenant_id")
+            if tenant_id_kw:
+                from src.admin.utils.embedded_mode_auth import (
+                    EmbeddedAuthDeny,
+                    EmbeddedAuthOk,
+                    authorize_embedded_request,
+                    synthetic_user_dict,
+                )
+
+                embedded_result = authorize_embedded_request(request, tenant_id_kw)
+                if isinstance(embedded_result, EmbeddedAuthDeny):
+                    abort(403, description=f"{embedded_result.error}: {embedded_result.message}")
+                if isinstance(embedded_result, EmbeddedAuthOk):
+                    g.user = synthetic_user_dict(embedded_result.identity)
+                    return f(*args, **kwargs)
+                # EmbeddedAuthPassthrough → fall through to existing OAuth path
+
             # Check for test mode
             test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
             if test_mode and "test_user" in session:
@@ -262,10 +294,13 @@ def require_auth(admin_only=False):
 
             if "user" not in session:
                 logger.info(f"require_auth: No 'user' in session. Session keys: {list(session.keys())}")
-                # Store the original URL to redirect back after login
-                from flask import request
-
-                return redirect(url_for("auth.login", next=request.url))
+                # Store the original URL to redirect back after login.
+                # Use the path-only form (request.full_path) so the
+                # ``next=`` parameter doesn't leak the upstream origin
+                # (e.g., ``localhost:3091``) when the salesagent is
+                # behind a reverse proxy.
+                next_url = request.full_path.rstrip("?")
+                return redirect(url_for("auth.login", next=next_url))
 
             # Store user in g for access in view functions
             g.user = session["user"]
@@ -303,6 +338,27 @@ def require_tenant_access(api_mode=False):
                 f"Auth check - tenant: {tenant_id}, method: {request.method}, has_session: {has_session}, has_cookies: {has_cookies}, session_keys: {list(session.keys())}"
             )
 
+            # Embedded-mode bypass — checked BEFORE session-based auth.
+            # When MANAGED_INSTANCE=true and the tenant is embedded,
+            # X-Identity-* headers from the upstream proxy authorize the
+            # request. See docs/integration/managed-mode-identity-contract.md.
+            from src.admin.utils.embedded_mode_auth import (
+                EmbeddedAuthDeny,
+                EmbeddedAuthOk,
+                authorize_embedded_request,
+                synthetic_user_dict,
+            )
+
+            embedded_result = authorize_embedded_request(request, tenant_id)
+            if isinstance(embedded_result, EmbeddedAuthDeny):
+                if api_mode:
+                    return jsonify({"error": embedded_result.error, "message": embedded_result.message}), 403
+                abort(403, description=f"{embedded_result.error}: {embedded_result.message}")
+            if isinstance(embedded_result, EmbeddedAuthOk):
+                g.user = synthetic_user_dict(embedded_result.identity)
+                return f(tenant_id, *args, **kwargs)
+            # EmbeddedAuthPassthrough → fall through to existing OAuth path
+
             # Check for test mode (global env var OR per-tenant auth_setup_mode)
             test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
 
@@ -329,8 +385,11 @@ def require_tenant_access(api_mode=False):
             if "user" not in session:
                 if api_mode:
                     return jsonify({"error": "Authentication required"}), 401
-                # Redirect to tenant-specific login (preserves tenant context)
-                return redirect(url_for("auth.tenant_login", tenant_id=tenant_id, next=request.url))
+                # Redirect to tenant-specific login (preserves tenant context).
+                # Use path-only ``next`` so reverse-proxy callers (Scope3
+                # Storefront iframe) don't see the upstream origin leaked.
+                next_url = request.full_path.rstrip("?")
+                return redirect(url_for("auth.tenant_login", tenant_id=tenant_id, next=next_url))
 
             user_info = session["user"]
 
@@ -539,3 +598,25 @@ def translate_custom_targeting(custom_targeting_node, tenant_id=None):
         return None
 
     return translate_node(custom_targeting_node)
+
+
+# ---------------------------------------------------------------------------
+# Query limiting
+# ---------------------------------------------------------------------------
+
+
+class LimitedResult(NamedTuple):
+    """Result of a limited query — rows plus a truncation flag."""
+
+    rows: list
+    truncated: bool
+
+
+def execute_limited(db_session: Session, stmt: Select, limit: int) -> LimitedResult:
+    """Execute *stmt* with a row limit and report whether the result was truncated.
+
+    Returns ``LimitedResult(rows, truncated)`` where *truncated* is ``True``
+    when the database returned exactly *limit* rows (meaning more may exist).
+    """
+    rows = list(db_session.scalars(stmt.limit(limit)).all())
+    return LimitedResult(rows=rows, truncated=len(rows) >= limit)

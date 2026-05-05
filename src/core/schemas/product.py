@@ -6,6 +6,7 @@ All classes are re-exported from src.core.schemas for backward compatibility.
 
 from typing import Any
 
+from adcp.types import Catalog as LibraryCatalog
 from adcp.types import GetProductsResponse as LibraryGetProductsResponse
 from adcp.types import GetProductsWholesaleRequest as LibraryGetProductsRequest
 from adcp.types import Placement as LibraryPlacement
@@ -13,7 +14,6 @@ from adcp.types import Product as LibraryProduct
 from adcp.types import ProductCard as LibraryProductCard
 from adcp.types import ProductCardDetailed as LibraryProductCardDetailed
 from adcp.types import ProductFilters as LibraryFilters
-from adcp.types import PromotedProducts as LibraryPromotedProducts
 from pydantic import ConfigDict, Field, model_validator
 
 from src.core.config import get_pydantic_extra_mode
@@ -76,6 +76,14 @@ class Product(LibraryProduct):
     - No conversion functions needed - inheritance handles it
     - Automatic updates when library Product changes
     """
+
+    # Library v4.4.0 made this required; salesagent treats it as optional
+    # (the ORM column is nullable, and historical products predate the field).
+    # Override the inherited field-required semantics with a None default so
+    # ORM → Pydantic conversion of legacy rows doesn't ValidationError. New
+    # products serialize the field when set; the buyer protocol still
+    # surfaces real capabilities to clients that ask.
+    reporting_capabilities: Any | None = Field(default=None)
 
     # Internal-only fields (not in AdCP spec)
     implementation_config: dict[str, Any] | None = Field(
@@ -242,7 +250,7 @@ class GetProductsRequest(LibraryGetProductsRequest):
     )
 
     # Internal-only fields (not in AdCP spec)
-    product_selectors: LibraryPromotedProducts | None = Field(
+    product_selectors: LibraryCatalog | None = Field(
         None,
         description="Selectors to filter the brand manifest product catalog for product discovery",
         exclude=True,

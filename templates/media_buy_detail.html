@@ -3,11 +3,29 @@
 {% block title %}Media Buy {{ media_buy.media_buy_id }} - {{ tenant_id }}{% endblock %}
 
 {% block content %}
+<style>
+    .breadcrumb {
+        margin-bottom: 1rem;
+    }
+    .breadcrumb a {
+        color: #6b7280;
+        text-decoration: none;
+    }
+    .breadcrumb a:hover {
+        color: #111827;
+    }
+</style>
+
+{% set crumbs = [
+    {"label": (tenant.name if tenant else tenant_id), "url": url_for('tenants.dashboard', tenant_id=tenant_id)},
+    {"label": "Media Buys", "url": url_for('tenants.media_buys_list', tenant_id=tenant_id)},
+    {"label": media_buy.media_buy_id or "Detail"}
+] %}
+{% set crumbs = crumbs | with_embed_root %}
+{% include "_breadcrumb.html" %}
+
 <div class="dashboard-header">
     <h1>Media Buy Details</h1>
-    <div>
-        <a href="{{ url_for('tenants.dashboard', tenant_id=tenant_id) }}" class="btn btn-secondary">← Back to Dashboard</a>
-    </div>
 </div>
 
 <!-- Approval Alert -->
@@ -58,12 +76,6 @@
             <span class="label">Budget:</span>
             <span class="value">${{ "%.2f"|format(media_buy.budget or 0) }} {{ media_buy.currency or 'USD' }}</span>
         </div>
-        {% if media_buy.buyer_ref %}
-        <div class="detail-row">
-            <span class="label">Buyer Reference:</span>
-            <span class="value">{{ media_buy.buyer_ref }}</span>
-        </div>
-        {% endif %}
         {% if media_buy.start_date and media_buy.end_date %}
         <div class="detail-row">
             <span class="label">Flight Dates:</span>

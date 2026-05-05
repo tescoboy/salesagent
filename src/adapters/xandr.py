@@ -335,7 +335,7 @@ class XandrAdapter(AdServerAdapter):
             # Use V3 consolidated pricing types
             from adcp.types import CpmPricingOption, DeliveryMeasurement, DeliveryType
             from adcp.types.generated_poc.core.publisher_property_selector import PublisherPropertySelector1
-            from adcp.types.generated_poc.pricing_options.price_guidance import (
+            from adcp.types import (
                 PriceGuidance as AdCPPriceGuidance,
             )
 
@@ -512,7 +512,7 @@ class XandrAdapter(AdServerAdapter):
                     campaign_name = brand.domain
                 elif isinstance(brand, dict):
                     campaign_name = brand.get("domain")
-            campaign_name = campaign_name or f"AdCP Campaign {request.buyer_ref}"
+            campaign_name = campaign_name or "AdCP Campaign"
 
             io_data = {
                 "insertion-order": {
@@ -618,7 +618,6 @@ class XandrAdapter(AdServerAdapter):
     def update_media_buy(
         self,
         media_buy_id: str,
-        buyer_ref: str,
         action: str,
         package_id: str | None,
         budget: int | None,

@@ -10,6 +10,16 @@ Verifies that:
 These are unit tests that mock database/adapter calls to isolate error formatting.
 """
 
+import pytest
+
+pytest.skip(
+    "Legacy A2A server (a2a-sdk 0.3) is retired by greenfield rebuild. "
+    "Replaced in M2 by adcp.server.serve(transport='a2a') (a2a-sdk 1.0). "
+    "See core/README.md.",
+    allow_module_level=True,
+)
+
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,7 +43,6 @@ class TestMCPErrorShapes:
         # Call with missing context triggers AdCPValidationError (transport-agnostic)
         with pytest.raises((AdCPValidationError, ToolError)) as exc_info:
             await create_media_buy(
-                buyer_ref="test_buyer",
                 brand={"domain": "test.com"},
                 packages=[],  # Empty but present; validation will catch the issue
                 start_time="2026-01-01T00:00:00Z",
@@ -53,7 +62,6 @@ class TestMCPErrorShapes:
         # Provide invalid types that fail Pydantic validation
         with pytest.raises((AdCPValidationError, ToolError, ValidationError)):
             await create_media_buy(
-                buyer_ref="test_buyer",
                 brand={"invalid_key": "no_domain"},  # Wrong structure: missing required 'domain' field
                 packages="not_a_list",  # Wrong type: should be list
                 start_time="2026-01-01T00:00:00Z",
@@ -69,7 +77,6 @@ class TestMCPErrorShapes:
 
         # Build a minimal valid request
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer",
             brand={"domain": "testbrand.com"},
             packages=[],
             start_time="2026-01-01T00:00:00Z",
@@ -91,7 +98,6 @@ class TestMCPErrorShapes:
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer",
             brand={"domain": "testbrand.com"},
             packages=[],
             start_time="2026-01-01T00:00:00Z",
@@ -333,7 +339,6 @@ class TestCrossTransportErrorConsistency:
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer",
             brand={"domain": "testbrand.com"},
             packages=[],
             start_time="2026-01-01T00:00:00Z",
@@ -381,7 +386,6 @@ class TestCrossTransportErrorConsistency:
         mcp_error_message = None
         try:
             CreateMediaBuyRequest(
-                buyer_ref="test_buyer",
                 brand={"invalid_key": "no_domain"},  # Missing required 'domain' field triggers ValidationError
                 packages=[],
                 start_time="2026-01-01T00:00:00Z",
@@ -432,7 +436,6 @@ class TestCrossTransportErrorConsistency:
         from src.core.tools.media_buy_create import _create_media_buy_impl
 
         req = CreateMediaBuyRequest(
-            buyer_ref="test_buyer",
             brand={"domain": "testbrand.com"},
             packages=[],
             start_time="2026-01-01T00:00:00Z",

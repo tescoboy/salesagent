@@ -14,11 +14,10 @@ from __future__ import annotations
 import pytest
 from adcp.types.generated_poc.core.format import (
     Accessibility,
-    Assets,
-    Assets5,
-    Assets9,
+    ImageFormatAsset,
+    VideoFormatAsset,
+    HtmlFormatAsset,
 )
-from adcp.types.generated_poc.enums.format_category import FormatCategory
 from adcp.types.generated_poc.enums.wcag_level import WcagLevel
 
 from src.core.schemas import Format, FormatId, ListCreativeFormatsRequest
@@ -33,7 +32,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 def _fmt(
     fmt_id: str,
     name: str,
-    type: FormatCategory = FormatCategory.display,
+    type: str | None = "display",
     **kwargs,
 ) -> Format:
     """Shorthand for creating a Format object."""
@@ -66,13 +65,13 @@ class TestAssetTypesFilter:
             _fmt(
                 "img_banner",
                 "Image Banner",
-                assets=[Assets(asset_id="main", asset_type="image", item_type="individual", required=True)],
+                assets=[ImageFormatAsset(asset_id="main", asset_type="image", item_type="individual", required=True)],
             ),
             _fmt(
                 "vid_player",
                 "Video Player",
-                type=FormatCategory.video,
-                assets=[Assets5(asset_id="video", asset_type="video", item_type="individual", required=True)],
+                type="video",
+                assets=[VideoFormatAsset(asset_id="video", asset_type="video", item_type="individual", required=True)],
             ),
         ]
         with CreativeFormatsEnv() as env:
@@ -90,13 +89,13 @@ class TestAssetTypesFilter:
             _fmt(
                 "img_banner",
                 "Image Banner",
-                assets=[Assets(asset_id="main", asset_type="image", item_type="individual", required=True)],
+                assets=[ImageFormatAsset(asset_id="main", asset_type="image", item_type="individual", required=True)],
             ),
             _fmt(
                 "vid_player",
                 "Video Player",
-                type=FormatCategory.video,
-                assets=[Assets5(asset_id="video", asset_type="video", item_type="individual", required=True)],
+                type="video",
+                assets=[VideoFormatAsset(asset_id="video", asset_type="video", item_type="individual", required=True)],
             ),
         ]
         with CreativeFormatsEnv() as env:
@@ -114,18 +113,18 @@ class TestAssetTypesFilter:
             _fmt(
                 "img_only",
                 "Image Only",
-                assets=[Assets(asset_id="main", asset_type="image", item_type="individual", required=True)],
+                assets=[ImageFormatAsset(asset_id="main", asset_type="image", item_type="individual", required=True)],
             ),
             _fmt(
                 "vid_player",
                 "Video Player",
-                type=FormatCategory.video,
-                assets=[Assets5(asset_id="video", asset_type="video", item_type="individual", required=True)],
+                type="video",
+                assets=[VideoFormatAsset(asset_id="video", asset_type="video", item_type="individual", required=True)],
             ),
             _fmt(
                 "html_widget",
                 "HTML Widget",
-                assets=[Assets9(asset_id="code", asset_type="html", item_type="individual", required=True)],
+                assets=[HtmlFormatAsset(asset_id="code", asset_type="html", item_type="individual", required=True)],
             ),
         ]
         with CreativeFormatsEnv() as env:
@@ -144,7 +143,7 @@ class TestAssetTypesFilter:
             _fmt(
                 "img_banner",
                 "Image Banner",
-                assets=[Assets(asset_id="main", asset_type="image", item_type="individual", required=True)],
+                assets=[ImageFormatAsset(asset_id="main", asset_type="image", item_type="individual", required=True)],
             ),
         ]
         with CreativeFormatsEnv() as env:
@@ -188,7 +187,7 @@ class TestNameSearchFilter:
         """UC-005-MAIN-MCP-11: name_search='BANNER' matches lowercase 'banner' in name."""
         formats = [
             _fmt("banner_300", "Medium banner 300x250"),
-            _fmt("video_pre", "Video Pre-roll", type=FormatCategory.video),
+            _fmt("video_pre", "Video Pre-roll", type="video"),
         ]
         with CreativeFormatsEnv() as env:
             TenantFactory(tenant_id="test_tenant")
@@ -219,7 +218,7 @@ class TestNameSearchFilter:
     def test_name_search_partial_match(self, integration_db):
         """UC-005-MAIN-MCP-11: name_search='vid' matches 'Video Pre-roll'."""
         formats = [
-            _fmt("vid_pre", "Video Pre-roll", type=FormatCategory.video),
+            _fmt("vid_pre", "Video Pre-roll", type="video"),
             _fmt("display_300", "Display 300x250"),
         ]
         with CreativeFormatsEnv() as env:

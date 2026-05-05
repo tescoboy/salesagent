@@ -35,15 +35,15 @@ from adcp.types import (
 from adcp.types import (
     SyncCreativesRequest as LibrarySyncCreativesRequest,
 )
-from adcp.types.generated_poc.core.pagination_response import PaginationResponse as LibraryResponsePagination
-from adcp.types.generated_poc.core.provenance import AiTool
-from adcp.types.generated_poc.creative.list_creatives_response import (
+from adcp.types import PaginationResponse as LibraryResponsePagination
+from adcp.types import AiTool
+from adcp.types import (
     Creative as LibraryCreative,
 )
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,
 )
-from adcp.types.generated_poc.enums.creative_action import CreativeAction
+from adcp.types import CreativeAction
 from pydantic import (
     ConfigDict,
     Field,
@@ -154,6 +154,12 @@ class Creative(LibraryCreative):
     updated_date: datetime = Field(default_factory=lambda: datetime.now(tz=UTC), description="Update timestamp")
     # Override assets to untyped dict (our DB stores arbitrary asset dicts, not typed models)
     assets: dict[str, Any] | None = Field(default=None, description="Creative assets")
+    # Library v4.4.0 made variants required and dropped tags. Salesagent's
+    # creative ORM column is variants-less and predates the change; default
+    # to empty list so legacy creatives still serialize without a forced
+    # backfill. Tests asserting AdCP compliance now need to expect either an
+    # empty list or omit the field — the override makes both work.
+    variants: list[Any] | None = Field(default=None, description="AdCP creative variants (v4.4.0+)")
 
     # === AI Provenance (EU AI Act Article 50) ===
     provenance: Provenance | None = Field(default=None, description="AI provenance metadata per EU AI Act Article 50")
@@ -285,15 +291,8 @@ class CreativeAssignment(SalesAgentBaseModel):
 class AddCreativeAssetsRequest(SalesAgentBaseModel):
     """Request to add creative assets to a media buy (AdCP spec compliant)."""
 
-    media_buy_id: str | None = None
-    buyer_ref: str | None = None
+    media_buy_id: str
     assets: list[Creative]  # Renamed from 'creatives' to match spec
-
-    def model_validate(cls, values):
-        # Ensure at least one of media_buy_id or buyer_ref is provided
-        if not values.get("media_buy_id") and not values.get("buyer_ref"):
-            raise ValueError("Either media_buy_id or buyer_ref must be provided")
-        return values
 
     # Backward compatibility
     @property
@@ -333,6 +332,11 @@ class SyncCreativesRequest(LibrarySyncCreativesRequest):
     # adcp 3.9 makes account required. Our impl resolves identity at the transport
     # layer (ResolvedIdentity), not from the request payload, so account is optional here.
     account: LibraryAccountReference | None = None  # type: ignore[assignment]
+
+    # adcp v4.4.0 made idempotency_key required. Salesagent allows it
+    # optional — buyers that don't send one fall through to per-creative
+    # natural-key dedup at the impl layer.
+    idempotency_key: str | None = None  # type: ignore[assignment]
 
     creatives: list[Creative] = Field(
         ..., min_length=1, max_length=100, description="Array of creative assets to sync (create or update)"
@@ -589,7 +593,7 @@ class ListCreativesResponse(NestedModelSerializerMixin, LibraryListCreativesResp
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
     # Override with local subtypes (each extends its library counterpart)
-    query_summary: QuerySummary = Field(..., description="Summary of the query that was executed")  # type: ignore[assignment]
+    query_summary: QuerySummary = Field(..., description="Summary of the query that was executed")
     pagination: Pagination = Field(..., description="Pagination information for navigating results")
     creatives: list[Creative] = Field(..., description="Array of creative assets")  # type: ignore[assignment]
 

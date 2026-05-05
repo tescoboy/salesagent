@@ -5,8 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from adcp.types.generated_poc.core.account import CreditLimit, GovernanceAgent, Setup
-from adcp.types.generated_poc.core.brand_ref import BrandReference
+from adcp.types import BrandReference, CreditLimit, GovernanceAgent, Setup
 from sqlalchemy import (
     DECIMAL,
     BigInteger,
@@ -98,7 +97,7 @@ class Tenant(Base, JSONValidatorMixin):
 
     # Naming templates (business rules - shared across all adapters)
     order_name_template: Mapped[str | None] = mapped_column(
-        String(500), nullable=True, server_default="{campaign_name|brand_name} - {buyer_ref} - {date_range}"
+        String(500), nullable=True, server_default="{campaign_name|brand_name} - {media_buy_id} - {date_range}"
     )
     line_item_name_template: Mapped[str | None] = mapped_column(
         String(500), nullable=True, server_default="{order_name} - {product_name}"
@@ -123,6 +122,59 @@ class Tenant(Base, JSONValidatorMixin):
     # Favicon URL - custom favicon for the tenant's admin UI
     # Can be an absolute URL or a path to an uploaded file (e.g., /static/favicons/tenant_id/favicon.ico)
     favicon_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Embedded mode: platform-managed surfaces are locked to the Tenant Management API.
+    # When True, the model-layer write guard (embedded_tenant_guard) blocks non-API mutations
+    # to platform-managed columns/tables (Tenant core fields, AdapterConfig). Publisher-managed
+    # tables (Product, Principal, Creative, etc.) remain writable from the UI regardless.
+    is_embedded: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    # Identifier for the tenant in the upstream platform (e.g. Scope3 org id).
+    # Indexed but not unique — a single org may own multiple tenants in the future.
+    external_org_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Name of the upstream platform that owns this managed tenant ("scope3", etc.).
+    external_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # When True, _create_media_buy_impl auto-provisions GAM advertisers for
+    # Accounts in pending_provision (calls CompanyService.createCompanies on
+    # first buy). When False, returns ACCOUNT_NOT_PROVISIONED so publishers
+    # map manually via the Admin UI / Tenant Management API.
+    # Default False keeps today's open-instance behavior intact; embedded-mode
+    # provisioning sets True per-tenant.
+    auto_provision_advertisers: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    # AAO model (sprint 1.7 — see docs/design/replace-authorized-properties-with-aao-lookup.md):
+    # house_domain is where the publisher's brand.json lives; properties are
+    # looked up live from https://{house_domain}/.well-known/brand.json. Replaces
+    # the manually-maintained AuthorizedProperty table for new tenants.
+    house_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # public_agent_url is what publishers list in their adagents.json to
+    # authorize this tenant's agent. Embedded-mode tenants share one
+    # (https://interchange.io); self-hosted publishers use their own salesagent.
+    public_agent_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Sprint 1.8 buyer-advertiser routing — see
+    # docs/design/embedded-mode-sprint-1.8-buyer-advertiser-routing.md.
+    # Required-before-activation fallback advertiser. Buys whose
+    # (operator_domain, brand_house, brand_id) triple doesn't match a
+    # routing rule fall through to this advertiser; if NULL, the routing
+    # chain raises TENANT_NOT_ACTIVATED (Q3: implicit activation —
+    # buyer-protocol error IS the contract).
+    default_gam_advertiser_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Per-tenant sync cadence override (minutes). NULL = use the cron's
+    # default 6h. sync_all_tenants.py branches on this when picking
+    # tenants per run.
+    sync_cadence_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Embed-mode breadcrumb root override. Shape: ``{"label": str, "url": str}``.
+    # Only meaningful when ``is_embedded`` is True — open-instance tenants ignore
+    # the value. Replaces the default first crumb ("Dashboard") with the
+    # upstream host's storefront entry point so embedded breadcrumb trails feel
+    # native to the host.
+    embed_breadcrumb_root: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
 
     # Relationships
     products = relationship("Product", back_populates="tenant", cascade="all, delete-orphan")
@@ -160,6 +212,7 @@ class Tenant(Base, JSONValidatorMixin):
     __table_args__ = (
         Index("idx_subdomain", "subdomain"),
         Index("ix_tenants_virtual_host", "virtual_host", unique=True),
+        Index("ix_tenants_external_org_id", "external_org_id"),
     )
 
     # JSON validators are inherited from JSONValidatorMixin
@@ -832,6 +885,11 @@ class Account(Base):
     # Internal fields (not in AdCP spec)
     principal_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     platform_mappings: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Sprint 1.8: which path the routing chain took to attach the
+    # gam_advertiser_id on this Account. Used by /recent-buyers to
+    # color-code matches vs fall-throughs without re-running resolution.
+    # Legacy rows are NULL; surfaces as "unknown" in API responses.
+    resolved_via: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -844,7 +902,8 @@ class Account(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('active', 'pending_approval', 'rejected', 'payment_required', 'suspended', 'closed')",
+            "status IN ('active', 'pending_approval', 'pending_provision', 'rejected', "
+            "'payment_required', 'suspended', 'closed')",
             name="ck_accounts_status",
         ),
         CheckConstraint(
@@ -858,6 +917,10 @@ class Account(Base):
         CheckConstraint(
             "account_scope IS NULL OR account_scope IN ('operator', 'brand', 'operator_brand', 'agent')",
             name="ck_accounts_account_scope",
+        ),
+        CheckConstraint(
+            "resolved_via IS NULL OR resolved_via IN ('account', 'sandbox', 'exact', 'house', 'operator', 'default')",
+            name="ck_accounts_resolved_via",
         ),
         Index("idx_accounts_tenant", "tenant_id"),
         Index("idx_accounts_status", "status"),
@@ -901,7 +964,6 @@ class MediaBuy(Base):
         String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
     )
     principal_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    buyer_ref: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     order_name: Mapped[str] = mapped_column(String(255), nullable=False)
     advertiser_name: Mapped[str] = mapped_column(String(255), nullable=False)
     campaign_objective: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -923,6 +985,7 @@ class MediaBuy(Base):
     strategy_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Relationships
     tenant = relationship("Tenant", back_populates="media_buys", overlaps="media_buys")
@@ -959,16 +1022,18 @@ class MediaBuy(Base):
             ["accounts.tenant_id", "accounts.account_id"],
             ondelete="SET NULL",
         ),
-        UniqueConstraint(
-            "tenant_id",
-            "principal_id",
-            "buyer_ref",
-            name="uq_media_buys_buyer_ref",
-        ),
         Index("idx_media_buys_tenant", "tenant_id"),
         Index("idx_media_buys_status", "status"),
         Index("idx_media_buys_strategy", "strategy_id"),
         Index("idx_media_buys_account", "account_id"),
+        Index(
+            "idx_media_buys_idempotency_key",
+            "tenant_id",
+            "principal_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
     )
 
 
@@ -1049,6 +1114,14 @@ class AuditLog(Base):
     details: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     strategy_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Managed-tenant external identity propagation (sprint 1 of managed tenant mode).
+    # Populated when a mutation originates from an upstream-platform user (e.g. Scope3
+    # Storefront). All four are optional — open-instance audit rows leave them NULL.
+    external_user_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_org_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Relationships
     tenant = relationship("Tenant", back_populates="audit_logs")
 
@@ -1078,6 +1151,51 @@ class TenantManagementConfig(Base):
 
 # Backwards compatibility alias
 SuperadminConfig = TenantManagementConfig
+
+
+class WebhookSubscription(Base):
+    """Outbound webhook subscription owned by a tenant.
+
+    Sprint 6 of [embedded-mode](../../../../docs/design/embedded-mode-sprint-6.md)
+    publishes tenant lifecycle events (workflow.created, workflow.decided,
+    media_buy.status_changed, sync.completed, sync.failed,
+    tenant.config_changed) to URLs registered here.
+
+    The subscription secret is stored hashed (sha256 hex) — the plaintext is
+    returned to the API caller exactly once at create time. Lost secrets
+    require re-registering the webhook.
+
+    ``event_types`` is the list of event types the receiver wants. Empty list
+    means "all events" (matching the spec's documented default).
+    """
+
+    __tablename__ = "webhook_subscriptions"
+
+    webhook_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    event_types: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    extra_headers: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_delivery_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_webhook_subscriptions_tenant", "tenant_id"),
+        Index(
+            "idx_webhook_subscriptions_active",
+            "tenant_id",
+            "is_active",
+        ),
+    )
 
 
 class AdapterConfig(Base):
@@ -1153,6 +1271,12 @@ class AdapterConfig(Base):
     custom_targeting_keys: Mapped[dict] = mapped_column(JSONType, nullable=False, server_default=text("'{}'::jsonb"))
 
     # NOTE: gam_company_id (advertiser_id) is per-principal, stored in Principal.platform_mappings
+
+    # Sprint 1.8 + 1.6: per-tenant sandbox advertiser. Lazy-populated by
+    # ensure_sandbox_advertiser() on first sandbox call; the routing chain
+    # short-circuits sandbox=true buys to this advertiser (don't bill,
+    # don't pollute reports, don't count against inventory).
+    gam_sandbox_advertiser_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Kevel
     kevel_network_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -1313,6 +1437,7 @@ class GAMInventory(Base):
         Index("idx_gam_inventory_tenant", "tenant_id"),
         Index("idx_gam_inventory_type", "inventory_type"),
         Index("idx_gam_inventory_status", "status"),
+        Index("idx_gam_inventory_tenant_type_status", "tenant_id", "inventory_type", "status"),
     )
 
 
@@ -1877,6 +2002,125 @@ class AuthorizedProperty(Base, JSONValidatorMixin):
         Index("idx_authorized_properties_domain", "publisher_domain"),
         Index("idx_authorized_properties_type", "property_type"),
         Index("idx_authorized_properties_verification", "verification_status"),
+    )
+
+
+class AdvertiserRoutingRule(Base):
+    """Sprint 1.8 — buyer-advertiser routing rules.
+
+    Ordered overrides keyed by ``(operator_domain, brand_house, brand_id)``
+    with NULL-as-wildcard. The resolution chain in
+    :mod:`src.services.buyer_advertiser_routing` reads these rows
+    when a buy comes in carrying inline ``account: AccountReference``
+    (operator + brand + sandbox triple). Precedence: exact → house
+    wildcard → operator wildcard → tenant default → reject.
+
+    See ``docs/design/embedded-mode-sprint-1.8-buyer-advertiser-routing.md``.
+    """
+
+    __tablename__ = "advertiser_routing_rules"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # "rule_<random>"
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    # Sprint 5 — buyer agent (Principal) the rule applies to. NULL = "any
+    # agent" (preserves Sprint 1.8 behavior; required for backward
+    # compatibility with rows that predate this column). Embedded tenants
+    # leave this NULL since the host is the only buyer.
+    principal_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Buyer agent's domain (e.g. interchange.io, buyer.scope3.com).
+    # Validated AAO-side on POST — must publish a valid adagents.json
+    # listing this tenant's public_agent_url. Always populated.
+    operator_domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Parent brand domain (e.g. coca-cola.com). NULL = "any house under
+    # this operator" (operator wildcard).
+    brand_house: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Specific brand within the house (e.g. sprite). NULL = "any brand
+    # under this house" (house wildcard).
+    brand_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Target advertiser. Validated against the synced gam advertisers
+    # cache on POST/PATCH (must reference a real advertiser in the
+    # tenant's GAM network).
+    gam_advertiser_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    tenant = relationship("Tenant", backref="advertiser_routing_rules")
+
+    __table_args__ = (
+        # Uniqueness on the natural key with NULLs participating via
+        # COALESCE coercion (Postgres treats NULL as distinct in UNIQUE
+        # by default). Mirrors the index alembic creates in
+        # 0042_e7a4c2b9d5f1; declared here so Base.metadata.create_all()
+        # (used by integration tests) builds the same constraint.
+        Index(
+            "uq_routing_rule_natural_key",
+            "tenant_id",
+            text("COALESCE(principal_id, '')"),
+            "operator_domain",
+            text("COALESCE(brand_house, '')"),
+            text("COALESCE(brand_id, '')"),
+            unique=True,
+        ),
+        Index("idx_routing_rules_tenant", "tenant_id"),
+        Index("idx_routing_rules_operator", "tenant_id", "operator_domain"),
+    )
+
+
+class GamAdvertiser(Base):
+    """Sprint 5 piece D — synced cache of GAM advertisers per tenant.
+
+    Powers the searchable picker in the Buyer Routing UI (default
+    advertiser + routing-rule rows). Hydrated by the
+    ``sync_advertisers`` worker reading
+    ``CompanyService.getCompaniesByStatement WHERE type = 'ADVERTISER'``.
+    The endpoint ``GET /tenants/{id}/gam/advertisers`` reads from this
+    cache, never from live GAM (10k+ advertiser networks make a per-
+    keystroke round-trip prohibitively slow).
+
+    Soft-delete on disappearance: advertisers that drop out of GAM are
+    flagged ``status='inactive'`` rather than hard-deleted, because
+    routing rules might reference them. The picker hides inactive rows
+    by default; the routing-rule editor surfaces a warning if a rule
+    points at an inactive advertiser.
+
+    See ``docs/design/embedded-mode-sprint-5-buyer-routing-ux.md``
+    "Piece D: GAM advertisers cache".
+    """
+
+    __tablename__ = "gam_advertisers"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    advertiser_id: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    currency_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    # GAM company status surfaced verbatim ("active", "inactive") so
+    # the picker can render badges without a translation layer.
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    tenant = relationship("Tenant", backref="gam_advertisers")
+
+    __table_args__ = (
+        Index("idx_gam_advertisers_tenant", "tenant_id"),
+        # Compound index supports the case-insensitive name search in
+        # GET /gam/advertisers. Mirrors the migration index so
+        # Base.metadata.create_all() (used by integration tests) builds
+        # the same constraint.
+        Index("idx_gam_advertisers_name", "tenant_id", "name"),
     )
 
 

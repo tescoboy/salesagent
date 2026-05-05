@@ -59,6 +59,7 @@ fix_*.py
 sync_*.py
 !scripts/sync_*.py
 !src/**/sync_*.py
+!tests/**/sync_*.py
 test_sync.py
 
 # One-off test scripts in root (proper tests belong in tests/)
@@ -109,6 +110,11 @@ server.pid
 # Conductor workspace files
 conductor_ports.json
 conductor_ports.lock
+
+# GCP deployment secrets (never commit)
+flywg.conf
+*.flywg.conf
+.env.gcp
 
 # AdCP Schema Cache (downloaded on demand by E2E tests)
 /schemas/
