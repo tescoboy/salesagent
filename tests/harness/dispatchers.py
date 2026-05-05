@@ -6,7 +6,7 @@ the dispatcher only handles result wrapping and error capture.
 
 Usage (internal — called by BaseTestEnv.call_via)::
 
-    dispatcher = DISPATCHERS[Transport.A2A]
+    dispatcher = DISPATCHERS[Transport.REST]
     result = dispatcher.dispatch(env, **kwargs)
 """
 
@@ -29,17 +29,6 @@ class ImplDispatcher:
         except Exception as exc:
             return TransportResult(error=exc)
         return TransportResult(payload=payload, envelope={"transport": "impl"})
-
-
-class A2ADispatcher:
-    """Dispatch via _raw() A2A wrapper."""
-
-    def dispatch(self, env: BaseTestEnv, **kwargs: Any) -> TransportResult:
-        try:
-            payload = env.call_a2a(**kwargs)
-        except Exception as exc:
-            return TransportResult(error=exc)
-        return TransportResult(payload=payload, envelope={"transport": "a2a"})
 
 
 class RestDispatcher:
@@ -88,9 +77,8 @@ class McpDispatcher:
         return TransportResult(payload=payload, envelope={"transport": "mcp"})
 
 
-DISPATCHERS: dict[Transport, ImplDispatcher | A2ADispatcher | RestDispatcher | McpDispatcher] = {
+DISPATCHERS: dict[Transport, ImplDispatcher | RestDispatcher | McpDispatcher] = {
     Transport.IMPL: ImplDispatcher(),
-    Transport.A2A: A2ADispatcher(),
     Transport.REST: RestDispatcher(),
     Transport.MCP: McpDispatcher(),
 }

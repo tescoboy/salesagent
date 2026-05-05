@@ -27,15 +27,12 @@ from adcp.types.generated_poc.protocol.get_adcp_capabilities_response import (
     SupportedProtocol,
     Targeting,
 )
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 
 from src.core.auth import get_principal_object
 from src.core.database.repositories.uow import TenantConfigUoW
 from src.core.helpers.activity_helpers import log_tool_activity
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -242,72 +239,3 @@ def _get_adcp_capabilities_impl(
     )
 
     return response
-
-
-async def get_adcp_capabilities(
-    protocols: list[str] | None = None,
-    ctx: Context | None = None,
-) -> ToolResult:
-    """Get the capabilities of this AdCP sales agent.
-
-    MCP tool wrapper aligned with adcp v3.x spec.
-
-    Args:
-        protocols: Specific protocols to query (optional, currently ignored)
-        ctx: FastMCP context (automatically provided)
-
-    Returns:
-        ToolResult with human-readable text and structured data
-    """
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-
-    # Build request object (currently minimal)
-    req = GetAdcpCapabilitiesRequest()
-
-    # Call shared implementation
-    response = _get_adcp_capabilities_impl(req, identity)
-
-    # Build human-readable summary
-    protocols = [p.value if hasattr(p, "value") else str(p) for p in response.supported_protocols]
-    summary_parts = [
-        f"AdCP v{response.adcp.major_versions[0].root} Capabilities",
-        f"Supported protocols: {', '.join(protocols)}",
-    ]
-
-    if response.media_buy and response.media_buy.portfolio:
-        portfolio = response.media_buy.portfolio
-        if portfolio.description:
-            summary_parts.append(f"Portfolio: {portfolio.description}")
-        if portfolio.primary_channels:
-            channels = [c.value if hasattr(c, "value") else str(c) for c in portfolio.primary_channels]
-            summary_parts.append(f"Channels: {', '.join(channels)}")
-
-    summary = "\n".join(summary_parts)
-
-    # Return ToolResult with human-readable text and structured data
-    return ToolResult(content=summary, structured_content=response)
-
-
-async def get_adcp_capabilities_raw(
-    protocols: list[str] | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> GetAdcpCapabilitiesResponse:
-    """Get the capabilities of this AdCP sales agent.
-
-    Raw function without @mcp.tool decorator for A2A server use.
-
-    Args:
-        protocols: Specific protocols to query (optional, currently ignored)
-        ctx: FastMCP context (automatically provided)
-        identity: Pre-resolved identity (preferred over ctx)
-
-    Returns:
-        GetAdcpCapabilitiesResponse containing agent capabilities
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=False)
-    req = GetAdcpCapabilitiesRequest()
-    return _get_adcp_capabilities_impl(req, identity)

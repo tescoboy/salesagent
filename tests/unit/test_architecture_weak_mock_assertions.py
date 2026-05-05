@@ -32,16 +32,6 @@ ROOT = Path(__file__).resolve().parents[2]
 # are upgraded to assert_called_once_with().
 # FIXME(beads-bou.5): each entry below should be upgraded to assert_called_once_with()
 WEAK_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
-    ("tests/unit/test_a2a_brand_manifest_parameter.py", "test_handle_get_products_skill_brand_manifest_not_converted"),
-    ("tests/unit/test_a2a_brand_manifest_parameter.py", "test_handle_get_products_skill_extracts_all_parameters"),
-    ("tests/unit/test_a2a_brand_manifest_parameter.py", "test_handle_get_products_skill_forwards_property_list"),
-    ("tests/unit/test_a2a_brand_manifest_parameter.py", "test_handle_get_products_skill_passes_brand"),
-    ("tests/unit/test_a2a_parameter_mapping.py", "test_get_media_buy_delivery_optional_media_buy_ids"),
-    ("tests/unit/test_a2a_parameter_mapping.py", "test_get_media_buy_delivery_uses_plural_media_buy_ids"),
-    ("tests/unit/test_a2a_parameter_mapping.py", "test_update_media_buy_backward_compatibility_with_updates"),
-    ("tests/unit/test_a2a_parameter_mapping.py", "test_update_media_buy_uses_packages_parameter"),
-    ("tests/unit/test_a2a_tenant_detection_order.py", "test_a2a_delegates_to_resolve_identity"),
-    ("tests/unit/test_a2a_testing_context_extraction.py", "test_dry_run_header_passed_to_resolve_identity"),
     ("tests/unit/test_auth_context_middleware_population.py", "test_resolve_auth_passes_extracted_token"),
     ("tests/unit/test_authorized_properties_behavioral.py", "test_audit_called_on_failure"),
     ("tests/unit/test_authorized_properties_behavioral.py", "test_audit_called_on_success"),
@@ -191,12 +181,6 @@ class TestNoWeakMockAssertions:
 # FIXME(beads-6kh): each entry below should be reviewed and upgraded
 BARE_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
     ("tests/unit/adapters/broadstreet/test_client.py", "test_get_network"),
-    ("tests/unit/test_a2a_auth_optional.py", "test_get_products_with_auth"),
-    ("tests/unit/test_a2a_auth_optional.py", "test_get_products_without_auth"),
-    ("tests/unit/test_a2a_auth_optional.py", "test_list_authorized_properties_with_auth"),
-    ("tests/unit/test_a2a_auth_optional.py", "test_list_authorized_properties_without_auth"),
-    ("tests/unit/test_a2a_auth_optional.py", "test_list_creative_formats_with_auth"),
-    ("tests/unit/test_a2a_auth_optional.py", "test_list_creative_formats_without_auth"),
     ("tests/unit/test_creative.py", "test_a2a_slack_notification_require_human"),
     ("tests/unit/test_creative.py", "test_audit_log_sync_succeeds_without_principal_in_db"),
     ("tests/unit/test_creative_repository.py", "test_flushes_session"),
@@ -210,7 +194,6 @@ BARE_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
     ("tests/unit/test_incremental_sync_stale_marking.py", "test_full_sync_should_call_mark_stale"),
     ("tests/unit/test_naming_agent.py", "test_generates_name_successfully"),
     ("tests/unit/test_no_model_dump_in_impl_fixes.py", "test_create_from_request_adds_to_session"),
-    ("tests/unit/test_performance_index_behavioral.py", "test_a2a_happy_path_correct_params"),
     ("tests/unit/test_products_transport_wrappers.py", "test_mcp_wrapper_version_compat_v2"),
     ("tests/unit/test_products_transport_wrappers.py", "test_rest_applies_version_compat"),
     ("tests/unit/test_review_agent.py", "test_returns_approval"),

@@ -42,8 +42,8 @@ class AccountSyncEnv(IntegrationEnv):
     - Real upsert, deactivate_missing, grant_access logic
 
     Both sync and async call patterns are supported:
-    - call_impl() / call_a2a(): sync wrappers for BDD steps and dispatchers
-    - call_impl_async() / call_a2a_async(): for @pytest.mark.asyncio tests
+    - call_impl(): sync wrapper for BDD steps and dispatchers
+    - call_impl_async(): for @pytest.mark.asyncio tests
 
     Constructor accepts ``supported_billing`` to configure billing policy
     on the identity (BR-RULE-059).
@@ -134,10 +134,6 @@ class AccountSyncEnv(IntegrationEnv):
         Bridges async _impl for sync callers (BDD steps, dispatchers).
         """
         return asyncio.run(self.call_impl_async(**kwargs))
-
-    def call_a2a(self, **kwargs: Any) -> SyncAccountsResponse:
-        """Call sync_accounts via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("sync_accounts", SyncAccountsResponse, **kwargs)
 
     def call_mcp(self, **kwargs: Any) -> SyncAccountsResponse:
         """Call sync_accounts via Client(mcp) — full pipeline dispatch."""

@@ -20,21 +20,9 @@ from datetime import UTC
 from typing import Any
 
 from adcp.types import (
-
-    Status as AccountStatus,
-
-)
-from adcp.types import (
-    Account as SyncAccountInput,
-)
-from adcp.types import (
     Account as SyncResponseAccount,
 )
-from adcp.types import ContextObject
-from adcp.types import PaginationRequest
-from adcp.types import PaginationResponse
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
+from adcp.types import PaginationRequest, PaginationResponse
 
 from src.core.audit_logger import get_audit_logger
 from src.core.database.models import Account as DBAccount
@@ -48,7 +36,6 @@ from src.core.schemas.account import (
     SyncAccountsRequest,
     SyncAccountsResponse,
 )
-from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -175,68 +162,6 @@ def _list_accounts_impl(
 # ---------------------------------------------------------------------------
 # MCP wrapper
 # ---------------------------------------------------------------------------
-
-
-async def list_accounts(
-    status: AccountStatus | None = None,
-    pagination: PaginationRequest | None = None,
-    sandbox: bool | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-) -> Any:
-    """List accounts accessible to the authenticated agent (MCP tool).
-
-    MCP wrapper that delegates to the shared implementation.
-    FastMCP automatically validates and coerces JSON inputs to Pydantic models.
-
-    Args:
-        status: Filter accounts by status (active, closed, etc.).
-        pagination: Pagination parameters (max_results, cursor).
-        sandbox: Filter by sandbox flag.
-        context: Application-level context per AdCP spec.
-        ctx: FastMCP context for authentication.
-
-    Returns:
-        ToolResult with human-readable text and structured data.
-    """
-    req = ListAccountsRequest(
-        status=status,
-        pagination=pagination,
-        sandbox=sandbox,
-        context=context,
-    )
-
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    response = _list_accounts_impl(req, identity)
-
-    return ToolResult(content=str(response), structured_content=response)
-
-
-# ---------------------------------------------------------------------------
-# A2A raw wrapper
-# ---------------------------------------------------------------------------
-
-
-def list_accounts_raw(
-    req: ListAccountsRequest | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> ListAccountsResponse:
-    """List accounts accessible to the authenticated agent (raw function for A2A).
-
-    Args:
-        req: Optional request with filter parameters.
-        ctx: FastMCP context.
-        identity: Pre-resolved identity (if available).
-
-    Returns:
-        ListAccountsResponse with accessible accounts.
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=False)
-    return _list_accounts_impl(req, identity)
 
 
 # ===========================================================================
@@ -598,11 +523,7 @@ async def _sync_accounts_impl(
                 #            non-GAM tenants (mock adapter, no provisioning concept),
                 #            and rows the management API pre-creates with platform_mappings
                 tenant_ad_server = (tenant or {}).get("ad_server")
-                needs_provision = (
-                    setup is None
-                    and tenant_ad_server == "google_ad_manager"
-                    and not sandbox
-                )
+                needs_provision = setup is None and tenant_ad_server == "google_ad_manager" and not sandbox
                 if setup:
                     initial_status = "pending_approval"
                 elif needs_provision:
@@ -693,64 +614,3 @@ async def _sync_accounts_impl(
 # ---------------------------------------------------------------------------
 # sync_accounts MCP wrapper
 # ---------------------------------------------------------------------------
-
-
-async def sync_accounts(
-    accounts: list[SyncAccountInput] | None = None,
-    delete_missing: bool | None = None,
-    dry_run: bool | None = None,
-    context: ContextObject | None = None,
-    ctx: Context | ToolContext | None = None,
-) -> Any:
-    """Sync accounts by natural key (MCP tool).
-
-    MCP wrapper that accepts individual parameters per AdCP spec and
-    constructs a SyncAccountsRequest for the shared implementation.
-
-    Args:
-        accounts: List of accounts to upsert.
-        delete_missing: Deactivate accounts not in the list.
-        dry_run: Preview changes without persisting.
-        context: Application-level context per AdCP spec.
-        ctx: FastMCP context for authentication.
-
-    Returns:
-        ToolResult with human-readable text and structured data.
-    """
-    req = SyncAccountsRequest(
-        accounts=accounts or [],
-        delete_missing=delete_missing,
-        dry_run=dry_run,
-        context=context,
-    )
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-    response = await _sync_accounts_impl(req, identity)
-
-    return ToolResult(content=str(response), structured_content=response)
-
-
-# ---------------------------------------------------------------------------
-# sync_accounts A2A raw wrapper
-# ---------------------------------------------------------------------------
-
-
-async def sync_accounts_raw(
-    req: SyncAccountsRequest | None = None,
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-) -> SyncAccountsResponse:
-    """Sync accounts by natural key (raw function for A2A).
-
-    Args:
-        req: Sync request with accounts to upsert.
-        ctx: FastMCP context.
-        identity: Pre-resolved identity (if available).
-
-    Returns:
-        SyncAccountsResponse with per-account action results.
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx, require_valid_token=True)
-    return await _sync_accounts_impl(req, identity)

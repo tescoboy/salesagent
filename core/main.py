@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 
 from a2wsgi import WSGIMiddleware
 from adcp.decisioning import (
@@ -61,6 +60,7 @@ from adcp.server import (
 from sqlalchemy import select
 
 from core.middleware.admin_mount import AdminWSGIMount
+from core.middleware.scheduler_lifespan import SchedulerLifespanMiddleware
 from core.platforms.gam import GamPlatform
 from core.platforms.mock import MockSellerPlatform
 from core.proposal.manager import SalesAgentProposalManager
@@ -98,9 +98,7 @@ async def _resolve_tenant(host: str) -> Tenant | None:
     """
     if host in _BARE_DEV_HOSTS:
         with get_db_session() as session:
-            row = session.scalars(
-                select(TenantRow).filter_by(tenant_id="default", is_active=True)
-            ).first()
+            row = session.scalars(select(TenantRow).filter_by(tenant_id="default", is_active=True)).first()
         if row is None:
             return None
         return Tenant(id=row.tenant_id, display_name=row.name)
@@ -118,14 +116,10 @@ async def _resolve_tenant(host: str) -> Tenant | None:
     with get_db_session() as session:
         if subdomain != host:
             # Strategy 2: subdomain-on-known-suffix lookup.
-            row = session.scalars(
-                select(TenantRow).filter_by(subdomain=subdomain, is_active=True)
-            ).first()
+            row = session.scalars(select(TenantRow).filter_by(subdomain=subdomain, is_active=True)).first()
         else:
             # Strategy 3: virtual_host (production custom domain).
-            row = session.scalars(
-                select(TenantRow).filter_by(virtual_host=host, is_active=True)
-            ).first()
+            row = session.scalars(select(TenantRow).filter_by(virtual_host=host, is_active=True)).first()
 
     if row is None:
         return None
@@ -165,9 +159,7 @@ def _validate_token(token: str) -> Principal | None:
     if not token:
         return None
     with get_db_session() as session:
-        row = session.scalars(
-            select(PrincipalRow).filter_by(access_token=token)
-        ).first()
+        row = session.scalars(select(PrincipalRow).filter_by(access_token=token)).first()
     if row is None:
         return None
     return Principal(
@@ -192,9 +184,7 @@ async def build_platform_for_tenant(tenant_id: str) -> DecisioningPlatform:
       (reads from the salesagent ``products`` table)
     """
     with get_db_session() as session:
-        row = session.scalars(
-            select(TenantRow).filter_by(tenant_id=tenant_id, is_active=True)
-        ).first()
+        row = session.scalars(select(TenantRow).filter_by(tenant_id=tenant_id, is_active=True)).first()
 
     if row is None:
         # LazyPlatformRouter callers already passed the SubdomainTenantMiddleware
@@ -257,6 +247,24 @@ def build_router() -> LazyPlatformRouter:
     # validate_idempotency_wiring composition).
     router._adcp_idempotency_external = True
     return router
+
+
+async def _start_schedulers() -> None:
+    """Boot background schedulers when the ASGI server comes up."""
+    from src.services.delivery_webhook_scheduler import start_delivery_webhook_scheduler
+    from src.services.media_buy_status_scheduler import start_media_buy_status_scheduler
+
+    await start_delivery_webhook_scheduler()
+    await start_media_buy_status_scheduler()
+
+
+async def _stop_schedulers() -> None:
+    """Stop background schedulers on shutdown."""
+    from src.services.delivery_webhook_scheduler import stop_delivery_webhook_scheduler
+    from src.services.media_buy_status_scheduler import stop_media_buy_status_scheduler
+
+    await stop_media_buy_status_scheduler()
+    await stop_delivery_webhook_scheduler()
 
 
 def _allowed_hosts() -> list[str]:
@@ -351,6 +359,18 @@ def main() -> None:
         asgi_middleware=[
             (AdminWSGIMount, {"wsgi_app": admin_wsgi}),
             (SubdomainTenantMiddleware, {"router": subdomain_router}),
+            # Schedulers run as background tasks for the lifetime of the
+            # server. delivery_webhook_scheduler fires daily delivery
+            # reports; media_buy_status_scheduler advances ready→active
+            # and active→completed transitions on time. Both used to be
+            # owned by the legacy src/core/main.py lifespan_context.
+            (
+                SchedulerLifespanMiddleware,
+                {
+                    "startups": [_start_schedulers],
+                    "shutdowns": [_stop_schedulers],
+                },
+            ),
         ],
         context_factory=auth_context_factory,
         allowed_hosts=_allowed_hosts(),
@@ -374,9 +394,7 @@ def main() -> None:
         # cloud LB / WAF that already validates Host can set
         # ``ADCP_DNS_REBINDING_PROTECTION=false`` to skip the second
         # check.
-        enable_dns_rebinding_protection=(
-            os.environ.get("ADCP_DNS_REBINDING_PROTECTION", "true").lower() == "true"
-        ),
+        enable_dns_rebinding_protection=(os.environ.get("ADCP_DNS_REBINDING_PROTECTION", "true").lower() == "true"),
     )
 
 

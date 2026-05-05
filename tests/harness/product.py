@@ -28,7 +28,6 @@ Available mocks via env.mock:
 
 Transport support:
     call_impl(**kw)          -- direct _get_products_impl (sync wrapper around async)
-    call_a2a(**kw)           -- get_products_raw A2A wrapper
     call_mcp(**kw)           -- get_products MCP wrapper via _run_mcp_wrapper
     build_rest_body(**kw)    -- POST /api/v1/products body
     parse_rest_response(d)   -- JSON -> GetProductsResponse
@@ -97,10 +96,6 @@ class ProductEnv(ProductMixin, IntegrationEnv):
         except RuntimeError:
             # No running loop — safe to block with asyncio.run
             return asyncio.run(coro)
-
-    def call_a2a(self, **kwargs: Any) -> GetProductsResponse:
-        """Call get_products via real AdCPRequestHandler — full A2A pipeline."""
-        return self._run_a2a_handler("get_products", GetProductsResponse, **kwargs)
 
     def call_mcp(self, **kwargs: Any) -> GetProductsResponse:
         """Call get_products via Client(mcp) — full pipeline dispatch."""

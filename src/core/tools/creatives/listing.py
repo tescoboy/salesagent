@@ -6,16 +6,9 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from adcp import CreativeFilters
-from adcp.types import ContextObject
-from adcp.types import PaginationRequest
 from adcp.types import (
-    Field1 as FieldModel,
+    ContextObject,
 )
-from adcp.types import (
-    Sort,
-)
-from fastmcp.server.context import Context
-from fastmcp.tools.tool import ToolResult
 from pydantic import ValidationError
 
 from src.core.audit_logger import get_audit_logger
@@ -23,12 +16,10 @@ from src.core.database.repositories.uow import CreativeUoW
 from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
 from src.core.helpers import log_tool_activity
 from src.core.resolved_identity import ResolvedIdentity
-from src.core.schema_helpers import to_context_object
 from src.core.schemas import (
     Creative,
     ListCreativesResponse,
 )
-from src.core.tool_context import ToolContext
 from src.core.validation_helpers import format_validation_error
 
 logger = logging.getLogger(__name__)
@@ -370,150 +361,4 @@ def _list_creatives_impl(
         format_summary=None,
         status_summary=None,
         context=req.context,
-    )
-
-
-async def list_creatives(
-    media_buy_id: str = None,
-    media_buy_ids: list[str] = None,
-    status: str = None,
-    format: str = None,
-    tags: list[str] = None,
-    created_after: str = None,
-    created_before: str = None,
-    search: str = None,
-    filters: CreativeFilters | None = None,
-    sort: Sort | None = None,
-    pagination: PaginationRequest | None = None,
-    fields: list[FieldModel | str] | None = None,
-    include_performance: bool = False,
-    include_assignments: bool = False,
-    include_sub_assets: bool = False,
-    page: int = 1,
-    limit: int = 50,
-    sort_by: str = "created_date",
-    sort_order: str = "desc",
-    webhook_url: str | None = None,
-    context: ContextObject | None = None,  # Application level context per adcp spec
-    ctx: Context | ToolContext | None = None,
-):
-    """List and filter creative assets from the centralized library (AdCP v2.5).
-
-    MCP tool wrapper that delegates to the shared implementation.
-    FastMCP automatically validates and coerces JSON inputs to Pydantic models.
-    Supports both flat parameters (status, format, etc.) and nested objects (filters, sort, pagination)
-    for maximum flexibility.
-
-    Args:
-        media_buy_id: Filter by single media buy ID (backward compat)
-        media_buy_ids: Filter by multiple media buy IDs (AdCP 2.5)
-
-    Returns:
-        ToolResult with ListCreativesResponse data
-    """
-    identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-
-    # Pass typed Pydantic models directly (no model_dump conversion needed)
-    fields_list = [f.value if isinstance(f, FieldModel) else f for f in fields] if fields else None
-
-    response = _list_creatives_impl(
-        media_buy_id=media_buy_id,
-        media_buy_ids=media_buy_ids,
-        status=status,
-        format=format,
-        tags=tags,
-        created_after=created_after,
-        created_before=created_before,
-        search=search,
-        filters=filters,
-        fields=fields_list,
-        include_performance=include_performance,
-        include_assignments=include_assignments,
-        include_sub_assets=include_sub_assets,
-        page=page,
-        limit=limit,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        context=context,
-        identity=identity,
-    )
-    return ToolResult(content=str(response), structured_content=response)
-
-
-def list_creatives_raw(
-    media_buy_id: str = None,
-    media_buy_ids: list[str] = None,
-    status: str = None,
-    format: str = None,
-    tags: list[str] = None,
-    created_after: str = None,
-    created_before: str = None,
-    search: str = None,
-    filters: CreativeFilters | None = None,
-    fields: list[str] | None = None,
-    include_performance: bool = False,
-    include_assignments: bool = False,
-    include_sub_assets: bool = False,
-    page: int = 1,
-    limit: int = 50,
-    sort_by: str = "created_date",
-    sort_order: str = "desc",
-    context: dict | None = None,  # Application level context per adcp spec
-    ctx: Context | ToolContext | None = None,
-    identity: ResolvedIdentity | None = None,
-):
-    """List creative assets with filtering and pagination (raw function for A2A server use, AdCP v2.5).
-
-    Delegates to the shared implementation.
-
-    Args:
-        media_buy_id: Filter by single media buy ID (backward compat)
-        media_buy_ids: Filter by multiple media buy IDs (AdCP 2.5)
-        status: Filter by status (optional)
-        format: Filter by creative format (optional)
-        tags: Filter by creative group tags (optional)
-        created_after: Filter creatives created after this date (ISO format) (optional)
-        created_before: Filter creatives created before this date (ISO format) (optional)
-        search: Search in creative name or description (optional)
-        filters: Advanced filtering options (CreativeFilters model, optional)
-        fields: Specific fields to return (optional)
-        include_performance: Include performance metrics (optional)
-        include_assignments: Include package assignments (optional)
-        include_sub_assets: Include sub-assets (optional)
-        page: Page number for pagination (default: 1)
-        limit: Number of results per page (default: 50, max: 1000)
-        sort_by: Sort field (default: created_date)
-        sort_order: Sort order (default: desc)
-        context: Application level context per adcp spec
-        ctx: FastMCP context (automatically provided)
-        identity: ResolvedIdentity (transport-agnostic, preferred over ctx)
-
-    Returns:
-        ListCreativesResponse with filtered creative assets and pagination info
-    """
-    if identity is None:
-        from src.core.transport_helpers import resolve_identity_from_context
-
-        identity = resolve_identity_from_context(ctx)
-
-    return _list_creatives_impl(
-        media_buy_id=media_buy_id,
-        media_buy_ids=media_buy_ids,
-        status=status,
-        format=format,
-        tags=tags,
-        created_after=created_after,
-        created_before=created_before,
-        search=search,
-        filters=filters,
-        fields=fields,
-        include_performance=include_performance,
-        include_assignments=include_assignments,
-        include_sub_assets=include_sub_assets,
-        page=page,
-        limit=limit,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        context=to_context_object(context),
-        identity=identity,
     )
