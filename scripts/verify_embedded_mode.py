@@ -475,6 +475,13 @@ async def _mcp_call(token: str, tool: str, args: dict[str, Any]) -> dict[str, An
 
     Both request and response models use ``extra='allow'`` so the script
     keeps working as the spec adds new optional fields.
+
+    Caveat — model round-trip is not a no-op: ``dump_python(mode='json')``
+    on the validated request will coerce datetimes to ISO strings and
+    rename anything carrying a Pydantic ``alias``. The script's call
+    sites already pass ISO strings (see ``_date_range``) so this is a
+    no-op today, but a caller passing a raw ``datetime`` would see the
+    coercion the old direct-pass code did not do.
     """
     from fastmcp.client import Client
     from fastmcp.client.transports import StreamableHttpTransport
