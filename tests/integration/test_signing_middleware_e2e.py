@@ -122,7 +122,9 @@ def _make_mock_client_factory(brand_json: dict, jwks: dict):
 
 async def _sentinel_handler(request: Request) -> JSONResponse:
     """The 'inner' handler our middleware wraps. Echoes back the verified
-    state so tests can assert on what the middleware attached."""
+    state AND the body bytes it sees so tests can assert that the middleware
+    correctly replays the body to downstream handlers (PR 2C body-buffering)."""
+    body = await request.body()
     verified = get_verified_state()
     return JSONResponse(
         {
@@ -130,6 +132,7 @@ async def _sentinel_handler(request: Request) -> JSONResponse:
             "operator_id": verified.operator_id if verified else None,
             "agent_url": verified.agent_url if verified else None,
             "key_id": verified.key_id if verified else None,
+            "body_seen": body.decode("utf-8") if body else "",
         }
     )
 
@@ -425,6 +428,159 @@ class TestSigningMiddlewareEndToEnd:
         assert first.status_code == 200, f"first body: {first.text!r}"
         assert second.status_code == 401, f"second body: {second.text!r}"
         assert "request_signature_replayed" in second.headers.get("www-authenticate", "")
+
+    async def test_body_replayed_to_downstream_handler(self, signing_setup):
+        """PR 2C body-buffering: the verifier reads the body once, then the
+        middleware re-emits the same bytes to the downstream handler."""
+        body = b'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_products","arguments":{}},"id":1}'
+        url = "http://t.example.com/mcp/"
+
+        signed = sign_request(
+            method="POST",
+            url=url,
+            headers={
+                "host": "t.example.com",
+                "content-type": "application/json",
+                "x-adcp-auth": signing_setup["access_token"],
+                "x-adcp-tenant": signing_setup["tenant_id"],
+            },
+            body=body,
+            private_key=signing_setup["private_key"],
+            key_id=signing_setup["key_id"],
+            alg="ed25519",
+            cover_content_digest=False,
+        )
+
+        app = _build_app()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t.example.com") as client:
+            response = await client.post(
+                "/mcp/",
+                content=body,
+                headers={
+                    "x-adcp-auth": signing_setup["access_token"],
+                    "x-adcp-tenant": signing_setup["tenant_id"],
+                    "content-type": "application/json",
+                    **signed.as_dict(),
+                },
+            )
+
+        assert response.status_code == 200, f"body: {response.text!r}"
+        result = response.json()
+        # Downstream handler MUST see the same bytes the verifier saw.
+        assert result["body_seen"] == body.decode("utf-8")
+        assert result["verified"] is True
+
+    async def test_required_for_unsigned_rejected(self, session, keypair):
+        """PR 2C required_for enforcement: an operation listed in
+        TenantSigningPolicy.required_for that arrives unsigned → 401
+        request_signature_required."""
+        from tests.factories import (
+            AdmittedOperatorFactory,
+            OperatorAdvertiserLinkFactory,
+            PrincipalFactory,
+            TenantFactory,
+            TenantSigningPolicyFactory,
+        )
+
+        os.environ["REPLAY_SWEEP_MODE"] = "off"
+        from src.core.signing import bootstrap_replay_store
+
+        bootstrap_replay_store()
+
+        tenant = TenantFactory(tenant_id="t_required_for")
+        operator = AdmittedOperatorFactory(
+            tenant=tenant,
+            operator_id="op_required",
+            brand_json_url=BRAND_JSON_URL,
+            is_trusted=False,
+            is_active=True,
+        )
+        principal = PrincipalFactory(
+            tenant=tenant,
+            principal_id="p_required",
+            access_token="required-token",
+            bound_operator_id=operator.operator_id,
+        )
+        OperatorAdvertiserLinkFactory(operator=operator, principal=principal, is_active=True)
+        TenantSigningPolicyFactory(
+            tenant=tenant,
+            enabled=True,
+            required_for=["create_media_buy"],
+        )
+        session.commit()
+
+        # Send the request UNSIGNED with method=tools/call name=create_media_buy.
+        body = b'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_media_buy","arguments":{}},"id":1}'
+        app = _build_app()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t.example.com") as client:
+            response = await client.post(
+                "/mcp/",
+                content=body,
+                headers={
+                    "x-adcp-auth": "required-token",
+                    "x-adcp-tenant": tenant.tenant_id,
+                    "content-type": "application/json",
+                },
+            )
+
+        assert response.status_code == 401, f"body: {response.text!r}"
+        www = response.headers.get("www-authenticate", "")
+        assert "request_signature_required" in www, www
+
+    async def test_required_for_other_op_unsigned_passes(self, session, keypair):
+        """An operation NOT in required_for, sent unsigned → passes through."""
+        from tests.factories import (
+            AdmittedOperatorFactory,
+            OperatorAdvertiserLinkFactory,
+            PrincipalFactory,
+            TenantFactory,
+            TenantSigningPolicyFactory,
+        )
+
+        os.environ["REPLAY_SWEEP_MODE"] = "off"
+        from src.core.signing import bootstrap_replay_store
+
+        bootstrap_replay_store()
+
+        tenant = TenantFactory(tenant_id="t_optional")
+        operator = AdmittedOperatorFactory(
+            tenant=tenant,
+            operator_id="op_optional",
+            brand_json_url=BRAND_JSON_URL,
+            is_trusted=False,
+            is_active=True,
+        )
+        principal = PrincipalFactory(
+            tenant=tenant,
+            principal_id="p_optional",
+            access_token="optional-token",
+            bound_operator_id=operator.operator_id,
+        )
+        OperatorAdvertiserLinkFactory(operator=operator, principal=principal, is_active=True)
+        TenantSigningPolicyFactory(
+            tenant=tenant,
+            enabled=True,
+            required_for=["create_media_buy"],
+        )
+        session.commit()
+
+        # get_products is NOT in required_for → unsigned should pass.
+        body = b'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_products","arguments":{}},"id":1}'
+        app = _build_app()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t.example.com") as client:
+            response = await client.post(
+                "/mcp/",
+                content=body,
+                headers={
+                    "x-adcp-auth": "optional-token",
+                    "x-adcp-tenant": tenant.tenant_id,
+                    "content-type": "application/json",
+                },
+            )
+
+        assert response.status_code == 200, f"body: {response.text!r}"
+        result = response.json()
+        assert result["verified"] is False  # unsigned, no verified state
 
     async def test_trusted_operator_bypasses_verification(self, session, keypair):
         """is_trusted=True operator → middleware skips verifier even with

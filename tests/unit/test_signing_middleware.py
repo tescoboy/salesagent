@@ -15,6 +15,8 @@ the deterministic pieces:
 
 from __future__ import annotations
 
+import asyncio
+
 from src.core.signing import (
     VerifiedRequestState,
     clear_verified_state,
@@ -22,8 +24,11 @@ from src.core.signing import (
     set_verified_state,
 )
 from src.core.signing.middleware import (
+    _extract_operation,
     _has_signature_headers,
     _is_buyer_protocol_path,
+    _read_body,
+    _replay_receive,
 )
 
 
@@ -123,3 +128,85 @@ class TestVerifiedStateContextvar:
         except dataclasses.FrozenInstanceError:
             return
         raise AssertionError("VerifiedRequestState must be frozen")
+
+
+class TestOperationExtraction:
+    """PR 2C: parse the AdCP operation name from the request body so the
+    middleware can enforce ``TenantSigningPolicy.required_for``."""
+
+    def test_mcp_jsonrpc_tools_call(self):
+        body = b'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_media_buy","arguments":{}},"id":1}'
+        assert _extract_operation("/mcp/", body) == "create_media_buy"
+
+    def test_mcp_other_method_passthrough(self):
+        # JSON-RPC method that's not tools/call → fall through to method name.
+        body = b'{"jsonrpc":"2.0","method":"initialize","id":1}'
+        assert _extract_operation("/mcp/", body) == "initialize"
+
+    def test_a2a_skill_field(self):
+        body = b'{"skill":"create_media_buy","payload":{}}'
+        assert _extract_operation("/a2a", body) == "create_media_buy"
+
+    def test_a2a_message_type_field(self):
+        body = b'{"message_type":"create_media_buy","data":{}}'
+        assert _extract_operation("/a2a", body) == "create_media_buy"
+
+    def test_unparseable_body_returns_none(self):
+        assert _extract_operation("/mcp/", b"not json") is None
+
+    def test_empty_body_returns_none(self):
+        assert _extract_operation("/mcp/", b"") is None
+
+    def test_non_dict_payload_returns_none(self):
+        assert _extract_operation("/mcp/", b'["array","not","object"]') is None
+
+    def test_no_recognized_field(self):
+        assert _extract_operation("/mcp/", b'{"foo":"bar"}') is None
+
+
+class TestBodyReplay:
+    """The middleware reads the body once for the verifier and replays it to
+    downstream handlers. Both halves of that contract have to hold."""
+
+    def test_read_body_buffers_chunks(self):
+        chunks = [
+            {"type": "http.request", "body": b"hello ", "more_body": True},
+            {"type": "http.request", "body": b"world", "more_body": False},
+        ]
+        idx = 0
+
+        async def receive():
+            nonlocal idx
+            msg = chunks[idx]
+            idx += 1
+            return msg
+
+        result = asyncio.run(_read_body(receive))
+        assert result == b"hello world"
+
+    def test_read_body_respects_cap(self):
+        big = b"x" * 100
+
+        async def receive():
+            return {"type": "http.request", "body": big, "more_body": False}
+
+        try:
+            asyncio.run(_read_body(receive, max_bytes=10))
+        except ValueError as exc:
+            assert "exceeded" in str(exc)
+            return
+        raise AssertionError("expected ValueError on oversized body")
+
+    def test_replay_emits_body_then_disconnect(self):
+        replay = _replay_receive(b"payload")
+        first = asyncio.run(replay())
+        second = asyncio.run(replay())
+        third = asyncio.run(replay())
+        assert first == {"type": "http.request", "body": b"payload", "more_body": False}
+        assert second == {"type": "http.disconnect"}
+        assert third == {"type": "http.disconnect"}  # idempotent after close
+
+    def test_replay_serves_empty_body(self):
+        replay = _replay_receive(b"")
+        first = asyncio.run(replay())
+        assert first == {"type": "http.request", "body": b"", "more_body": False}

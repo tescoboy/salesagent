@@ -1,41 +1,37 @@
 """Starlette ASGI middleware for inbound RFC 9421 signature verification.
 
-PR 2B of [signing-non-embedded](../../../../docs/design/signing-non-embedded.md).
+PR 2B + PR 2C of [signing-non-embedded](../../../../docs/design/signing-non-embedded.md).
 
-Runs before MCP and A2A buyer-protocol handlers. When a signed request arrives,
-verifies it against the buyer's brand.json (resolved through the AdCP discovery
-chain by ``adcp.signing.BrandJsonJwksResolver``) and attaches the verified
-operator/agent/key state to the ASGI scope so downstream identity resolution
-can record it on ``ResolvedIdentity`` and ``AuditLog``.
+Runs before MCP and A2A buyer-protocol handlers. Buffers the request body up
+front (so the verifier can read it AND downstream handlers still see the same
+bytes via a replay-receive callable), extracts the AdCP operation name, then:
 
-PR 2B v1 semantics:
-
-* Trusted operators (embedded host's interchange) bypass verification entirely.
-* Bearer + signature: bearer pins the operator; signature proves the call came
-  from one of the operator's authorized agents. Both required when a signature
-  is present.
-* When no signature is present, the middleware is a no-op. Per-operation
-  enforcement of ``TenantSigningPolicy.required_for`` lands in PR 2C, which
-  needs to peek at the request body to extract the AdCP operation name.
+* Verifies the RFC 9421 signature when present (against the buyer's brand.json
+  JWKS resolved through ``adcp.signing.BrandJsonJwksResolver``).
+* Enforces ``TenantSigningPolicy.required_for``: if the operation is in the
+  list, an unsigned request is rejected with 401 ``request_signature_required``.
+* Trusted operators (embedded host's interchange) bypass verification and
+  enforcement entirely — network/header trust is the embedded-mode boundary.
 
 Failure mapping:
 
-* Signature parse / window / replay / unknown-key → 401 with
-  ``WWW-Authenticate: Signature error="<spec-code>"``
-* Bearer maps to a principal whose ``bound_operator_id`` is missing → request
-  passes through unchanged (legacy bearer-only path); the operator-pinning
-  enforcement is in PR 2C alongside ``required_for``.
-* Backend errors (DB unreachable, brand.json fetch failure on a hot path) →
-  fall through (fail-open) so an outage in the signing-side infrastructure
-  doesn't take the bearer-only paths down with it. PR 2C tightens this to
-  fail-closed when ``required_for`` mandates signing for the operation.
+* Operation in ``required_for`` + no signature → 401
+  ``request_signature_required``
+* Signature parse / window / replay / unknown-key → 401 with the spec error code
+* Bearer maps to a principal with no ``bound_operator_id`` and the operation
+  is in ``required_for`` → 401 ``request_signature_required`` (we can't verify
+  without a registered operator; treat like missing signature)
+* Verifier crash / DB unreachable → fail-closed when policy demands signing
+  for the operation; fail-open otherwise (legacy bearer-only paths must keep
+  working through transient signing-side outages)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from adcp.signing import (
     SignatureVerificationError,
@@ -49,10 +45,8 @@ from adcp.signing import (
 from adcp.signing.errors import (
     REQUEST_SIGNATURE_HEADER_MALFORMED,
     REQUEST_SIGNATURE_KEY_UNKNOWN,
+    REQUEST_SIGNATURE_REQUIRED,
 )
-
-if TYPE_CHECKING:
-    from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +54,12 @@ logger = logging.getLogger(__name__)
 # Paths the verifier acts on. AdminWSGIMount runs first in the asgi_middleware
 # list and short-circuits /admin, /static, /auth, /api, /tenant, /health, etc.
 # — so anything reaching this middleware is either /mcp/* or A2A traffic at /.
-# We only attempt verification on these paths to keep startup-probe + landing
-# traffic untouched.
 _BUYER_PROTOCOL_PREFIXES: tuple[str, ...] = ("/mcp", "/a2a")
+
+# Body buffering cap. AdCP requests are JSON-RPC envelopes — well under 1MB
+# in practice. Cap at 4MB so a malicious unbounded body can't OOM the worker
+# while we buffer for parsing.
+MAX_BUFFERED_BODY_BYTES = 4 * 1024 * 1024
 
 
 def _is_buyer_protocol_path(path: str) -> bool:
@@ -82,12 +79,7 @@ def _is_buyer_protocol_path(path: str) -> bool:
 
 
 def _peek_kid_from_signature_input(headers: dict[str, str]) -> str | None:
-    """Extract ``keyid`` from the ``Signature-Input`` header, or ``None`` on parse failure.
-
-    The library's :func:`parse_signature_input_header` does the structured-fields
-    parsing for us. We use it as a one-shot to learn which kid the signer
-    claims so we can pre-resolve the JWK before handing off to the sync verifier.
-    """
+    """Extract ``keyid`` from the ``Signature-Input`` header, or ``None`` on parse failure."""
     raw = None
     for k, v in headers.items():
         if k.lower() == "signature-input":
@@ -99,9 +91,6 @@ def _peek_kid_from_signature_input(headers: dict[str, str]) -> str | None:
         labels = parse_signature_input_header(raw)
     except (ValueError, KeyError):
         return None
-    # The library defaults the label to "sig" — but a buyer may pick any.
-    # Take the first label's keyid; if a buyer signs with multiple labels,
-    # PR 2C extends this to handle them.
     if not labels:
         return None
     parsed = next(iter(labels.values()))
@@ -122,6 +111,100 @@ def _has_signature_headers(scope: dict) -> bool:
         if seen_sig and seen_sig_input:
             return True
     return False
+
+
+async def _read_body(receive: Any, *, max_bytes: int = MAX_BUFFERED_BODY_BYTES) -> bytes:
+    """Drain the ASGI ``receive`` into a single ``bytes`` blob, capped.
+
+    The verifier needs the raw body for digest checking AND downstream handlers
+    need it for their own parsing. We buffer once, then use :func:`_replay_receive`
+    to re-emit the bytes.
+    """
+    body = bytearray()
+    while True:
+        msg = await receive()
+        if msg["type"] != "http.request":
+            # http.disconnect or anything else — bail; the connection's gone.
+            break
+        chunk = msg.get("body", b"")
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise ValueError(
+                f"request body exceeded buffering cap of {max_bytes} bytes",
+            )
+        if not msg.get("more_body", False):
+            break
+    return bytes(body)
+
+
+def _replay_receive(body: bytes) -> Any:
+    """Return an ASGI ``receive`` callable that yields ``body`` once then closes.
+
+    Downstream handlers that call ``await receive()`` get the buffered body;
+    the next call returns an empty ``http.disconnect`` to signal EOF.
+    """
+    sent = False
+    closed = False
+
+    async def replay() -> dict:
+        nonlocal sent, closed
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        if not closed:
+            closed = True
+            return {"type": "http.disconnect"}
+        # ASGI doesn't define repeated receive after disconnect; mimic Starlette's
+        # behavior of returning the disconnect indefinitely so callers don't hang.
+        return {"type": "http.disconnect"}
+
+    return replay
+
+
+def _extract_operation(path: str, body: bytes) -> str | None:
+    """Best-effort extraction of the AdCP operation name from the request body.
+
+    MCP (JSON-RPC over HTTP at ``/mcp/*``):
+        ``{"jsonrpc":"2.0","method":"tools/call","params":{"name":"<op>", ...}}``
+        Returns ``<op>`` (e.g. ``create_media_buy``).
+
+    A2A (at ``/`` per AdCP convention):
+        Messages may carry a ``method`` or ``skill`` field naming the operation.
+        We try a few common shapes; on miss, return ``None`` and the caller
+        can decide whether to enforce against the empty-operation case.
+
+    Returns:
+        The operation name when extractable, else ``None``.
+    """
+    if not body:
+        return None
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    # MCP JSON-RPC tools/call envelope
+    method = payload.get("method")
+    if method == "tools/call":
+        params = payload.get("params") or {}
+        if isinstance(params, dict):
+            name = params.get("name")
+            if isinstance(name, str):
+                return name
+
+    # A2A: ``method`` is the skill name when no JSON-RPC envelope wraps it.
+    if isinstance(method, str) and method != "tools/call":
+        return method
+
+    # A2A v0.3+: messages with ``skill`` / ``message_type`` fields.
+    for key in ("skill", "message_type", "operation"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+
+    return None
 
 
 class SigningVerifyMiddleware:
@@ -153,30 +236,81 @@ class SigningVerifyMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if not _has_signature_headers(scope):
-            # No signature on the wire — nothing to verify. PR 2C will gate on
-            # TenantSigningPolicy.required_for here.
-            await self.app(scope, receive, send)
+        # Buffer the body once. The verifier reads it for digest coverage AND
+        # downstream handlers need the same bytes — we re-emit via _replay_receive.
+        try:
+            body = await _read_body(receive)
+        except ValueError:
+            await self._send_413(send)
+            return
+        replayed = _replay_receive(body)
+
+        operation = _extract_operation(path, body)
+        signed = _has_signature_headers(scope)
+
+        # Look up policy and operator binding even when no signature is present —
+        # required_for may demand one. If the lookups fail (DB unreachable),
+        # we fail-open ONLY when no signature was sent and the operation isn't
+        # in required_for; otherwise fail-closed.
+        try:
+            ctx = await self._resolve_policy_context(scope)
+        except Exception:
+            logger.exception("signing policy lookup crashed")
+            ctx = None
+
+        # Trusted operator → bypass everything. Network/header trust is the
+        # embedded-mode boundary.
+        if ctx is not None and ctx["is_trusted"]:
+            await self.app(scope, replayed, send)
             return
 
+        # required_for enforcement: operation gating runs whether or not a
+        # signature is present. If the op demands signing and no signature
+        # arrived, reject with the spec-mandated code.
+        requires_signing = (
+            ctx is not None and ctx["enabled"] and operation is not None and operation in ctx["required_for"]
+        )
+        if requires_signing and not signed:
+            await self._send_401(
+                send,
+                SignatureVerificationError(
+                    REQUEST_SIGNATURE_REQUIRED,
+                    step=0,
+                    message=f"operation {operation!r} requires a signature",
+                ),
+            )
+            return
+
+        if not signed:
+            # No signature on the wire and policy doesn't demand one — pass
+            # through. Bearer-only legacy path.
+            await self.app(scope, replayed, send)
+            return
+
+        # Signature is present — verify it.
         try:
-            verified = await self._verify(scope, receive)
+            verified = await self._verify(scope, body, ctx, operation)
         except SignatureVerificationError as exc:
             await self._send_401(send, exc)
             return
         except Exception:
-            # Defense-in-depth: a bug in our verifier path must not take down
-            # bearer-only traffic. Log loudly and fall through.
-            logger.exception("signing verifier crashed; falling through to bearer-only auth")
-            await self.app(scope, receive, send)
+            logger.exception("signing verifier crashed")
+            if requires_signing:
+                # Fail-closed when policy demands signing for this operation.
+                await self._send_401(
+                    send,
+                    SignatureVerificationError(
+                        REQUEST_SIGNATURE_REQUIRED,
+                        step=0,
+                        message="verifier crashed and operation requires signing",
+                    ),
+                )
+                return
+            # Fail-open otherwise — bearer-only path stays up.
+            await self.app(scope, replayed, send)
             return
 
         if verified is not None:
-            # Attach to both the ASGI scope (Starlette/A2A handlers can read
-            # ``request.state``) AND a contextvar (FastMCP per-tool-call
-            # middleware reads via ``get_verified_state()``). Both are
-            # request-scoped; the contextvar avoids coupling the FastMCP
-            # boundary to ASGI scope shape.
             state = scope.setdefault("state", {})
             state["verified_operator_id"] = verified["operator_id"]
             state["verified_agent_url"] = verified["agent_url"]
@@ -195,14 +329,15 @@ class SigningVerifyMiddleware:
                 )
             )
 
-        await self.app(scope, receive, send)
+        await self.app(scope, replayed, send)
 
-    async def _verify(self, scope: dict, receive: Any) -> dict[str, str] | None:
-        """Run the verifier checklist. Return verified state or ``None``.
+    async def _resolve_policy_context(self, scope: dict) -> dict[str, Any] | None:
+        """Look up tenant + principal + operator + policy state.
 
-        ``None`` means we couldn't construct a verifier (e.g. principal not
-        bound to an operator) — equivalent to "no signature present" at the
-        scope level, deferred to PR 2C for stricter handling.
+        Returns a dict with ``enabled``, ``required_for`` (frozenset),
+        ``covers_digest`` (str), ``is_trusted`` (bool), ``brand_json_url``,
+        ``operator_id``, ``tenant_id``. ``None`` if anything required is
+        missing — the caller treats that as "no operator binding".
         """
         from src.core.database.database_session import get_db_session
         from src.core.database.repositories import (
@@ -210,9 +345,7 @@ class SigningVerifyMiddleware:
             TenantSigningPolicyRepository,
         )
         from src.core.resolved_identity import _detect_tenant, _extract_auth_token
-        from src.core.signing import get_operator_brand_json_cache, get_replay_store
 
-        # Build a mutable headers dict the rest of the salesagent expects.
         headers: dict[str, str] = {}
         for name, value in scope.get("headers", []):
             headers[name.decode("latin-1")] = value.decode("latin-1")
@@ -222,60 +355,68 @@ class SigningVerifyMiddleware:
         if not tenant_id or not token:
             return None
 
-        # Resolve operator binding. Heavy import deferred to keep middleware
-        # startup cheap.
         from src.core.auth_utils import get_principal_from_token
 
         principal_id, _ = get_principal_from_token(token, tenant_id)
         if principal_id is None:
             return None
 
+        from sqlalchemy import select
+
+        from src.core.database.models import Principal
+
         with get_db_session() as session:
-            principal = session.get_bind() and None  # placeholder
-            # Direct row fetch — repo for principals lives elsewhere; one-shot
-            # query keeps this isolated. Read-only, transient session.
-            from sqlalchemy import select
-
-            from src.core.database.models import Principal
-
             stmt = select(Principal).filter_by(tenant_id=tenant_id, principal_id=principal_id)
             principal = session.scalars(stmt).first()
             if principal is None or principal.bound_operator_id is None:
-                # Bearer-only legacy path. Don't enforce signing yet (PR 2C).
                 return None
             operator_id = principal.bound_operator_id
 
-            operator_repo = AdmittedOperatorRepository(session, tenant_id)
-            operator = operator_repo.get_by_id(operator_id)
+            operator = AdmittedOperatorRepository(session, tenant_id).get_by_id(operator_id)
             if operator is None or not operator.is_active:
-                # Operator gone or disabled. The bearer token itself shouldn't
-                # have authenticated — but defense-in-depth: don't verify.
-                return None
-            if operator.is_trusted:
-                # Embedded host's interchange — never verify, trust the network.
                 return None
 
             policy = TenantSigningPolicyRepository(session, tenant_id).get_or_default()
-            brand_json_url = operator.brand_json_url
 
-        capability = VerifierCapability(
-            supported=True,
-            covers_content_digest=policy.covers_digest_policy,  # type: ignore[arg-type]
-            required_for=frozenset(policy.required_for or []),
-            supported_for=frozenset(),
-        )
+            return {
+                "tenant_id": tenant_id,
+                "operator_id": operator_id,
+                "is_trusted": bool(operator.is_trusted),
+                "brand_json_url": operator.brand_json_url,
+                "enabled": bool(policy.enabled),
+                "required_for": frozenset(policy.required_for or []),
+                "covers_digest": str(policy.covers_digest_policy),
+            }
 
+    async def _verify(
+        self,
+        scope: dict,
+        body: bytes,
+        ctx: dict[str, Any] | None,
+        operation: str | None,
+    ) -> dict[str, str] | None:
+        """Run the verifier checklist. Return verified state or raise.
+
+        ``ctx`` MAY be None when the bearer didn't resolve to an operator —
+        we still attempt verification by short-circuiting (returns None and
+        the caller treats as "no verification possible").
+        """
+        if ctx is None:
+            return None
+
+        from src.core.signing import get_operator_brand_json_cache, get_replay_store
+
+        headers: dict[str, str] = {}
+        for name, value in scope.get("headers", []):
+            headers[name.decode("latin-1")] = value.decode("latin-1")
+
+        brand_json_url = ctx["brand_json_url"]
         cache = get_operator_brand_json_cache()
         async_resolver = await cache.resolver_for(brand_json_url, agent_type="buying")
         replay_store = get_replay_store()
 
-        # Pre-resolve the JWK async (BrandJsonJwksResolver is async-only) and
-        # pass a sync StaticJwksResolver to the verifier. The library's
-        # verify_request_signature is sync; this is the canonical pattern for
-        # using an async resolver underneath it.
         kid = _peek_kid_from_signature_input(headers)
         if kid is None:
-            # Bad headers — let the library's verifier surface the precise code.
             raise SignatureVerificationError(
                 REQUEST_SIGNATURE_HEADER_MALFORMED,
                 step=1,
@@ -290,20 +431,24 @@ class SigningVerifyMiddleware:
             )
         sync_resolver = StaticJwksResolver({"keys": [jwk]})
 
-        # Build a Starlette Request-shaped object the library accepts.
+        capability = VerifierCapability(
+            supported=True,
+            covers_content_digest=ctx["covers_digest"],  # type: ignore[arg-type]
+            required_for=ctx["required_for"],
+            supported_for=frozenset(),
+        )
+
+        # Build a Starlette Request with a one-shot receive that re-emits the
+        # buffered body so the verifier can call ``await request.body()``.
         from starlette.requests import Request
 
-        request: Request = Request(scope, receive)
-
-        # PR 2C: extract AdCP operation name from the request body for
-        # required_for enforcement. For now use a sentinel that's not in any
-        # tenant's required_for list.
-        operation = "unknown"
+        verify_receive = _replay_receive(body)
+        request: Request = Request(scope, verify_receive)
 
         options = VerifyOptions(
             now=time.time(),
             capability=capability,
-            operation=operation,
+            operation=operation or "unknown",
             jwks_resolver=sync_resolver,
             replay_store=replay_store,
             max_skew_seconds=self._max_skew,
@@ -312,14 +457,10 @@ class SigningVerifyMiddleware:
 
         signer = await verify_starlette_request(request, options=options)
 
-        # Derive the verified agent_url from the matched brand.json entry. The
-        # AsyncCachingJwksResolver inside BrandJsonJwksResolver exposes
-        # ``agent_url`` after a successful resolve — the lib's docstring
-        # promises it's populated when known.
         agent_url = getattr(async_resolver, "agent_url", None) or brand_json_url
 
         return {
-            "operator_id": operator_id,
+            "operator_id": ctx["operator_id"],
             "agent_url": str(agent_url),
             "key_id": signer.key_id,
         }
@@ -336,6 +477,18 @@ class SigningVerifyMiddleware:
                     (b"content-type", b"application/json"),
                     *((k.encode("latin-1"), v.encode("latin-1")) for k, v in headers.items()),
                 ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    async def _send_413(self, send: Any) -> None:
+        """Reject oversized bodies before any verification work."""
+        body = b'{"error":{"code":"request_body_too_large","message":"body exceeds signing-buffer cap"}}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [(b"content-type", b"application/json")],
             }
         )
         await send({"type": "http.response.body", "body": body, "more_body": False})
