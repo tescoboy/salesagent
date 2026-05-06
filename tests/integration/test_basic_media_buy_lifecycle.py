@@ -66,7 +66,7 @@ class TestBasicMediaBuyLifecycle:
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
         identity = make_lifecycle_identity(
-            tenant_dict, sample_principal["principal_id"], test_session_id="basic-lifecycle-test"
+            tenant_dict, sample_principal["principal_id"]
         )
 
         # ───────── Phase 1: get_products ─────────
@@ -189,7 +189,7 @@ class TestCreativeApprovalAsync:
         # _sync_creatives_impl reads approval_mode straight from the dict.
         tenant_dict["approval_mode"] = "require-human"
         identity = make_lifecycle_identity(
-            tenant_dict, sample_principal["principal_id"], test_session_id="creative-approval-test"
+            tenant_dict, sample_principal["principal_id"]
         )
 
         creative_id = f"cr_{uuid.uuid4().hex[:8]}"
@@ -264,7 +264,7 @@ class TestMediaBuyApprovalAsync:
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
         identity = make_lifecycle_identity(
-            tenant_dict, sample_principal["principal_id"], test_session_id="mb-approval-test"
+            tenant_dict, sample_principal["principal_id"]
         )
 
         req = CreateMediaBuyRequest(
@@ -327,7 +327,7 @@ class TestDeliveryStatusExcludedError:
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
         identity = make_lifecycle_identity(
-            tenant_dict, sample_principal["principal_id"], test_session_id="status-excluded-test"
+            tenant_dict, sample_principal["principal_id"]
         )
 
         # Buy starts in the future → date-derived dynamic status = "ready".
@@ -413,7 +413,7 @@ class TestDeliveryWebhookFires:
         try:
             tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
             identity = make_lifecycle_identity(
-                tenant_dict, sample_principal["principal_id"], test_session_id="webhook-test"
+                tenant_dict, sample_principal["principal_id"]
             )
 
             create_req = CreateMediaBuyRequest(
