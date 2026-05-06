@@ -241,6 +241,56 @@ class BaseTestEnv:
             )
         return self._identity_cache[protocol]
 
+    def _ensure_principal_for_mcp(self, mcp_identity: ResolvedIdentity | None) -> str | None:
+        """Create a Principal row on the fly so the bearer middleware can find it.
+
+        Integration tests that create only a Tenant (no Principal) have no
+        ``access_token`` to pass through ``x-adcp-auth``. The bearer
+        middleware would then 401 every MCP call. Build a placeholder
+        Principal under the test's ``(tenant_id, principal_id)`` so the
+        full auth chain (token → Principal → ContextVars → ToolContext →
+        ResolvedIdentity) runs against real DB rows.
+
+        No-op when no session is bound (not integration mode) or when the
+        identity has no tenant_id (auth-rejection tests that test the
+        missing-tenant code path).
+        """
+        if mcp_identity is None or not mcp_identity.tenant_id:
+            return None
+
+        from sqlalchemy import select
+
+        from src.core.database.models import Principal as PrincipalRow
+        from src.core.database.models import Tenant as TenantRow
+
+        assert self._session is not None
+        # Tenant must already exist — the harness's caller is responsible
+        # for creating one via TenantFactory before dispatching MCP calls.
+        tenant = self._session.scalars(select(TenantRow).filter_by(tenant_id=mcp_identity.tenant_id)).first()
+        if tenant is None:
+            return None
+
+        existing = self._session.scalars(
+            select(PrincipalRow).filter_by(
+                tenant_id=mcp_identity.tenant_id,
+                principal_id=mcp_identity.principal_id,
+            )
+        ).first()
+        if existing is not None:
+            return existing.access_token
+
+        token = f"test-token-{mcp_identity.tenant_id}-{mcp_identity.principal_id}"
+        principal = PrincipalRow(
+            tenant_id=mcp_identity.tenant_id,
+            principal_id=mcp_identity.principal_id,
+            name=f"Test {mcp_identity.principal_id}",
+            access_token=token,
+            platform_mappings={"mock": {"advertiser_id": f"adv_{mcp_identity.principal_id}"}},
+        )
+        self._session.add(principal)
+        self._session.commit()
+        return token
+
     def _resolve_auth_token(self) -> str | None:
         """Look up the real access_token from the session-bound Principal.
 
@@ -390,10 +440,14 @@ class BaseTestEnv:
 
         auth_token = mcp_identity.auth_token if mcp_identity else None
 
-        # Always send a token — when no real one exists (unit mode), use a
-        # placeholder so the bearer middleware short-circuits past the
-        # missing-header path. The patched ``resolve_identity_from_context``
-        # supplies the real identity.
+        # The bearer-token middleware is captured at app build time and
+        # validates every request against the real ``Principal.access_token``
+        # column. Tests that don't create a Principal via factory (only a
+        # Tenant) have no token to pass, but the middleware will still 401
+        # on a stub. Auto-create a Principal so the chain works.
+        if not auth_token and self.use_real_db and self._session is not None:
+            auth_token = self._ensure_principal_for_mcp(mcp_identity)
+
         request_headers = {
             "x-adcp-auth": auth_token or "test-stub-token",
         }

@@ -248,14 +248,22 @@ def _build_sync_result(
     operator: str,
     action: str,
     status: str,
+    account_id: str | None = None,
     name: str | None = None,
     billing: str | None = None,
     sandbox: bool | None = None,
     errors: list[Any] | None = None,
     setup: Any | None = None,
 ) -> SyncResponseAccount:
-    """Build an AdCP sync response Account object."""
-    return SyncResponseAccount(  # type: ignore[call-arg]  # account_id provided dynamically by caller
+    """Build an AdCP sync response Account object.
+
+    adcp 4.4 made ``Account.account_id`` required at the wire level, but
+    our rejected/failed paths fire before any account is created (no ID
+    exists yet). Pass a sentinel ``"unassigned"`` so the response object
+    constructs cleanly; callers that DO have an ID pass it explicitly.
+    """
+    return SyncResponseAccount(
+        account_id=account_id or "unassigned",
         brand=brand,
         operator=operator,
         action=action,

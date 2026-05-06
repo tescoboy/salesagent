@@ -23,12 +23,25 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
 
 def _make_creative_asset(**overrides) -> CreativeAsset:
-    """Build a minimal valid CreativeAsset for testing."""
+    """Build a minimal valid CreativeAsset for testing.
+
+    adcp 4.4 made the asset value-side schema strict — image assets need
+    ``asset_type``, ``url``, ``width``, ``height`` at minimum. The default
+    here is a fully-formed image asset; tests that need a different shape
+    pass ``assets=`` explicitly.
+    """
     defaults = {
         "creative_id": "c_test_1",
         "name": "Test Banner",
         "format_id": AdcpFormatId(agent_url=DEFAULT_AGENT_URL, id="display_300x250"),
-        "assets": {"banner": {"url": "https://example.com/banner.png"}},
+        "assets": {
+            "banner": {
+                "asset_type": "image",
+                "url": "https://example.com/banner.png",
+                "width": 300,
+                "height": 250,
+            }
+        },
     }
     defaults.update(overrides)
     return CreativeAsset(**defaults)
