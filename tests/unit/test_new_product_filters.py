@@ -27,12 +27,6 @@ class TestAdapterDefaultChannels:
         assert "social" in channels  # V3: native → social
         assert "retail_media" in channels  # V3: retail → retail_media
 
-    def test_triton_supports_streaming_audio_podcast(self):
-        """Test that Triton adapter supports streaming_audio and podcast."""
-        channels = get_adapter_default_channels("triton")
-        assert "streaming_audio" in channels  # V3: audio → streaming_audio
-        assert "podcast" in channels
-
     def test_mock_supports_all_common_channels(self):
         """Test that mock adapter supports all common channels for testing."""
         channels = get_adapter_default_channels("mock")

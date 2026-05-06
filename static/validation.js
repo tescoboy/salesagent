@@ -262,10 +262,6 @@ function initAdapterFormValidation() {
     // Kevel validation
     addRealtimeValidation('kevel_network_id', [validators.required, validators.networkId]);
     addRealtimeValidation('kevel_api_key', [validators.required, validators.minLength(10)]);
-
-    // Triton validation
-    addRealtimeValidation('triton_station_id', [validators.required, validators.minLength(3)]);
-    addRealtimeValidation('triton_api_key', [validators.required, validators.minLength(10)]);
 }
 
 // Initialize validation for user form

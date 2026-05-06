@@ -47,14 +47,13 @@ def build_agent_config(agent: _HasAgentFields) -> AgentConfig:
 from src.adapters.google_ad_manager import GoogleAdManager
 from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
-from src.adapters.triton_digital import TritonDigital
 from src.core.database.database_session import get_db_session
 from src.core.schemas import Principal
 
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonDigital:
+) -> MockAdServerAdapter | GoogleAdManager | Kevel:
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:
@@ -144,9 +143,6 @@ def get_adapter(
                     if config_row.kevel_manual_approval_required is not None
                     else True
                 )
-            elif adapter_type == "triton":
-                adapter_config["station_id"] = config_row.triton_station_id or ""
-                adapter_config["api_key"] = config_row.triton_api_key or ""
 
     if not selected_adapter:
         # Default to mock if no adapter specified
@@ -184,8 +180,6 @@ def get_adapter(
         )
     elif selected_adapter == "kevel":
         return Kevel(adapter_config, principal, dry_run, tenant_id=tenant_id)
-    elif selected_adapter in ["triton", "triton_digital"]:
-        return TritonDigital(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
         # Default to mock for unsupported adapters
         return MockAdServerAdapter(

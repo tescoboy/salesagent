@@ -22,7 +22,6 @@ def is_tenant_ad_server_configured(tenant_id: str) -> bool:
     - For GAM: OAuth token OR service account credentials exist
     - For Kevel: API key exists
     - For Mock: Always configured
-    - For Triton: API key exists
     - For others: Adapter config exists
 
     Args:
@@ -78,13 +77,6 @@ def is_tenant_ad_server_configured(tenant_id: str) -> bool:
                 # Mock adapter is NOT considered configured for production use
                 # Users should configure a real ad server (GAM, Kevel, etc.)
                 return False
-
-            elif adapter_type == "triton":
-                # Triton requires API key
-                has_key = bool(adapter_config.triton_api_key)
-                if not has_key:
-                    logger.info(f"Tenant {tenant_id} Triton adapter missing API key")
-                return has_key
 
             else:
                 # Unknown adapter type - consider it configured if it has a type
@@ -163,10 +155,6 @@ def get_tenant_status(tenant_id: str) -> dict:
                     missing_config.append("Kevel API key not set")
                 if not adapter_config.kevel_network_id:
                     missing_config.append("Kevel network ID not set")
-
-            elif adapter_type == "triton":
-                if not adapter_config.triton_api_key:
-                    missing_config.append("Triton API key not set")
 
             # Mock adapter doesn't need additional config
             status["is_configured"] = len(missing_config) == 0

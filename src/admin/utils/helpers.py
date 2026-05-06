@@ -103,11 +103,6 @@ def get_tenant_config_from_db(tenant_id):
                     adapter_config[adapter_type]["manual_approval_required"] = (
                         adapter_obj.kevel_manual_approval_required or False
                     )
-                elif adapter_type == "triton":
-                    if adapter_obj.triton_station_id:
-                        adapter_config[adapter_type]["station_id"] = adapter_obj.triton_station_id
-                    if adapter_obj.triton_api_key:
-                        adapter_config[adapter_type]["api_key"] = adapter_obj.triton_api_key
 
                 config["adapters"] = adapter_config
 

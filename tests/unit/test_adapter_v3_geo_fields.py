@@ -81,39 +81,6 @@ class TestKevelV3GeoFields:
         assert result == 1
 
 
-class TestTritonV3GeoFields:
-    """Test Triton Digital adapter reads v3 structured geo fields."""
-
-    def _make_triton(self):
-        from src.adapters.triton_digital import TritonDigital
-
-        principal = _make_principal("triton")
-        config = {"auth_token": "test"}
-        return TritonDigital(config, principal, dry_run=True, tenant_id="test_tenant")
-
-    def test_build_targeting_v3_geo_countries(self):
-        triton = self._make_triton()
-        targeting = Targeting(geo_countries=["US", "CA"])
-        result = triton._build_targeting(targeting)
-        assert result["targeting"]["countries"] == ["US", "CA"]
-
-    def test_build_targeting_v3_geo_regions(self):
-        triton = self._make_triton()
-        targeting = Targeting(geo_countries=["US"], geo_regions=["US-NY", "US-CA"])
-        result = triton._build_targeting(targeting)
-        assert result["targeting"]["states"] == ["US-NY", "US-CA"]
-
-    def test_build_targeting_v3_geo_metros(self):
-        triton = self._make_triton()
-        targeting = Targeting(
-            geo_countries=["US"],
-            geo_metros=[{"system": "nielsen_dma", "values": ["501"]}],
-        )
-        result = triton._build_targeting(targeting)
-        # Triton maps metros to markets (empty list since no mapping exists)
-        assert "markets" in result["targeting"]
-
-
 class TestXandrV3GeoFields:
     """Test Xandr adapter reads v3 field names from targeting dict."""
 

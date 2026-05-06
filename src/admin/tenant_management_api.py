@@ -411,15 +411,6 @@ def create_tenant():
                     created_at=datetime.now(UTC),
                     updated_at=datetime.now(UTC),
                 )
-            elif adapter_type == "triton":
-                new_adapter = AdapterConfig(
-                    tenant_id=tenant_id,
-                    adapter_type=adapter_type,
-                    triton_station_id=data.get("triton_station_id"),
-                    triton_api_key=data.get("triton_api_key"),
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
-                )
             else:  # mock or other
                 new_adapter = AdapterConfig(
                     tenant_id=tenant_id,
@@ -444,8 +435,6 @@ def create_tenant():
                     default_mappings = {"google_ad_manager": {"advertiser_id": "placeholder"}}
                 elif adapter_type == "kevel":
                     default_mappings = {"kevel": {"advertiser_id": "placeholder"}}
-                elif adapter_type == "triton":
-                    default_mappings = {"triton": {"advertiser_id": "placeholder"}}
                 else:
                     # For mock and others
                     default_mappings = {"mock": {"advertiser_id": "default"}}
@@ -589,12 +578,6 @@ def update_tenant(tenant_id):
                             adapter.kevel_api_key = adapter_data["kevel_api_key"]
                         if "kevel_manual_approval_required" in adapter_data:
                             adapter.kevel_manual_approval_required = adapter_data["kevel_manual_approval_required"]
-
-                    elif adapter.adapter_type == "triton":
-                        if "triton_station_id" in adapter_data:
-                            adapter.triton_station_id = adapter_data["triton_station_id"]
-                        if "triton_api_key" in adapter_data:
-                            adapter.triton_api_key = adapter_data["triton_api_key"]
 
                     elif adapter.adapter_type == "mock":
                         if "mock_dry_run" in adapter_data:
@@ -1166,7 +1149,7 @@ def _set_account_advertiser(
 ) -> None:
     """Set GAM advertiser id/name on ``Account.platform_mappings``.
 
-    Preserves any other adapter blocks (kevel, triton) and other GAM fields
+    Preserves any other adapter blocks (kevel) and other GAM fields
     we don't manage from this endpoint. Re-assigns the dict so SQLAlchemy
     sees the JSONType column as dirty even with mutation-tracking off.
     """

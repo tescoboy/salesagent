@@ -131,8 +131,8 @@ class AdServerAdapter(ABC):
 
 - **GoogleAdManagerAdapter** - Full GAM integration
 - **KevelAdapter** - Kevel ad server
+- **BroadstreetAdapter** - Broadstreet Ads
 - **MockAdapter** - Testing and development
-- **TritonAdapter** - Audio advertising
 
 Each adapter handles:
 - Platform authentication

@@ -1332,10 +1332,6 @@ class AdapterConfig(Base):
     # Mock
     mock_manual_approval_required: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # Triton
-    triton_station_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    triton_api_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
-
     # Schema-driven configuration (coexists with legacy columns during migration)
     config_json: Mapped[dict] = mapped_column(
         JSONType,

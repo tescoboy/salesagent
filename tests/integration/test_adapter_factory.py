@@ -121,35 +121,6 @@ class TestAdapterFactory:
             session.add(kevel_principal)
             adapters_to_test.append(("kevel", "test_factory_kevel", "kevel_principal"))
 
-            # 4. Triton adapter tenant
-            triton_tenant = create_tenant_with_timestamps(
-                tenant_id="test_factory_triton",
-                name="Triton Adapter Test",
-                subdomain="triton",
-                ad_server="triton",
-                is_active=True,
-            )
-            session.add(triton_tenant)
-
-            triton_config = AdapterConfig(
-                tenant_id="test_factory_triton",
-                adapter_type="triton",
-                triton_station_id="STATION123",
-                triton_api_key="test_triton_key",
-            )
-            session.add(triton_config)
-
-            triton_principal = create_principal_with_platform_mappings(
-                tenant_id="test_factory_triton",
-                principal_id="triton_principal",
-                name="Triton Principal",
-                access_token="triton_token",
-                # Use mock platform mapping since triton not in allowed list
-                platform_mappings={"mock": {"advertiser_id": "triton_adv_123"}},
-            )
-            session.add(triton_principal)
-            adapters_to_test.append(("triton", "test_factory_triton", "triton_principal"))
-
             session.commit()
 
             yield adapters_to_test
@@ -162,7 +133,6 @@ class TestAdapterFactory:
                             "test_factory_mock",
                             "test_factory_gam",
                             "test_factory_kevel",
-                            "test_factory_triton",
                         ]
                     )
                 )
@@ -173,7 +143,6 @@ class TestAdapterFactory:
                         [
                             "test_factory_gam",
                             "test_factory_kevel",
-                            "test_factory_triton",
                         ]
                     )
                 )
@@ -185,7 +154,6 @@ class TestAdapterFactory:
                             "test_factory_mock",
                             "test_factory_gam",
                             "test_factory_kevel",
-                            "test_factory_triton",
                         ]
                     )
                 )
@@ -204,13 +172,11 @@ class TestAdapterFactory:
         from src.adapters.google_ad_manager import GoogleAdManager
         from src.adapters.kevel import Kevel
         from src.adapters.mock_ad_server import MockAdServer
-        from src.adapters.triton_digital import TritonDigital
 
         adapter_type_map = {
             "mock": MockAdServer,
             "google_ad_manager": GoogleAdManager,
             "kevel": Kevel,
-            "triton": TritonDigital,
         }
 
         from src.core.config_loader import set_current_tenant
@@ -250,9 +216,9 @@ class TestAdapterFactory:
 
                     # Verify correct adapter type
                     expected_class = adapter_type_map[adapter_type]
-                    assert isinstance(adapter, expected_class), (
-                        f"Expected {expected_class.__name__}, got {type(adapter).__name__}"
-                    )
+                    assert isinstance(
+                        adapter, expected_class
+                    ), f"Expected {expected_class.__name__}, got {type(adapter).__name__}"
 
                     # Verify dry_run mode was set
                     assert adapter.dry_run is True, f"dry_run not set correctly for {adapter_type}"
@@ -307,9 +273,9 @@ class TestAdapterFactory:
             # Verify it's actually a GAM adapter, not mock fallback
             from src.adapters.google_ad_manager import GoogleAdManager
 
-            assert isinstance(adapter, GoogleAdManager), (
-                f"Expected GAM adapter, got {type(adapter).__name__}. Check tenant/adapter_config setup."
-            )
+            assert isinstance(
+                adapter, GoogleAdManager
+            ), f"Expected GAM adapter, got {type(adapter).__name__}. Check tenant/adapter_config setup."
 
             # Verify network_code was passed correctly
             assert hasattr(adapter, "network_code"), "GAM adapter missing network_code attribute"

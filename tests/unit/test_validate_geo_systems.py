@@ -273,12 +273,6 @@ class TestNoAdapterSupportsCustomMetro:
         errors = caps.validate_geo_systems(_custom_metro_targeting())
         assert any("custom" in e for e in errors)
 
-    def test_triton_rejects_custom_metro(self):
-        """Triton inherits base default (geo_countries only)."""
-        caps = TargetingCapabilities(geo_countries=True)  # base default
-        errors = caps.validate_geo_systems(_custom_metro_targeting())
-        assert any("custom" in e for e in errors)
-
     def test_mock_rejects_custom_metro(self):
         from src.adapters.mock_ad_server import MockAdServer
 
