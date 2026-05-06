@@ -527,6 +527,106 @@ class TestSigningMiddlewareEndToEnd:
         www = response.headers.get("www-authenticate", "")
         assert "request_signature_required" in www, www
 
+    async def test_unbound_principal_cannot_skip_required_for(self, session, keypair):
+        """H2 regression: a principal with bound_operator_id=NULL must NOT
+        bypass required_for enforcement by skipping signing."""
+        from tests.factories import (
+            PrincipalFactory,
+            TenantFactory,
+            TenantSigningPolicyFactory,
+        )
+
+        os.environ["REPLAY_SWEEP_MODE"] = "off"
+        from src.core.signing import bootstrap_replay_store
+
+        bootstrap_replay_store()
+
+        tenant = TenantFactory(tenant_id="t_unbound")
+        # bound_operator_id intentionally left NULL.
+        PrincipalFactory(
+            tenant=tenant,
+            principal_id="p_unbound",
+            access_token="unbound-token",
+        )
+        TenantSigningPolicyFactory(
+            tenant=tenant,
+            enabled=True,
+            required_for=["create_media_buy"],
+        )
+        session.commit()
+
+        body = b'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_media_buy","arguments":{}},"id":1}'
+        app = _build_app()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t.example.com") as client:
+            response = await client.post(
+                "/mcp/",
+                content=body,
+                headers={
+                    "x-adcp-auth": "unbound-token",
+                    "x-adcp-tenant": tenant.tenant_id,
+                    "content-type": "application/json",
+                },
+            )
+
+        assert response.status_code == 401, f"body: {response.text!r}"
+        assert "request_signature_required" in response.headers.get("www-authenticate", "")
+
+    async def test_disabled_link_rejects_signed_request(self, signing_setup, session):
+        """H1 regression: deactivating operator_advertiser_link must stop the
+        verifier from admitting signed requests on that link."""
+        from src.core.database.models import OperatorAdvertiserLink
+
+        # Disable the link the signing_setup fixture created.
+        from sqlalchemy import select
+
+        link = session.scalars(
+            select(OperatorAdvertiserLink).filter_by(
+                tenant_id=signing_setup["tenant_id"],
+                operator_id=signing_setup["operator_id"],
+                principal_id=signing_setup["principal_id"],
+            )
+        ).first()
+        assert link is not None
+        link.is_active = False
+        session.commit()
+
+        # Send a properly-signed request — should still reject because the
+        # link is gone (verifier can't construct a binding).
+        body = b'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_products","arguments":{}},"id":1}'
+        url = "http://t.example.com/mcp/"
+
+        signed = sign_request(
+            method="POST",
+            url=url,
+            headers={
+                "host": "t.example.com",
+                "content-type": "application/json",
+                "x-adcp-auth": signing_setup["access_token"],
+                "x-adcp-tenant": signing_setup["tenant_id"],
+            },
+            body=body,
+            private_key=signing_setup["private_key"],
+            key_id=signing_setup["key_id"],
+            alg="ed25519",
+            cover_content_digest=False,
+        )
+
+        app = _build_app()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t.example.com") as client:
+            response = await client.post(
+                "/mcp/",
+                content=body,
+                headers={
+                    "x-adcp-auth": signing_setup["access_token"],
+                    "x-adcp-tenant": signing_setup["tenant_id"],
+                    "content-type": "application/json",
+                    **signed.as_dict(),
+                },
+            )
+
+        # Signed request hits the "no binding" path → 401 request_signature_required.
+        assert response.status_code == 401, f"body: {response.text!r}"
+
     async def test_required_for_other_op_unsigned_passes(self, session, keypair):
         """An operation NOT in required_for, sent unsigned → passes through."""
         from tests.factories import (
@@ -592,7 +692,13 @@ class TestSigningMiddlewareEndToEnd:
             TenantFactory,
         )
 
-        tenant = TenantFactory(tenant_id="t_trusted_e2e")
+        # is_trusted bypass is gated on is_embedded — trust comes from the
+        # network/header boundary, which only applies to embedded tenants.
+        # The embedded-tenant guard requires the management-api caller flag
+        # for is_embedded=True inserts; set it on the session to mirror what
+        # tenant_management_api.provision_tenant does in production.
+        session.info["management_api_caller"] = True
+        tenant = TenantFactory(tenant_id="t_trusted_e2e", is_embedded=True)
         operator = AdmittedOperatorFactory(
             tenant=tenant,
             operator_id="embedded_host",

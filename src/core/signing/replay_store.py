@@ -109,10 +109,15 @@ def _install_pg_cron_sweep(pool: ConnectionPool) -> None:
 
 
 async def _in_process_sweep_loop(store: PgReplayStore, interval: float) -> None:
-    """Run ``store.sweep_expired()`` on a fixed interval until cancelled."""
+    """Run ``store.sweep_expired()`` on a fixed interval until cancelled.
+
+    The sweep is sync psycopg work — run on a thread so it doesn't block the
+    event loop on every tick (noticeable on single-worker deployments where
+    a stalled DB connection would freeze all in-flight requests).
+    """
     while True:
         try:
-            store.sweep_expired()
+            await asyncio.to_thread(store.sweep_expired)
         except Exception:
             logger.warning("adcp_replay in-process sweep failed", exc_info=True)
         try:
