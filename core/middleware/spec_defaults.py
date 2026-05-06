@@ -42,7 +42,9 @@ _GET_PRODUCTS_DEFAULTS: dict[str, str] = {
 # at the DB layer regardless of caller key. Backfill placeholders at the
 # wire boundary so the SDK's typed-dispatcher validation passes; our impl
 # layer ignores the placeholders.
-_AUTH_FILLED_TOOLS: frozenset[str] = frozenset({"sync_creatives", "sync_accounts", "activate_signal"})
+_AUTH_FILLED_TOOLS: frozenset[str] = frozenset(
+    {"sync_creatives", "sync_accounts", "activate_signal", "create_media_buy"}
+)
 
 #: Sentinel ``AccountReference`` used to satisfy strict request validation
 #: when callers don't supply one. ``account_id="auth-chain"`` signals that the
