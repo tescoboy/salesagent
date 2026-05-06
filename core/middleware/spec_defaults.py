@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -35,39 +36,58 @@ _GET_PRODUCTS_DEFAULTS: dict[str, str] = {
     "buying_mode": "brief",
 }
 
+# Tools where adcp 4.4 added required ``account`` and ``idempotency_key``
+# fields, but our impls resolve identity from the auth chain
+# (``ResolvedIdentity`` produced by ``BearerTokenAuthMiddleware``) and dedupe
+# at the DB layer regardless of caller key. Backfill placeholders at the
+# wire boundary so the SDK's typed-dispatcher validation passes; our impl
+# layer ignores the placeholders.
+_AUTH_FILLED_TOOLS: frozenset[str] = frozenset({"sync_creatives", "sync_accounts", "activate_signal"})
+
+#: Sentinel ``AccountReference`` used to satisfy strict request validation
+#: when callers don't supply one. ``account_id="auth-chain"`` signals that the
+#: real identity lives on ``scope.state`` from BearerTokenAuthMiddleware.
+_AUTH_CHAIN_ACCOUNT_REF = {"account_id": "auth-chain"}
+
 
 def _apply_get_products_defaults(args: dict[str, Any]) -> None:
     for field, default in _GET_PRODUCTS_DEFAULTS.items():
         args.setdefault(field, default)
 
 
+def _apply_auth_filled_defaults(args: dict[str, Any]) -> None:
+    args.setdefault("account", _AUTH_CHAIN_ACCOUNT_REF)
+    args.setdefault("idempotency_key", f"idem-{uuid.uuid4()}")
+
+
 def _patch_mcp_tools_call(payload: dict[str, Any]) -> dict[str, Any]:
-    """Patch a JSON-RPC ``tools/call`` body for ``get_products`` in place."""
+    """Patch a JSON-RPC ``tools/call`` body in place."""
     if payload.get("method") != "tools/call":
         return payload
     params = payload.get("params") or {}
     if not isinstance(params, dict):
         return payload
-    if params.get("name") != "get_products":
-        return payload
+    name = params.get("name")
     arguments = params.get("arguments")
     if not isinstance(arguments, dict):
         return payload
-    _apply_get_products_defaults(arguments)
+    if name == "get_products":
+        _apply_get_products_defaults(arguments)
+    elif name in _AUTH_FILLED_TOOLS:
+        _apply_auth_filled_defaults(arguments)
     return payload
 
 
 def _patch_a2a_skill(payload: dict[str, Any]) -> dict[str, Any]:
-    """Patch an A2A skill request body for ``get_products`` in place.
-
-    A2A passes skill name in different shapes depending on the request style.
-    Cover both ``{"skill": "get_products", "params": {...}}`` and the JSON-RPC
-    style used by a2a-sdk's ``message/send`` handler.
-    """
+    """Patch an A2A skill request body in place."""
     skill = payload.get("skill")
     params = payload.get("params") if isinstance(payload, dict) else None
-    if skill == "get_products" and isinstance(params, dict):
+    if not isinstance(params, dict):
+        return payload
+    if skill == "get_products":
         _apply_get_products_defaults(params)
+    elif skill in _AUTH_FILLED_TOOLS:
+        _apply_auth_filled_defaults(params)
     return payload
 
 
