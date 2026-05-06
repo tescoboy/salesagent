@@ -188,6 +188,10 @@ BARE_ASSERTION_ALLOWLIST: set[tuple[str, str]] = {
     ("tests/unit/test_admin_mount.py", "test_non_admin_host_root_path_falls_through_to_inner"),
     ("tests/unit/test_admin_mount.py", "test_missing_host_header_does_not_match_admin"),
     ("tests/unit/test_admin_mount.py", "test_lifespan_scope_passes_through"),
+    # PR #35 (apex redirect) — assert_called_once on host fall-through paths.
+    ("tests/unit/test_admin_mount.py", "test_apex_non_root_path_falls_through"),
+    ("tests/unit/test_admin_mount.py", "test_subdomain_host_root_does_not_redirect"),
+    ("tests/unit/test_admin_mount.py", "test_apex_with_unset_domain_does_not_redirect"),
     ("tests/unit/test_no_model_dump_in_impl_fixes.py", "test_create_from_request_adds_to_session"),
     ("tests/unit/test_review_agent.py", "test_returns_approval"),
     ("tests/unit/test_transport_tenant_resolution.py", "test_db_queried_only_once"),

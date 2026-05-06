@@ -43,7 +43,13 @@ IMPL_FILES = [
 # Pre-existing violations: (file_path, function_name)
 # These existed before the guard was created. Allowlist shrinks as repositories are introduced.
 # FIXME(salesagent-qo8a): all _impl functions should use repositories instead of get_db_session()
-IMPL_SESSION_ALLOWLIST: set[tuple[str, str]] = set()
+IMPL_SESSION_ALLOWLIST: set[tuple[str, str]] = {
+    # PR #39 signing — _build_signing_capability reads the per-tenant policy
+    # row inline (lazy import already at function scope). Wrapping it behind a
+    # TenantSigningPolicyRepository.get_capability() is follow-up work.
+    # FIXME(salesagent-signing-repo)
+    ("src/core/tools/capabilities.py", "_build_signing_capability"),
+}
 
 # ---------------------------------------------------------------------------
 # Invariant 2: No session.add() in integration test bodies

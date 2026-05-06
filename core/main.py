@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 from a2wsgi import WSGIMiddleware
 from adcp.decisioning import (
@@ -69,6 +70,7 @@ from core.stores.accounts import SalesagentAccountStore
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Principal as PrincipalRow
 from src.core.database.models import Tenant as TenantRow
+from src.core.signing import SigningVerifyMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +278,48 @@ async def _stop_schedulers() -> None:
     await stop_delivery_webhook_scheduler()
 
 
+DEFAULT_DEV_TENANT_SUBDOMAINS: tuple[str, ...] = (
+    "default",
+    "acme",
+    "beta",
+    "wonderstruck",
+    "test",
+)
+
+
+_VALID_DEV_TENANT_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _parse_dev_tenant_env(raw: str | None) -> tuple[str, ...]:
+    """Parse ``DEV_TENANT_SUBDOMAINS`` into a tenant tuple, or return defaults.
+
+    Falls back to :data:`DEFAULT_DEV_TENANT_SUBDOMAINS` when:
+      * the var is unset (``raw is None``);
+      * the var is set but empty / whitespace-only — treating empty as
+        "use defaults" avoids the footgun of accidentally exporting an
+        empty value (e.g. unset shell var interpolation) and silently
+        locking out every dev tenant.
+
+    Names are validated against ``^[a-z0-9][a-z0-9-]*$`` (RFC-1123-ish
+    DNS labels). Invalid names are dropped with a warning rather than
+    raising, so a single bad entry doesn't break boot.
+    """
+    if raw is None:
+        return DEFAULT_DEV_TENANT_SUBDOMAINS
+    candidates = [name.strip() for name in raw.split(",")]
+    candidates = [name for name in candidates if name]
+    if not candidates:
+        return DEFAULT_DEV_TENANT_SUBDOMAINS
+
+    valid: list[str] = []
+    for name in candidates:
+        if _VALID_DEV_TENANT_RE.match(name):
+            valid.append(name)
+        else:
+            logger.warning("DEV_TENANT_SUBDOMAINS: dropping invalid tenant name %r", name)
+    return tuple(valid) if valid else DEFAULT_DEV_TENANT_SUBDOMAINS
+
+
 def _allowed_hosts() -> list[str]:
     """FastMCP DNS-rebinding allowlist for dev/prod base domains.
 
@@ -286,21 +330,24 @@ def _allowed_hosts() -> list[str]:
     Starlette's TrustedHostMiddleware further out).
 
     For local dev we enumerate the well-known tenant subdomains
-    (``default.localhost``, ``acme.localhost``, etc.). Production
-    deployments either enumerate a known closed set OR set
+    (``default.localhost``, ``acme.localhost``, etc.). Override at boot
+    via ``DEV_TENANT_SUBDOMAINS`` (comma-separated). See
+    :func:`_parse_dev_tenant_env` for the parsing contract.
+
+    Production deployments either enumerate a known closed set OR set
     ``enable_dns_rebinding_protection=False`` and rely on the cloud
     LB / WAF for Host validation.
 
     Tracked upstream: MCP framework needs subdomain wildcards or a
-    callable Host validator for multi-tenant deployments.
+    callable Host validator for multi-tenant deployments. (See #26.)
     """
     base = ["localhost", "127.0.0.1", "0.0.0.0"]
-    # Local dev tenant subdomains. Add new tenants here when they're
-    # registered (admin UI is on the kill-nginx-spike followups).
+
+    dev_tenants = _parse_dev_tenant_env(os.getenv("DEV_TENANT_SUBDOMAINS"))
+
     # Both .localhost and .localtest.me — localtest.me is the alias we
     # actually use (Google OAuth accepts it as a real public TLD; .localhost
     # is rejected as not-a-public-TLD).
-    dev_tenants = ["default", "acme", "beta", "wonderstruck", "test"]
     for tenant in dev_tenants:
         base.append(f"{tenant}.localhost")
         base.append(f"{tenant}.localtest.me")
@@ -364,6 +411,13 @@ def _serve_kwargs(
                 },
             )
         )
+    # SigningVerifyMiddleware verifies RFC 9421 signatures on inbound
+    # buyer-protocol traffic and stashes verified state on
+    # ``scope["state"]``. AdminWSGIMount runs first so the admin paths
+    # short-circuit before signing inspects them; this entry runs LAST
+    # so it only sees buyer-protocol traffic. See
+    # docs/design/signing-non-embedded.md.
+    asgi_middleware.append((SigningVerifyMiddleware, {}))
 
     port = int(os.environ.get("ADCP_PORT") or os.environ.get("PORT") or 3001)
 

@@ -14,7 +14,13 @@ import pytest
 from core.middleware.admin_mount import AdminWSGIMount
 
 
-def _http_scope(*, host: str | None = None, apx_host: str | None = None, path: str = "/") -> dict:
+def _http_scope(
+    *,
+    host: str | None = None,
+    apx_host: str | None = None,
+    path: str = "/",
+    query_string: bytes = b"",
+) -> dict:
     """Build an ASGI HTTP scope with the given host headers and path."""
     headers: list[tuple[bytes, bytes]] = []
     if host is not None:
@@ -27,6 +33,7 @@ def _http_scope(*, host: str | None = None, apx_host: str | None = None, path: s
         "raw_path": path.encode("latin-1"),
         "headers": headers,
         "root_path": "",
+        "query_string": query_string,
     }
 
 
@@ -141,3 +148,188 @@ class TestAdminWSGIMountHostDispatch:
 
         inner_app.assert_called_once()
         wsgi_app.assert_not_called()
+
+
+@pytest.mark.asyncio
+class TestAdminWSGIMountApexRedirect:
+    """Apex ``sales-agent.example.com/`` → 302 ``/signup``.
+
+    Replaces the bundled-nginx ``server_name ${SALES_AGENT_DOMAIN};
+    location = /`` block from the multi-tenant config (PR #25 removed it).
+    """
+
+    async def test_apex_root_redirects_to_signup(self):
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="sales-agent.example.com", path="/")
+        send = AsyncMock()
+
+        with patch(
+            "core.middleware.admin_mount.get_sales_agent_domain",
+            return_value="sales-agent.example.com",
+        ):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        # Two send() calls: response.start + response.body
+        assert send.call_count == 2
+        start_msg = send.call_args_list[0].args[0]
+        assert start_msg["type"] == "http.response.start"
+        assert start_msg["status"] == 302
+        location = dict(start_msg["headers"]).get(b"location")
+        assert location == b"/signup"
+        wsgi_app.assert_not_called()
+        inner_app.assert_not_called()
+
+    async def test_apex_redirect_strips_port_from_host(self):
+        """``sales-agent.example.com:8080`` still matches the apex domain."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="sales-agent.example.com:8080", path="/")
+        send = AsyncMock()
+
+        with patch(
+            "core.middleware.admin_mount.get_sales_agent_domain",
+            return_value="sales-agent.example.com",
+        ):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        assert send.call_count == 2
+        assert send.call_args_list[0].args[0]["status"] == 302
+
+    async def test_apex_non_root_path_falls_through(self):
+        """``sales-agent.example.com/foo`` is not redirected (only bare /)."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="sales-agent.example.com", path="/foo")
+        send = AsyncMock()
+
+        with patch(
+            "core.middleware.admin_mount.get_sales_agent_domain",
+            return_value="sales-agent.example.com",
+        ):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        # No redirect emitted; falls through to inner A2A app.
+        send.assert_not_called()
+        inner_app.assert_called_once()
+        wsgi_app.assert_not_called()
+
+    async def test_subdomain_host_root_does_not_redirect(self):
+        """``acme.sales-agent.example.com/`` is the tenant landing — must not redirect."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="acme.sales-agent.example.com", path="/")
+        send = AsyncMock()
+
+        with patch(
+            "core.middleware.admin_mount.get_sales_agent_domain",
+            return_value="sales-agent.example.com",
+        ):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        send.assert_not_called()
+        inner_app.assert_called_once()
+        wsgi_app.assert_not_called()
+
+    async def test_apex_with_unset_domain_does_not_redirect(self):
+        """Single-tenant / dev (no SALES_AGENT_DOMAIN) skips the apex branch."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="localhost:8080", path="/")
+        send = AsyncMock()
+
+        with patch("core.middleware.admin_mount.get_sales_agent_domain", return_value=None):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        send.assert_not_called()
+        inner_app.assert_called_once()
+
+    async def test_apx_incoming_host_drives_apex_match(self):
+        """Approximated header beats raw Host for apex detection too."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(
+            host="backend.internal.fly.dev",
+            apx_host="sales-agent.example.com",
+            path="/",
+        )
+        send = AsyncMock()
+
+        with patch(
+            "core.middleware.admin_mount.get_sales_agent_domain",
+            return_value="sales-agent.example.com",
+        ):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        assert send.call_count == 2
+        assert send.call_args_list[0].args[0]["status"] == 302
+
+    async def test_apex_match_is_case_insensitive(self):
+        """Mixed-case Host headers (RFC 3986) still match the apex."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="Sales-Agent.Example.COM", path="/")
+        send = AsyncMock()
+
+        with patch(
+            "core.middleware.admin_mount.get_sales_agent_domain",
+            return_value="sales-agent.example.com",
+        ):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        assert send.call_count == 2
+        assert send.call_args_list[0].args[0]["status"] == 302
+
+    async def test_apex_redirect_preserves_query_string(self):
+        """Marketing attribution survives the apex bounce."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(
+            host="sales-agent.example.com",
+            path="/",
+            query_string=b"utm_source=google&utm_campaign=launch",
+        )
+        send = AsyncMock()
+
+        with patch(
+            "core.middleware.admin_mount.get_sales_agent_domain",
+            return_value="sales-agent.example.com",
+        ):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        location = dict(send.call_args_list[0].args[0]["headers"]).get(b"location")
+        assert location == b"/signup?utm_source=google&utm_campaign=launch"
+
+    async def test_apex_redirect_sets_cache_control_no_store(self):
+        """Redirect target may change — block intermediary caching."""
+        wsgi_app = AsyncMock()
+        inner_app = AsyncMock()
+        mount = AdminWSGIMount(inner_app, wsgi_app=wsgi_app)
+        scope = _http_scope(host="sales-agent.example.com", path="/")
+        send = AsyncMock()
+
+        with patch(
+            "core.middleware.admin_mount.get_sales_agent_domain",
+            return_value="sales-agent.example.com",
+        ):
+            with patch("core.middleware.admin_mount.is_admin_domain", return_value=False):
+                await mount(scope, AsyncMock(), send)
+
+        cache_control = dict(send.call_args_list[0].args[0]["headers"]).get(b"cache-control")
+        assert cache_control == b"no-store"
