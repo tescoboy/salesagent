@@ -265,6 +265,13 @@ def _list_creatives_impl(
             # AdCP v1 spec compliant - only spec fields
             # Get assets dict from database (all production data uses AdCP v2.4 format)
             assets_dict = db_creative.data.get("assets", {}) if db_creative.data else {}
+            # adcp 4.4 made ``asset_type`` a required discriminator on every
+            # asset value. DB rows minted before the change don't carry it;
+            # backfill so the response passes the SDK's output validator
+            # without forcing a one-shot DB migration.
+            from src.core.schemas._asset_type_compat import infer_asset_types
+
+            assets_dict = infer_asset_types(assets_dict)
 
             # Convert string status to CreativeStatus enum
             from src.core.schemas import CreativeStatus

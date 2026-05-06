@@ -16,7 +16,14 @@ from tests.harness.account_sync import AccountSyncEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
+# sync_accounts isn't yet auto-registered as an MCP tool by the SDK —
+# it lives on the AccountStoreUpsert protocol (separate from the sales
+# specialism's tool surface). Until we wire SalesagentAccountStore.upsert
+# and the framework auto-advertises sync_accounts, only the IMPL
+# transport exercises the impl path. FIXME(salesagent-sync-accounts-mcp):
+# when SDK exposes sync_accounts via AccountStoreUpsert, add Transport.MCP
+# back here.
+ALL_TRANSPORTS = [Transport.IMPL]
 
 
 def _action_value(action):
