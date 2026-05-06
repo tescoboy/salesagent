@@ -160,8 +160,29 @@ def save_adapter_config(tenant_id, **kwargs):
         if not adapter_type:
             return jsonify({"success": False, "error": "adapter_type is required"}), 400
 
-        # Validate config against adapter schema (keeps Pydantic model flowing)
+        # For adapters whose schemas mark a field as `secret`, preserve the
+        # previously-stored value when the caller omits it (typical UX: leave
+        # password field blank to keep the existing credential).
         schemas = get_adapter_schemas(adapter_type)
+        if schemas and schemas.connection_config:
+            secret_fields = [
+                name
+                for name, field in schemas.connection_config.model_fields.items()
+                if isinstance(field.json_schema_extra, dict) and field.json_schema_extra.get("secret")
+            ]
+            if secret_fields:
+                missing = [f for f in secret_fields if not config_data.get(f)]
+                if missing:
+                    with get_db_session() as session:
+                        stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
+                        existing = session.scalars(stmt).first()
+                        if existing and existing.config_json:
+                            for field_name in missing:
+                                existing_value = existing.config_json.get(field_name)
+                                if existing_value:
+                                    config_data[field_name] = existing_value
+
+        # Validate config against adapter schema (keeps Pydantic model flowing)
         validated_config = None
         if schemas and schemas.connection_config:
             try:
@@ -224,6 +245,64 @@ def get_adapter_capabilities(adapter_type, tenant_id, **kwargs):
         return jsonify(asdict(schemas.capabilities))
     else:
         return jsonify({})
+
+
+# Triton-specific endpoints
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/triton/test-connection", methods=["POST"])
+@require_tenant_access()
+def test_triton_connection(tenant_id, **kwargs):
+    """Verify Triton TAP credentials by performing a JWT login.
+
+    Accepts ``username`` (required) and ``password`` (optional — falls back to
+    the encrypted password already stored on AdapterConfig.config_json).
+    """
+    try:
+        data = request.get_json() or {}
+        username = data.get("username")
+        password = data.get("password")
+        base_url = data.get("base_url") or "https://mbapi.tritondigital.com"
+        login_url = data.get("login_url") or "https://login.tritondigital.com"
+
+        if not username:
+            return jsonify({"success": False, "error": "username is required"}), 400
+
+        if not password:
+            with get_db_session() as session:
+                stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
+                existing = session.scalars(stmt).first()
+                if existing and existing.config_json:
+                    from src.adapters.triton import TritonConnectionConfig
+
+                    try:
+                        rehydrated = TritonConnectionConfig.model_validate(existing.config_json)
+                        password = rehydrated.password
+                    except ValidationError:
+                        password = None
+        if not password:
+            return jsonify({"success": False, "error": "password is required for first connection test"}), 400
+
+        from src.adapters.triton import TritonAPIError, TritonClient
+
+        client = TritonClient(username=username, password=password, base_url=base_url, login_url=login_url)
+        try:
+            client.login()
+        except TritonAPIError as exc:
+            return jsonify({"success": False, "error": str(exc)}), 200
+
+        publisher_name: str | None = None
+        try:
+            publisher = client.get_publisher()
+            publisher_name = publisher.get("name") or publisher.get("displayName")
+        except TritonAPIError:
+            pass  # JWT works; publisher endpoint specifics may vary
+
+        return jsonify({"success": True, "publisher_name": publisher_name})
+
+    except Exception as e:
+        logger.error(f"Triton connection test failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # Broadstreet-specific endpoints

@@ -47,13 +47,14 @@ def build_agent_config(agent: _HasAgentFields) -> AgentConfig:
 from src.adapters.google_ad_manager import GoogleAdManager
 from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
+from src.adapters.triton import TritonAdapter
 from src.core.database.database_session import get_db_session
 from src.core.schemas import Principal
 
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> MockAdServerAdapter | GoogleAdManager | Kevel:
+) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonAdapter:
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:
@@ -143,6 +144,14 @@ def get_adapter(
                     if config_row.kevel_manual_approval_required is not None
                     else True
                 )
+            elif adapter_type in {"triton", "triton_digital"}:
+                # Triton credentials live in config_json (publisher username/password,
+                # base_url, default_advertiser_id). Password decryption happens in the
+                # TritonConnectionConfig field validator when the schema rehydrates.
+                stored = config_row.config_json or {}
+                if stored:
+                    validated = TritonAdapter.connection_config_class(**stored)
+                    adapter_config.update(validated.model_dump(exclude_none=True))
 
     if not selected_adapter:
         # Default to mock if no adapter specified
@@ -180,6 +189,8 @@ def get_adapter(
         )
     elif selected_adapter == "kevel":
         return Kevel(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter in {"triton", "triton_digital"}:
+        return TritonAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
         # Default to mock for unsupported adapters
         return MockAdServerAdapter(

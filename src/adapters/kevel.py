@@ -197,15 +197,7 @@ class Kevel(AdServerAdapter):
         package_pricing_info: dict[str, dict[str, Any]] | None = None,
     ) -> CreateMediaBuyResponse:
         """Creates a new Campaign and associated Flights in Kevel."""
-        # Log operation
-        self.audit_logger.log_operation(
-            operation="create_media_buy",
-            principal_name=self.principal.name,
-            principal_id=self.principal.principal_id,
-            adapter_id=self.advertiser_id or "unknown",
-            success=True,
-            details={"po_number": request.po_number, "flight_dates": f"{start_time.date()} to {end_time.date()}"},
-        )
+        self._audit_create_media_buy(request, start_time, end_time)
 
         self.log(
             f"Kevel.create_media_buy for principal '{self.principal.name}' (Kevel advertiser ID: {self.advertiser_id})",
@@ -610,15 +602,7 @@ class Kevel(AdServerAdapter):
         self.log(f"Kevel.update_media_buy for {media_buy_id} with action {action}", dry_run_prefix=False)
 
         if action not in REQUIRED_UPDATE_ACTIONS:
-            return UpdateMediaBuyError(
-                errors=[
-                    Error(
-                        code="unsupported_action",
-                        message=f"Action '{action}' not supported. Supported actions: {REQUIRED_UPDATE_ACTIONS}",
-                        details=None,
-                    )
-                ],
-            )
+            return self._unsupported_action_error(action)
 
         if self.dry_run:
             campaign_id = media_buy_id.replace("kevel_", "")

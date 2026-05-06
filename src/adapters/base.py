@@ -12,6 +12,7 @@ from adcp.types.aliases import Package as ResponsePackage
 from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
 
+from src.adapters.constants import REQUIRED_UPDATE_ACTIONS
 from src.core.audit_logger import get_audit_logger
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
@@ -20,10 +21,12 @@ from src.core.schemas import (
     CreateMediaBuyRequest,
     CreateMediaBuyResponse,
     CreateMediaBuySuccess,
+    Error,
     MediaPackage,
     PackagePerformance,
     Principal,
     ReportingPeriod,
+    UpdateMediaBuyError,
     UpdateMediaBuyResponse,
 )
 
@@ -234,6 +237,40 @@ class AdServerAdapter(ABC):
             self.console.print(f"[dim](dry-run)[/dim] {message}")
         else:
             self.console.print(message)
+
+    def _audit_create_media_buy(self, request: CreateMediaBuyRequest, start_time: datetime, end_time: datetime) -> None:
+        """Emit the standard create_media_buy audit log entry.
+
+        Adapters use this to record the operation against the principal +
+        adapter advertiser ID. Centralised here so adapters share one shape
+        instead of redeclaring the kwargs.
+        """
+        adapter_id = getattr(self, "advertiser_id", None) or "unknown"
+        self.audit_logger.log_operation(
+            operation="create_media_buy",
+            principal_name=self.principal.name,
+            principal_id=self.principal.principal_id,
+            adapter_id=adapter_id,
+            success=True,
+            details={"po_number": request.po_number, "flight_dates": f"{start_time.date()} to {end_time.date()}"},
+        )
+
+    @staticmethod
+    def _unsupported_action_error(action: str) -> UpdateMediaBuyError:
+        """Build the standard ``UpdateMediaBuyError`` for an action we don't recognise.
+
+        ``REQUIRED_UPDATE_ACTIONS`` is the canonical list every adapter validates
+        against; the error message stays consistent across adapters.
+        """
+        return UpdateMediaBuyError(
+            errors=[
+                Error(
+                    code="unsupported_action",
+                    message=f"Action '{action}' not supported. Supported actions: {REQUIRED_UPDATE_ACTIONS}",
+                    details=None,
+                )
+            ]
+        )
 
     def _build_package_responses(
         self,

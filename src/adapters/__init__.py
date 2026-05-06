@@ -11,15 +11,17 @@ from .creative_engine import CreativeEngineAdapter
 from .google_ad_manager import GoogleAdManager as GAMAdapter
 from .kevel import Kevel as KevelAdapter
 from .mock_ad_server import MockAdServer as MockAdapter
+from .triton import TritonAdapter
 
 # Map of adapter type strings to adapter classes
-# 'triton' / 'triton_digital' — being rebuilt against TAP Media Buying API
 ADAPTER_REGISTRY = {
     "gam": GAMAdapter,
     "google_ad_manager": GAMAdapter,
     "broadstreet": BroadstreetAdapter,
     "kevel": KevelAdapter,
     "mock": MockAdapter,
+    "triton": TritonAdapter,
+    "triton_digital": TritonAdapter,
     "creative_engine": CreativeEngineAdapter,
     # 'xandr': XandrAdapter,
     # 'microsoft_monetize': XandrAdapter

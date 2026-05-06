@@ -18,6 +18,7 @@ from flask import Blueprint, jsonify, request
 from spectree import Response, SpecTree
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import attributes
 
 from src.admin.api_schemas.tenant_management import (
     WEBHOOK_EVENT_TYPES,
@@ -411,6 +412,23 @@ def create_tenant():
                     created_at=datetime.now(UTC),
                     updated_at=datetime.now(UTC),
                 )
+            elif adapter_type in {"triton", "triton_digital"}:
+                # Validate Triton credentials through TritonConnectionConfig (encrypts password)
+                from src.adapters.triton import TritonConnectionConfig
+
+                triton_payload = {
+                    k: data[k]
+                    for k in ("username", "password", "base_url", "login_url", "default_advertiser_id")
+                    if k in data
+                }
+                validated = TritonConnectionConfig(**triton_payload)
+                new_adapter = AdapterConfig(
+                    tenant_id=tenant_id,
+                    adapter_type=adapter_type,
+                    config_json=validated.model_dump(),
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
             else:  # mock or other
                 new_adapter = AdapterConfig(
                     tenant_id=tenant_id,
@@ -435,6 +453,8 @@ def create_tenant():
                     default_mappings = {"google_ad_manager": {"advertiser_id": "placeholder"}}
                 elif adapter_type == "kevel":
                     default_mappings = {"kevel": {"advertiser_id": "placeholder"}}
+                elif adapter_type in {"triton", "triton_digital"}:
+                    default_mappings = {"triton": {"advertiser_id": "placeholder"}}
                 else:
                     # For mock and others
                     default_mappings = {"mock": {"advertiser_id": "default"}}
@@ -578,6 +598,17 @@ def update_tenant(tenant_id):
                             adapter.kevel_api_key = adapter_data["kevel_api_key"]
                         if "kevel_manual_approval_required" in adapter_data:
                             adapter.kevel_manual_approval_required = adapter_data["kevel_manual_approval_required"]
+
+                    elif adapter.adapter_type in {"triton", "triton_digital"}:
+                        from src.adapters.triton import TritonConnectionConfig
+
+                        merged = dict(adapter.config_json or {})
+                        for field_name in ("username", "password", "base_url", "login_url", "default_advertiser_id"):
+                            if field_name in adapter_data:
+                                merged[field_name] = adapter_data[field_name]
+                        validated = TritonConnectionConfig(**merged)
+                        adapter.config_json = validated.model_dump()
+                        attributes.flag_modified(adapter, "config_json")
 
                     elif adapter.adapter_type == "mock":
                         if "mock_dry_run" in adapter_data:
