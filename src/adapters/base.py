@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -272,6 +273,128 @@ class AdServerAdapter(ABC):
             ]
         )
 
+    def _empty_delivery_response(
+        self, media_buy_id: str, reporting_period: ReportingPeriod, *, currency: str = "USD"
+    ) -> AdapterGetMediaBuyDeliveryResponse:
+        """Return a delivery response with zero totals.
+
+        Useful for live-mode stubs in adapters whose reporting flow isn't yet
+        wired — the upstream poll loop sees a valid response shape and the
+        adapter signals "no delivery yet" rather than crashing.
+        """
+        from src.core.schemas import DeliveryTotals
+
+        return AdapterGetMediaBuyDeliveryResponse(
+            media_buy_id=media_buy_id,
+            reporting_period=reporting_period,
+            totals=DeliveryTotals(
+                impressions=0,
+                spend=0.0,
+                clicks=0,
+                ctr=0.0,
+                video_completions=0,
+                completion_rate=0.0,
+            ),
+            by_package=[],
+            currency=currency,
+        )
+
+    def _simulated_delivery_response(
+        self,
+        media_buy_id: str,
+        reporting_period: ReportingPeriod,
+        today: datetime,
+        *,
+        target_impressions: int,
+        cpm: float,
+        completion_rate: float = 0.0,
+        flight_days: int = 14,
+        currency: str = "USD",
+    ) -> AdapterGetMediaBuyDeliveryResponse:
+        """Build a synthetic delivery response for dry-run mode.
+
+        Computes elapsed-flight progress from ``today`` vs ``reporting_period``,
+        scales impressions by 95% delivery, and derives spend from CPM. Used by
+        adapters whose live-mode reporting flow isn't yet wired — gives buyers
+        useful numbers in dry-run without committing to a real reporting call.
+        """
+        from src.core.schemas import DeliveryTotals
+
+        days_elapsed = max(0, (today.date() - reporting_period.start.date()).days)
+        progress = min(days_elapsed / float(flight_days), 1.0)
+        impressions = int(target_impressions * progress * 0.95)
+        spend = impressions * cpm / 1000
+        return AdapterGetMediaBuyDeliveryResponse(
+            media_buy_id=media_buy_id,
+            reporting_period=reporting_period,
+            totals=DeliveryTotals(
+                impressions=impressions,
+                spend=spend,
+                clicks=0,
+                ctr=0.0,
+                video_completions=int(impressions * completion_rate) if completion_rate else 0,
+                completion_rate=completion_rate,
+            ),
+            by_package=[],
+            currency=currency,
+        )
+
+    @staticmethod
+    def _resolve_pricing_rate(
+        package: MediaPackage,
+        package_pricing_info: dict[str, dict] | None,
+        *,
+        default_rate_type: str = "CPM",
+    ) -> tuple[float, str]:
+        """Return ``(rate, rate_type)`` for a package, preferring validated pricing info.
+
+        Adapters use this when translating a ``MediaPackage`` into their ad
+        server's flight/line-item payload. ``package_pricing_info`` (AdCP PR #88)
+        carries ``{rate, is_fixed, bid_price, pricing_model}`` per package; if
+        unavailable the adapter falls back to ``package.cpm`` with the default
+        rate type.
+        """
+        rate_type = default_rate_type
+        if package_pricing_info and package.package_id in package_pricing_info:
+            pricing = package_pricing_info[package.package_id]
+            rate = pricing["rate"] if pricing.get("is_fixed") else pricing.get("bid_price", package.cpm)
+            if str(pricing.get("pricing_model", "")).lower() == "flat_rate":
+                rate_type = "FLAT_RATE"
+            return float(rate), rate_type
+        return float(package.cpm), rate_type
+
+    @staticmethod
+    def _validate_targeting_or_error(
+        packages: list[MediaPackage],
+        validator: Callable[[Any], list[str]],
+        *,
+        adapter_name: str,
+    ) -> CreateMediaBuyResponse | None:
+        """Apply a per-package targeting validator and return an error, or None.
+
+        Iterates each package, collects messages from ``validator``, and packages
+        the union into a single ``CreateMediaBuyError`` with the canonical
+        ``unsupported_targeting`` code. Returning ``None`` means validation
+        passed and the adapter should proceed.
+        """
+        from src.core.schemas import CreateMediaBuyError
+
+        unsupported_features: list[str] = []
+        for package in packages:
+            if package.targeting_overlay:
+                unsupported_features.extend(validator(package.targeting_overlay))
+        if not unsupported_features:
+            return None
+        return CreateMediaBuyError(
+            errors=[
+                Error(
+                    code="unsupported_targeting",
+                    message=f"Unsupported targeting for {adapter_name}: {'; '.join(unsupported_features)}",
+                    details=None,
+                )
+            ]
+        )
+
     def _build_package_responses(
         self,
         packages: list[MediaPackage],
@@ -484,12 +607,20 @@ class AdServerAdapter(ABC):
         """
         raise NotImplementedError("Snapshots not supported by this adapter")
 
-    @abstractmethod
     def update_media_buy_performance_index(
         self, media_buy_id: str, package_performance: list[PackagePerformance]
     ) -> bool:
-        """Updates the performance index for packages in a media buy."""
-        pass
+        """Update performance indexes for packages in a media buy.
+
+        Default implementation logs in dry-run and returns success — appropriate
+        for ad servers that have no native performance-index endpoint. Adapters
+        whose platforms do support priority/index updates (e.g. Kevel) override
+        this with a real implementation.
+        """
+        if self.dry_run:
+            for perf in package_performance:
+                self.log(f"  {perf.package_id}: index={perf.performance_index:.2f}")
+        return True
 
     @abstractmethod
     def update_media_buy(

@@ -37,11 +37,23 @@ Connect to Triton Digital's TAP Media Buying API for streaming audio and podcast
 
 [Get started with Triton](triton/)
 
+### [FreeWheel](freewheel/)
+
+Connect to Comcast/FreeWheel's Publisher API for video and CTV advertising.
+
+- OAuth2 `client_credentials` authentication (7-day bearer token)
+- Campaign + line item creation against `api.freewheel.tv`
+- Placement, targeting profile, and custom key-value targeting
+- CPM and FLAT_RATE pricing
+
+[Get started with FreeWheel](freewheel/)
+
 ## Choosing an Adapter
 
 | Adapter | Use Case |
 |---------|----------|
 | **GAM** | Production deployments with Google Ad Manager |
+| **FreeWheel** | Video + CTV inventory via Comcast/FreeWheel Publisher API |
 | **Triton** | Streaming audio + podcast inventory via TAP |
 | **Mock** | Testing, demos, development |
 

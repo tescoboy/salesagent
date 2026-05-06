@@ -106,6 +106,9 @@ def get_tenant_config_from_db(tenant_id):
                 elif adapter_type in {"triton", "triton_digital"}:
                     if adapter_obj.config_json:
                         adapter_config[adapter_type].update(adapter_obj.config_json)
+                elif adapter_type == "freewheel":
+                    if adapter_obj.config_json:
+                        adapter_config[adapter_type].update(adapter_obj.config_json)
 
                 config["adapters"] = adapter_config
 

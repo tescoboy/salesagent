@@ -34,10 +34,8 @@ from src.core.schemas import (
     CreateMediaBuyError,
     CreateMediaBuyRequest,
     CreateMediaBuyResponse,
-    DeliveryTotals,
     Error,
     MediaPackage,
-    PackagePerformance,
     Principal,
     ReportingPeriod,
     UpdateMediaBuyError,
@@ -145,17 +143,6 @@ class TritonAdapter(AdServerAdapter):
             "externalCode": package.package_id,
         }
 
-    def _resolve_rate(self, package: MediaPackage, package_pricing_info: dict[str, dict] | None) -> tuple[float, str]:
-        """Return (rate, rate_type) for a package, preferring validated pricing info."""
-        rate_type = "CPM"
-        if package_pricing_info and package.package_id in package_pricing_info:
-            pricing = package_pricing_info[package.package_id]
-            rate = pricing["rate"] if pricing.get("is_fixed") else pricing.get("bid_price", package.cpm)
-            if str(pricing.get("pricing_model", "")).lower() == "flat_rate":
-                rate_type = "FLAT_RATE"
-            return float(rate), rate_type
-        return float(package.cpm), rate_type
-
     # ----- create_media_buy -----
 
     def create_media_buy(
@@ -168,25 +155,13 @@ class TritonAdapter(AdServerAdapter):
     ) -> CreateMediaBuyResponse:
         self._audit_create_media_buy(request, start_time, end_time)
 
-        # Pre-flight targeting validation
-        unsupported_features: list[str] = []
-        for package in packages:
-            if package.targeting_overlay:
-                unsupported_features.extend(validate_targeting(package.targeting_overlay))
-        if unsupported_features:
-            return CreateMediaBuyError(
-                errors=[
-                    Error(
-                        code="unsupported_targeting",
-                        message=f"Unsupported targeting features for Triton: {'; '.join(unsupported_features)}",
-                        details=None,
-                    )
-                ]
-            )
+        targeting_error = self._validate_targeting_or_error(packages, validate_targeting, adapter_name="Triton")
+        if targeting_error is not None:
+            return targeting_error
 
         total_budget = 0.0
         for package in packages:
-            rate, _ = self._resolve_rate(package, package_pricing_info)
+            rate, _ = self._resolve_pricing_rate(package, package_pricing_info)
             total_budget += rate * package.impressions / 1000
 
         media_buy_id = (
@@ -200,7 +175,7 @@ class TritonAdapter(AdServerAdapter):
                 f"start={start_time.date()}, end={end_time.date()}, totalBudget={total_budget:.2f}"
             )
             for package in packages:
-                rate, rate_type = self._resolve_rate(package, package_pricing_info)
+                rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
                 payload = self._flight_payload(package, rate, rate_type, start_time, end_time)
                 self.log(f"Would call: POST {self.base_url}/campaigns/{media_buy_id}/flights")
                 self.log(f"  Flight: {payload}")
@@ -222,7 +197,7 @@ class TritonAdapter(AdServerAdapter):
             )
             campaign_id = str(campaign.get("id") or campaign.get("Id"))
             for package in packages:
-                rate, rate_type = self._resolve_rate(package, package_pricing_info)
+                rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
                 self._client.create_flight(
                     campaign_id, self._flight_payload(package, rate, rate_type, start_time, end_time)
                 )
@@ -294,39 +269,12 @@ class TritonAdapter(AdServerAdapter):
         flow lands in a follow-up. For now: dry-run returns simulated numbers,
         live mode returns zeros so the upstream poll loop sees a valid shape.
         """
-        if self.dry_run:
-            days_elapsed = max(0, (today.date() - date_range.start.date()).days)
-            progress = min(days_elapsed / 14.0, 1.0)
-            impressions = int(500_000 * progress * 0.95)
-            spend = impressions * 10 / 1000
-            totals = DeliveryTotals(
-                impressions=impressions,
-                spend=spend,
-                clicks=0,
-                ctr=0.0,
-                video_completions=0,
-                completion_rate=0.0,
-            )
-        else:
-            totals = DeliveryTotals(
-                impressions=0, spend=0.0, clicks=0, ctr=0.0, video_completions=0, completion_rate=0.0
-            )
-        return AdapterGetMediaBuyDeliveryResponse(
-            media_buy_id=media_buy_id,
-            reporting_period=date_range,
-            totals=totals,
-            by_package=[],
-            currency="USD",
-        )
+        if not self.dry_run:
+            return self._empty_delivery_response(media_buy_id, date_range)
 
-    def update_media_buy_performance_index(
-        self, media_buy_id: str, package_performance: list[PackagePerformance]
-    ) -> bool:
-        """Triton TAP has no native performance-index endpoint; log and return success."""
-        if self.dry_run:
-            for perf in package_performance:
-                self.log(f"  {perf.package_id}: index={perf.performance_index:.2f}")
-        return True
+        return self._simulated_delivery_response(media_buy_id, date_range, today, target_impressions=500_000, cpm=10.0)
+
+    # Triton TAP has no native performance-index endpoint — base default applies.
 
     # ----- update_media_buy -----
 

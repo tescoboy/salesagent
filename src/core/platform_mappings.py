@@ -14,6 +14,7 @@ ADAPTER_PLATFORM_MAP: dict[str, str] = {
     "kevel": "kevel",
     "triton": "triton",
     "broadstreet": "broadstreet",
+    "freewheel": "freewheel",
     "mock": "mock",
 }
 
@@ -23,6 +24,7 @@ _OLD_FIELD_MAP: dict[str, str] = {
     "kevel": "kevel_advertiser_id",
     "triton": "triton_advertiser_id",
     "broadstreet": "broadstreet_advertiser_id",
+    "freewheel": "freewheel_advertiser_id",
     "mock": "mock_advertiser_id",
 }
 

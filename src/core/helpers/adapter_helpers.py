@@ -44,6 +44,7 @@ def build_agent_config(agent: _HasAgentFields) -> AgentConfig:
     )
 
 
+from src.adapters.freewheel import FreeWheelAdapter
 from src.adapters.google_ad_manager import GoogleAdManager
 from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
@@ -54,7 +55,7 @@ from src.core.schemas import Principal
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonAdapter:
+) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonAdapter | FreeWheelAdapter:
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:
@@ -150,8 +151,16 @@ def get_adapter(
                 # TritonConnectionConfig field validator when the schema rehydrates.
                 stored = config_row.config_json or {}
                 if stored:
-                    validated = TritonAdapter.connection_config_class(**stored)
-                    adapter_config.update(validated.model_dump(exclude_none=True))
+                    triton_validated = TritonAdapter.connection_config_class(**stored)
+                    adapter_config.update(triton_validated.model_dump(exclude_none=True))
+            elif adapter_type == "freewheel":
+                # FreeWheel credentials live in config_json (OAuth client_id/client_secret,
+                # network_id, environment). client_secret is decrypted by the
+                # FreeWheelConnectionConfig field validator on rehydration.
+                stored = config_row.config_json or {}
+                if stored:
+                    fw_validated = FreeWheelAdapter.connection_config_class(**stored)
+                    adapter_config.update(fw_validated.model_dump(exclude_none=True))
 
     if not selected_adapter:
         # Default to mock if no adapter specified
@@ -191,6 +200,8 @@ def get_adapter(
         return Kevel(adapter_config, principal, dry_run, tenant_id=tenant_id)
     elif selected_adapter in {"triton", "triton_digital"}:
         return TritonAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "freewheel":
+        return FreeWheelAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
         # Default to mock for unsupported adapters
         return MockAdServerAdapter(

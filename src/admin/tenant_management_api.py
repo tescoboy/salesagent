@@ -429,6 +429,23 @@ def create_tenant():
                     created_at=datetime.now(UTC),
                     updated_at=datetime.now(UTC),
                 )
+            elif adapter_type == "freewheel":
+                # Validate FreeWheel credentials through FreeWheelConnectionConfig (encrypts client_secret)
+                from src.adapters.freewheel import FreeWheelConnectionConfig
+
+                fw_payload = {
+                    k: data[k]
+                    for k in ("client_id", "client_secret", "network_id", "environment", "default_advertiser_id")
+                    if k in data
+                }
+                validated = FreeWheelConnectionConfig(**fw_payload)
+                new_adapter = AdapterConfig(
+                    tenant_id=tenant_id,
+                    adapter_type=adapter_type,
+                    config_json=validated.model_dump(),
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
             else:  # mock or other
                 new_adapter = AdapterConfig(
                     tenant_id=tenant_id,
@@ -455,6 +472,8 @@ def create_tenant():
                     default_mappings = {"kevel": {"advertiser_id": "placeholder"}}
                 elif adapter_type in {"triton", "triton_digital"}:
                     default_mappings = {"triton": {"advertiser_id": "placeholder"}}
+                elif adapter_type == "freewheel":
+                    default_mappings = {"freewheel": {"advertiser_id": "placeholder"}}
                 else:
                     # For mock and others
                     default_mappings = {"mock": {"advertiser_id": "default"}}
@@ -607,6 +626,23 @@ def update_tenant(tenant_id):
                             if field_name in adapter_data:
                                 merged[field_name] = adapter_data[field_name]
                         validated = TritonConnectionConfig(**merged)
+                        adapter.config_json = validated.model_dump()
+                        attributes.flag_modified(adapter, "config_json")
+
+                    elif adapter.adapter_type == "freewheel":
+                        from src.adapters.freewheel import FreeWheelConnectionConfig
+
+                        merged = dict(adapter.config_json or {})
+                        for field_name in (
+                            "client_id",
+                            "client_secret",
+                            "network_id",
+                            "environment",
+                            "default_advertiser_id",
+                        ):
+                            if field_name in adapter_data:
+                                merged[field_name] = adapter_data[field_name]
+                        validated = FreeWheelConnectionConfig(**merged)
                         adapter.config_json = validated.model_dump()
                         attributes.flag_modified(adapter, "config_json")
 

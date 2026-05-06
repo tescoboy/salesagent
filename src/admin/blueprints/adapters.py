@@ -247,6 +247,75 @@ def get_adapter_capabilities(adapter_type, tenant_id, **kwargs):
         return jsonify({})
 
 
+# FreeWheel-specific endpoints
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/freewheel/test-connection", methods=["POST"])
+@require_tenant_access()
+def test_freewheel_connection(tenant_id, **kwargs):
+    """Verify FreeWheel OAuth credentials by performing a client_credentials token fetch.
+
+    Accepts ``client_id``, ``network_id``, ``environment`` (production/staging) and
+    ``client_secret`` (optional — falls back to the encrypted secret already stored
+    on AdapterConfig.config_json).
+    """
+    try:
+        data = request.get_json() or {}
+        client_id = data.get("client_id")
+        client_secret = data.get("client_secret")
+        network_id = data.get("network_id")
+        environment = data.get("environment", "production")
+
+        if not client_id or not network_id:
+            return jsonify({"success": False, "error": "client_id and network_id are required"}), 400
+
+        if not client_secret:
+            with get_db_session() as session:
+                stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
+                existing = session.scalars(stmt).first()
+                if existing and existing.config_json:
+                    from src.adapters.freewheel import FreeWheelConnectionConfig
+
+                    try:
+                        rehydrated = FreeWheelConnectionConfig.model_validate(existing.config_json)
+                        client_secret = rehydrated.client_secret
+                    except ValidationError:
+                        client_secret = None
+        if not client_secret:
+            return (
+                jsonify({"success": False, "error": "client_secret is required for first connection test"}),
+                400,
+            )
+
+        from src.adapters.freewheel import FreeWheelAPIError, FreeWheelClient
+        from src.adapters.freewheel.schemas import FREEWHEEL_HOSTS
+
+        base_url = FREEWHEEL_HOSTS.get(environment, FREEWHEEL_HOSTS["production"])
+        client = FreeWheelClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            network_id=network_id,
+            base_url=base_url,
+        )
+        try:
+            client._fetch_token()
+        except FreeWheelAPIError as exc:
+            return jsonify({"success": False, "error": str(exc)}), 200
+
+        network_name: str | None = None
+        try:
+            network = client.get_network()
+            network_name = network.get("name") or network.get("displayName")
+        except FreeWheelAPIError:
+            pass  # Token works; network endpoint specifics may vary
+
+        return jsonify({"success": True, "environment": environment, "network_name": network_name})
+
+    except Exception as e:
+        logger.error(f"FreeWheel connection test failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # Triton-specific endpoints
 
 

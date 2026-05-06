@@ -22,6 +22,7 @@ def is_tenant_ad_server_configured(tenant_id: str) -> bool:
     - For GAM: OAuth token OR service account credentials exist
     - For Kevel: API key exists
     - For Triton: publisher username/password exist in config_json
+    - For FreeWheel: OAuth client_id/client_secret/network_id exist in config_json
     - For Mock: Always configured
     - For others: Adapter config exists
 
@@ -84,6 +85,13 @@ def is_tenant_ad_server_configured(tenant_id: str) -> bool:
                 has_creds = bool(config.get("username") and config.get("password"))
                 if not has_creds:
                     logger.info(f"Tenant {tenant_id} Triton adapter missing publisher credentials")
+                return has_creds
+
+            elif adapter_type == "freewheel":
+                config = adapter_config.config_json or {}
+                has_creds = bool(config.get("client_id") and config.get("client_secret") and config.get("network_id"))
+                if not has_creds:
+                    logger.info(f"Tenant {tenant_id} FreeWheel adapter missing OAuth credentials")
                 return has_creds
 
             else:
@@ -170,6 +178,15 @@ def get_tenant_status(tenant_id: str) -> dict:
                     missing_config.append("Triton publisher email not set")
                 if not config.get("password"):
                     missing_config.append("Triton publisher password not set")
+
+            elif adapter_type == "freewheel":
+                config = adapter_config.config_json or {}
+                if not config.get("client_id"):
+                    missing_config.append("FreeWheel OAuth client_id not set")
+                if not config.get("client_secret"):
+                    missing_config.append("FreeWheel OAuth client_secret not set")
+                if not config.get("network_id"):
+                    missing_config.append("FreeWheel network_id not set")
 
             # Mock adapter doesn't need additional config
             status["is_configured"] = len(missing_config) == 0
