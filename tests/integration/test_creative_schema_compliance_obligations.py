@@ -59,18 +59,23 @@ class TestAllAssetTypesAcceptedThroughSync:
     Covers: UC-006-CREATIVE-SCHEMA-COMPLIANCE-10
     """
 
-    ASSET_TYPES = [
-        "image",
-        "video",
-        "audio",
-        "text",
-        "markdown",
-        "html",
-        "css",
-        "javascript",
-        "vast",
-        "daast",
-        "promoted_offerings",
+    # adcp 4.4 splits asset-value shape by ``asset_type``: image/video/audio/
+    # vast/daast/url/webhook/catalog all require URL (and image/video need
+    # width+height); text/markdown/html/css/javascript/promoted_offerings/brief
+    # accept ``content``. The test fixture covers each by shape so the
+    # SDK validators on both wire and Python paths accept every entry.
+    ASSET_TYPES_BY_SHAPE: list[tuple[str, dict]] = [
+        ("image", {"url": "https://example.com/img.png", "width": 300, "height": 250}),
+        ("video", {"url": "https://example.com/vid.mp4", "width": 640, "height": 360}),
+        ("audio", {"url": "https://example.com/aud.mp3"}),
+        ("text", {"content": "test text content"}),
+        ("markdown", {"content": "# heading"}),
+        ("html", {"content": "<div>hi</div>"}),
+        ("css", {"content": ".x{}"}),
+        ("javascript", {"content": "alert(1)"}),
+        ("vast", {"url": "https://example.com/vast.xml"}),
+        ("daast", {"url": "https://example.com/daast.xml"}),
+        ("promoted_offerings", {"content": "Widget Pro | $99"}),
     ]
 
     def test_all_11_asset_types_accepted(self, integration_db):
@@ -82,21 +87,21 @@ class TestAllAssetTypesAcceptedThroughSync:
             env.setup_default_data()
 
             creatives = []
-            for asset_type in self.ASSET_TYPES:
+            for asset_type, shape in self.ASSET_TYPES_BY_SHAPE:
                 creatives.append(
                     _make_creative_asset(
                         creative_id=f"c_{asset_type}",
                         name=f"Test {asset_type}",
-                        assets={asset_type: {"content": f"test {asset_type} content"}},
+                        assets={asset_type: {"asset_type": asset_type, **shape}},
                     )
                 )
 
             response = env.call_impl(creatives=creatives)
 
             # All 11 should succeed (created action, no failures)
-            assert len(response.creatives) == len(self.ASSET_TYPES)
+            assert len(response.creatives) == len(self.ASSET_TYPES_BY_SHAPE)
             actions = {r.creative_id: r.action for r in response.creatives}
-            for asset_type in self.ASSET_TYPES:
+            for asset_type, _ in self.ASSET_TYPES_BY_SHAPE:
                 cid = f"c_{asset_type}"
                 assert cid in actions, f"Missing result for creative with {asset_type} asset"
                 assert actions[cid] == CreativeAction.created, (
@@ -112,11 +117,11 @@ class TestAllAssetTypesAcceptedThroughSync:
             env.setup_default_data()
 
             # Sync one creative with each asset type
-            for asset_type in self.ASSET_TYPES:
+            for asset_type, shape in self.ASSET_TYPES_BY_SHAPE:
                 creative = _make_creative_asset(
                     creative_id=f"c_rt_{asset_type}",
                     name=f"Roundtrip {asset_type}",
-                    assets={asset_type: {"content": f"{asset_type} data"}},
+                    assets={asset_type: {"asset_type": asset_type, **shape}},
                 )
                 response = env.call_impl(creatives=[creative])
                 assert response.creatives[0].action == CreativeAction.created
@@ -126,7 +131,7 @@ class TestAllAssetTypesAcceptedThroughSync:
             list_response = env.call_impl()
 
             returned_ids = {c.creative_id for c in list_response.creatives}
-            for asset_type in self.ASSET_TYPES:
+            for asset_type, _ in self.ASSET_TYPES_BY_SHAPE:
                 cid = f"c_rt_{asset_type}"
                 assert cid in returned_ids, f"Creative with {asset_type} asset not found in list response"
 
