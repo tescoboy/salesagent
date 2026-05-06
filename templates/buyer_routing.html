@@ -376,7 +376,7 @@
     <table class="br-table">
         <thead>
             <tr>
-                {% if not tenant.is_embedded %}<th>Agent</th>{% endif %}
+                {% if not embedded_view %}<th>Agent</th>{% endif %}
                 <th>Operator</th>
                 <th>Brand house</th>
                 <th>Brand id</th>
@@ -393,7 +393,7 @@
                     data-rule-brand-house="{{ rule.brand_house or '' }}"
                     data-rule-brand-id="{{ rule.brand_id or '' }}"
                     data-rule-gam-advertiser-id="{{ rule.gam_advertiser_id }}">
-                    {% if not tenant.is_embedded %}
+                    {% if not embedded_view %}
                     <td>{{ rule.principal_id if rule.principal_id else "—" }}</td>
                     {% endif %}
                     <td>{{ rule.operator_domain }}</td>
@@ -408,7 +408,7 @@
                 {% endfor %}
             {% else %}
                 <tr>
-                    <td colspan="{{ 6 if not tenant.is_embedded else 5 }}" class="br-empty">
+                    <td colspan="{{ 6 if not embedded_view else 5 }}" class="br-empty">
                         No routing rules yet. All buys fall through to the default advertiser.
                     </td>
                 </tr>
@@ -429,7 +429,7 @@
     <table class="br-table">
         <thead>
             <tr>
-                {% if not tenant.is_embedded %}<th>Agent</th>{% endif %}
+                {% if not embedded_view %}<th>Agent</th>{% endif %}
                 <th>Operator</th>
                 <th>Brand house</th>
                 <th>Brand id</th>
@@ -447,7 +447,7 @@
                     data-activity-operator-domain="{{ row.operator_domain }}"
                     data-activity-brand-house="{{ row.brand_house or '' }}"
                     data-activity-brand-id="{{ row.brand_id or '' }}">
-                    {% if not tenant.is_embedded %}
+                    {% if not embedded_view %}
                     <td>{{ row.principal_id if row.principal_id else "—" }}</td>
                     {% endif %}
                     <td>{{ row.operator_domain }}</td>
@@ -465,7 +465,7 @@
                 {% endfor %}
             {% else %}
                 <tr>
-                    <td colspan="{{ 8 if not tenant.is_embedded else 7 }}" class="br-empty">
+                    <td colspan="{{ 8 if not embedded_view else 7 }}" class="br-empty">
                         No buyer activity in the last 30 days.
                     </td>
                 </tr>
@@ -491,7 +491,7 @@
             <table class="br-table">
                 <thead>
                     <tr>
-                        {% if not tenant.is_embedded %}<th>Agent</th>{% endif %}
+                        {% if not embedded_view %}<th>Agent</th>{% endif %}
                         <th>Operator</th>
                         <th>Brand house</th>
                         <th>Brand id</th>
@@ -502,7 +502,7 @@
                 <tbody>
                     {% for row in sandbox_rows %}
                     <tr>
-                        {% if not tenant.is_embedded %}
+                        {% if not embedded_view %}
                         <td>{{ row.principal_id if row.principal_id else "—" }}</td>
                         {% endif %}
                         <td>{{ row.operator_domain }}</td>
@@ -529,7 +529,7 @@
         <div class="br-modal-error" data-rule-modal-error></div>
         <form data-rule-form onsubmit="return false;">
             <input type="hidden" data-rule-form-id>
-            {% if not tenant.is_embedded %}
+            {% if not embedded_view %}
             <label>Agent (principal_id) <span style="color: #9ca3af; font-weight: normal;">— optional, blank = any agent</span></label>
             <input type="text" data-rule-form-principal-id placeholder="e.g. wstruck-buy">
             {% endif %}
@@ -574,7 +574,7 @@
     // Reverse-proxy aware base URL — never hardcode "/admin/" anywhere.
     const scriptRoot = '{{ request.script_root }}' || '';
     const tenantId = {{ tenant.tenant_id | tojson }};
-    const isEmbedded = {{ tenant.is_embedded | tojson }};
+    const isEmbedded = {{ embedded_view | tojson }};
     const baseUrl = scriptRoot + '/tenant/' + encodeURIComponent(tenantId) + '/buyer-routing';
 
     function showToast(message, type) {

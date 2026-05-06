@@ -8,6 +8,7 @@ from sqlalchemy import String, func, or_, select
 
 from src.admin.utils import execute_limited, get_tenant_config_from_db, require_auth, require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_mode_auth import is_embedded_view
 from src.core.database.database_session import get_db_session
 from src.core.database.models import GAMInventory, GAMOrder, MediaBuy, Principal, Tenant
 
@@ -44,12 +45,14 @@ def targeting_browser(tenant_id):
             }
 
         # Pass tenant data including ad_server (needed for AXE key save)
-        # and is_embedded so the template can hide the Sync button.
+        # and is_embedded so the template can hide the Sync button. The
+        # is_embedded flag reflects the *current view* (header-auth preview
+        # OR a permanently embedded tenant), not just the persisted flag.
         tenant = {
             "tenant_id": tenant_obj.tenant_id,
             "name": tenant_obj.name,
             "ad_server": tenant_obj.ad_server or "",
-            "is_embedded": bool(tenant_obj.is_embedded),
+            "is_embedded": is_embedded_view(tenant_obj),
             "external_source": tenant_obj.external_source,
         }
 
@@ -334,11 +337,13 @@ def inventory_browser(tenant_id):
         if not tenant:
             return "Tenant not found", 404
 
-        if tenant.is_embedded:
-            # Embedded tenants don't get the per-tenant Sync Inventory page —
+        if is_embedded_view(tenant):
+            # Embedded views don't get the per-tenant Sync Inventory page —
             # the host drives sync via POST /tenants/<id>/refresh. Redirect
             # the deep-link to Browse Inventory (the read-only inventory
-            # surface that embedded publishers DO use).
+            # surface that embedded publishers DO use). Also fires for
+            # preview requests on a non-embedded tenant authenticated via
+            # headers.
             return redirect(url_for("inventory.inventory_browse", tenant_id=tenant.tenant_id))
 
         adapter_type = tenant.ad_server or "mock"
@@ -413,7 +418,7 @@ def _load_tenant_for_inventory(tenant_id):
             "tenant_id": tenant.tenant_id,
             "name": tenant.name,
             "virtual_host": tenant.virtual_host,
-            "is_embedded": bool(tenant.is_embedded),
+            "is_embedded": is_embedded_view(tenant),
         }
     return tenant_dict, is_gam, adapter_type, None
 

@@ -400,11 +400,21 @@ def create_app(config=None):
         # column > None). Cached on ``g`` so the Jinja ``with_embed_root``
         # filter can pull it without re-resolving per template render.
         from src.admin.utils.breadcrumbs import resolve_embed_breadcrumb_root
+        from src.admin.utils.embedded_mode_auth import is_embedded_view
 
         tenant_for_breadcrumb = context.get("tenant") or getattr(g, "tenant", None)
         embed_root = resolve_embed_breadcrumb_root(tenant_for_breadcrumb)
         g.embed_breadcrumb_root = embed_root
         context["embed_breadcrumb_root"] = embed_root
+
+        # Effective embedded-rendering flag for templates. Combines the
+        # per-request signal (header auth) with the persistent tenant flag
+        # so preview requests on a non-embedded tenant render the same
+        # chrome/lock surfaces as a permanently-embedded tenant. Templates
+        # should prefer ``embedded_view`` over ``tenant.is_embedded`` for
+        # rendering decisions; the raw flag is still exposed for tenant-
+        # policy expressions that describe the tenant itself.
+        context["embedded_view"] = is_embedded_view(tenant_for_breadcrumb)
 
         return context
 

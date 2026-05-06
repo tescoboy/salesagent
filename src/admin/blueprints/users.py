@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_mode_auth import is_embedded_view
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantAuthConfig, User
 
@@ -18,17 +19,48 @@ logger = logging.getLogger(__name__)
 users_bp = Blueprint("users", __name__, url_prefix="/tenant/<tenant_id>/users")
 
 
+def _reject_if_embedded(tenant_id: str):
+    """Block user-management mutations on embedded views (preview or required).
+
+    User records, domain authorization, and auth-setup-mode are owned by the
+    upstream platform on embedded tenants — the publisher-facing UI hides the
+    affordances behind ``_embedded_locked_page.html`` but a header-auth caller
+    could still POST directly to these endpoints. Returns a 403 JSON response
+    when the request is in embedded view, otherwise ``None`` (caller proceeds).
+
+    Same gate covers permanently-embedded tenants (closes a pre-existing hole)
+    and preview requests on non-embedded tenants (the new opt-in cell).
+    """
+    from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+    with get_db_session() as db_session:
+        tenant = TenantConfigRepository(db_session, tenant_id).get_tenant()
+    if tenant is not None and is_embedded_view(tenant):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "User management is platform-managed for embedded tenants.",
+                }
+            ),
+            403,
+        )
+    return None
+
+
 @users_bp.route("")
 @require_tenant_access()
 def list_users(tenant_id):
     """List users for a tenant.
 
-    On embedded tenants the page is replaced with the platform-managed
+    On embedded views the page is replaced with the platform-managed
     lock banner — identity flows through ``X-Identity-*`` headers per the
     embedded-mode identity contract, so there are no salesagent-side User
     records to manage. Returns 200 (not 404) so deep-links from the
     setup-task panel land on a "managed by your platform" explanation
-    rather than a dead end.
+    rather than a dead end. Also fires for *preview* requests on a
+    non-embedded tenant authenticated via headers, so the iframe view
+    matches what production-embedded looks like.
     """
     with get_db_session() as db_session:
         tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -36,7 +68,7 @@ def list_users(tenant_id):
             flash("Tenant not found", "error")
             return redirect(url_for("core.index"))
 
-        if tenant.is_embedded:
+        if is_embedded_view(tenant):
             return render_template("_embedded_locked_page.html", tenant=tenant), 200
 
         stmt = select(User).filter_by(tenant_id=tenant_id).order_by(User.email)
@@ -85,6 +117,9 @@ def list_users(tenant_id):
 )
 def add_user(tenant_id):
     """Add a new user to the tenant."""
+    rejected = _reject_if_embedded(tenant_id)
+    if rejected is not None:
+        return rejected
     try:
         email = request.form.get("email", "").strip().lower()
         role = request.form.get("role", "viewer")
@@ -140,6 +175,9 @@ def add_user(tenant_id):
 @require_tenant_access()
 def toggle_user(tenant_id, user_id):
     """Toggle user active status."""
+    rejected = _reject_if_embedded(tenant_id)
+    if rejected is not None:
+        return rejected
     try:
         with get_db_session() as db_session:
             user = db_session.scalars(select(User).filter_by(tenant_id=tenant_id, user_id=user_id)).first()
@@ -165,6 +203,9 @@ def toggle_user(tenant_id, user_id):
 @require_tenant_access()
 def update_role(tenant_id, user_id):
     """Update user role."""
+    rejected = _reject_if_embedded(tenant_id)
+    if rejected is not None:
+        return rejected
     try:
         new_role = request.form.get("role")
         if not new_role or new_role not in ["admin", "manager", "viewer"]:
@@ -194,6 +235,9 @@ def update_role(tenant_id, user_id):
 @log_admin_action("add_domain", extract_details=lambda r, **kw: {"domain": request.json.get("domain")})
 def add_domain(tenant_id):
     """Add an authorized domain for the tenant."""
+    rejected = _reject_if_embedded(tenant_id)
+    if rejected is not None:
+        return rejected
     try:
         data = request.json
         domain = data.get("domain", "").strip().lower()
@@ -237,6 +281,9 @@ def add_domain(tenant_id):
 @log_admin_action("remove_domain", extract_details=lambda r, **kw: {"domain": request.json.get("domain")})
 def remove_domain(tenant_id):
     """Remove an authorized domain from the tenant."""
+    rejected = _reject_if_embedded(tenant_id)
+    if rejected is not None:
+        return rejected
     try:
         data = request.json
         domain = data.get("domain", "").strip().lower()
@@ -277,6 +324,9 @@ def disable_setup_mode(tenant_id):
     Once disabled, test credentials no longer work and only SSO authentication is allowed.
     Requires the user to be logged in via SSO to prevent lockout.
     """
+    rejected = _reject_if_embedded(tenant_id)
+    if rejected is not None:
+        return rejected
     try:
         # Require the user to be logged in via SSO (not test credentials)
         # This ensures they can actually authenticate via SSO before disabling test auth
@@ -328,7 +378,26 @@ def enable_setup_mode(tenant_id):
     """Re-enable auth setup mode for the tenant.
 
     This allows test credentials to work again, useful for troubleshooting.
+    Requires an authenticated SSO session: re-enabling the test-credentials
+    backdoor must not be reachable via header-auth (preview / embedded) or
+    via the test-credentials password backdoor itself, otherwise an attacker
+    who reaches this endpoint can flip the tenant back into setup mode and
+    chain into full OAuth-equivalent access.
     """
+    rejected = _reject_if_embedded(tenant_id)
+    if rejected is not None:
+        return rejected
+    auth_method = session.get("auth_method")
+    if auth_method != "oidc":
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "You must be logged in via SSO to re-enable setup mode.",
+                }
+            ),
+            403,
+        )
     try:
         with get_db_session() as db_session:
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
