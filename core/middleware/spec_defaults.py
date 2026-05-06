@@ -109,18 +109,56 @@ def _apply_auth_filled_defaults(args: dict[str, Any]) -> None:
     args.setdefault("idempotency_key", f"idem-{uuid.uuid4()}")
 
 
+_DEFAULT_FORMAT_AGENT_URL = "https://creative.adcontextprotocol.org/"
+
+
+def _normalise_format_id(creative: dict[str, Any]) -> None:
+    """Wrap a string ``format_id`` as a FormatReferenceStructuredObject.
+
+    adcp 4.4 made ``format_id`` a structured ``{agent_url, id}`` reference.
+    Pre-4.4 buyer payloads pass a bare string — wrap so SDK validation
+    picks the correct union arm.
+    """
+    fid = creative.get("format_id")
+    if isinstance(fid, str):
+        creative["format_id"] = {
+            "agent_url": _DEFAULT_FORMAT_AGENT_URL,
+            "id": fid,
+        }
+
+
+def _demote_image_without_dims(value: dict[str, Any]) -> None:
+    """If asset_type is ``image`` but width/height are missing, fall back to
+    ``url`` — the URL-only variant has no dim requirement and accepts the
+    same payload.
+
+    Pre-4.4 buyer payloads frequently declare ``asset_type="image"`` for
+    any image-like URL without supplying dimensions; the strict 4.4
+    image variant rejects them.
+    """
+    if value.get("asset_type") != "image":
+        return
+    if "width" in value and "height" in value:
+        return
+    if "url" in value:
+        value["asset_type"] = "url"
+
+
 def _backfill_asset_types(creatives: Any) -> None:
     """Inject missing ``asset_type`` on every asset value in ``creatives[*].assets``.
 
     Mutates the list in place. Called for ``sync_creatives`` so the SDK
     typed-dispatcher's discriminator can pick a branch on payloads minted
-    with the pre-4.4 shape.
+    with the pre-4.4 shape. Also normalises ``format_id`` from string to
+    FormatReferenceStructuredObject and demotes image→url when dims are
+    missing.
     """
     if not isinstance(creatives, list):
         return
     for creative in creatives:
         if not isinstance(creative, dict):
             continue
+        _normalise_format_id(creative)
         assets = creative.get("assets")
         if not isinstance(assets, dict):
             continue
@@ -130,6 +168,7 @@ def _backfill_asset_types(creatives: Any) -> None:
             inferred = _infer_asset_type(key, value)
             if inferred is not None:
                 value["asset_type"] = inferred
+            _demote_image_without_dims(value)
 
 
 def _patch_mcp_tools_call(payload: dict[str, Any]) -> dict[str, Any]:
