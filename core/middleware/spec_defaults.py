@@ -50,6 +50,46 @@ _AUTH_FILLED_TOOLS: frozenset[str] = frozenset({"sync_creatives", "sync_accounts
 _AUTH_CHAIN_ACCOUNT_REF = {"account_id": "auth-chain"}
 
 
+#: Asset key names that map to a known ``asset_type`` literal. When a buyer
+#: sends ``{"image": {...}}`` without an explicit ``asset_type`` field, the
+#: SDK's typed dispatcher rejects the payload because the
+#: ``AssetVariant`` discriminated union can't pick a branch. Mirror the
+#: schema-side inference (``src.core.schemas._asset_type_compat``) at the
+#: wire boundary so adcp-4.4 strictness doesn't break pre-v3 callers.
+_KNOWN_ASSET_TYPES = frozenset(
+    {
+        "image",
+        "video",
+        "audio",
+        "vast",
+        "text",
+        "url",
+        "html",
+        "javascript",
+        "webhook",
+        "css",
+        "daast",
+        "markdown",
+        "brief",
+        "catalog",
+    }
+)
+
+
+def _infer_asset_type(key: str, value: dict[str, Any]) -> str | None:
+    if "asset_type" in value:
+        return None
+    if key in _KNOWN_ASSET_TYPES:
+        return key
+    has_content = "content" in value
+    has_url = "url" in value
+    if has_content and not has_url:
+        return "text"
+    if has_url and not has_content:
+        return "image"
+    return None
+
+
 def _apply_get_products_defaults(args: dict[str, Any]) -> None:
     for field, default in _GET_PRODUCTS_DEFAULTS.items():
         args.setdefault(field, default)
@@ -58,6 +98,29 @@ def _apply_get_products_defaults(args: dict[str, Any]) -> None:
 def _apply_auth_filled_defaults(args: dict[str, Any]) -> None:
     args.setdefault("account", _AUTH_CHAIN_ACCOUNT_REF)
     args.setdefault("idempotency_key", f"idem-{uuid.uuid4()}")
+
+
+def _backfill_asset_types(creatives: Any) -> None:
+    """Inject missing ``asset_type`` on every asset value in ``creatives[*].assets``.
+
+    Mutates the list in place. Called for ``sync_creatives`` so the SDK
+    typed-dispatcher's discriminator can pick a branch on payloads minted
+    with the pre-4.4 shape.
+    """
+    if not isinstance(creatives, list):
+        return
+    for creative in creatives:
+        if not isinstance(creative, dict):
+            continue
+        assets = creative.get("assets")
+        if not isinstance(assets, dict):
+            continue
+        for key, value in assets.items():
+            if not isinstance(value, dict):
+                continue
+            inferred = _infer_asset_type(key, value)
+            if inferred is not None:
+                value["asset_type"] = inferred
 
 
 def _patch_mcp_tools_call(payload: dict[str, Any]) -> dict[str, Any]:
@@ -75,6 +138,8 @@ def _patch_mcp_tools_call(payload: dict[str, Any]) -> dict[str, Any]:
         _apply_get_products_defaults(arguments)
     elif name in _AUTH_FILLED_TOOLS:
         _apply_auth_filled_defaults(arguments)
+    if name == "sync_creatives":
+        _backfill_asset_types(arguments.get("creatives"))
     return payload
 
 
@@ -88,6 +153,8 @@ def _patch_a2a_skill(payload: dict[str, Any]) -> dict[str, Any]:
         _apply_get_products_defaults(params)
     elif skill in _AUTH_FILLED_TOOLS:
         _apply_auth_filled_defaults(params)
+    if skill == "sync_creatives":
+        _backfill_asset_types(params.get("creatives"))
     return payload
 
 
