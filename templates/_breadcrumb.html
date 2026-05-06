@@ -41,7 +41,7 @@
           <a class="sa-menu__item" role="menuitem" href="{{ script_name }}/tenant/{{ tenant.tenant_id }}/inventory/browse">Browse inventory</a>
           <a class="sa-menu__item" role="menuitem" href="{{ script_name }}/tenant/{{ tenant.tenant_id }}/inventory-profiles/">Inventory profiles</a>
           <a class="sa-menu__item" role="menuitem" href="{{ script_name }}/tenant/{{ tenant.tenant_id }}/targeting">Targeting criteria</a>
-          {% if not tenant.is_embedded %}
+          {% if not embedded_view %}
           <a class="sa-menu__item" role="menuitem" href="{{ script_name }}/tenant/{{ tenant.tenant_id }}/inventory">Sync inventory</a>
           {% endif %}
 

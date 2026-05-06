@@ -70,7 +70,7 @@
     <header class="sa-page-header">
         <h1 class="sa-page-header__title">Targeting Criteria Browser</h1>
         <div class="sa-page-header__actions">
-            {% if not tenant.is_embedded %}
+            {% if not embedded_view %}
             <button id="sync-targeting-btn" class="btn btn-primary" onclick="syncTargetingData()">
                 <i class="fas fa-sync"></i> <span id="sync-btn-text">Sync Targeting Data</span>
             </button>
@@ -85,7 +85,7 @@
     <div class="alert alert-info">
         <i class="fas fa-info-circle"></i>
         <strong>Note:</strong> This page displays targeting criteria (custom targeting keys, audience segments, and labels) synced from your ad server.
-        {% if not tenant.is_embedded %}
+        {% if not embedded_view %}
         To sync ad units and placements, visit <a href="{{ url_for('inventory.inventory_browser', tenant_id=tenant.tenant_id) }}" class="alert-link">Sync Inventory</a>.
         {% endif %}
     </div>
@@ -394,7 +394,7 @@
 <script>
 const tenantId = '{{ tenant.tenant_id }}';
 const scriptRoot = '{{ request.script_root }}';  // Base path for URLs (e.g., '/admin' or '')
-const isEmbedded = {{ 'true' if tenant.is_embedded else 'false' }};
+const isEmbedded = {{ 'true' if embedded_view else 'false' }};
 let currentKeyId = null;
 let targetingData = {
     customKeys: [],

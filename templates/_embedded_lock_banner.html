@@ -1,7 +1,9 @@
 {#
   Embedded-mode lock banner partial.
 
-  Rendered on platform-managed surfaces when tenant.is_embedded is True.
+  Rendered on platform-managed surfaces when the request renders in
+  embedded chrome (tenant.is_embedded=True OR the request authorized via
+  X-Identity-* headers — see embedded_view in app.py context processor).
   Replaces hidden settings sections / hidden routes with a "this is owned
   by your platform" explanation. See
   docs/design/embedded-mode-sprint-4-ui-hardening.md.

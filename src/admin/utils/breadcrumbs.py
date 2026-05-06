@@ -61,9 +61,12 @@ def _read_header() -> dict | None:
 def resolve_embed_breadcrumb_root(tenant: Any | None) -> dict | None:
     """Return the embed-mode first-crumb root: header > tenant column > None.
 
-    The override is only meaningful when ``tenant.is_embedded`` is True —
-    open-instance tenants ignore both sources even if set, since their
-    crumbs already point at the salesagent's own dashboard.
+    The override is only meaningful when the current request is rendering
+    in embedded chrome — either because the tenant is permanently
+    ``is_embedded=True`` or because the caller authenticated via
+    ``X-Identity-*`` headers (preview mode). Open-instance tenants viewed
+    via OAuth ignore both sources since their crumbs already point at the
+    salesagent's own dashboard.
 
     Args:
         tenant: The current ``Tenant`` ORM object (or ``None`` when no
@@ -73,7 +76,9 @@ def resolve_embed_breadcrumb_root(tenant: Any | None) -> dict | None:
         A ``{"label": str, "url": str}`` dict, or ``None`` when no override
         is configured.
     """
-    if tenant is None or not getattr(tenant, "is_embedded", False):
+    from src.admin.utils.embedded_mode_auth import is_embedded_view
+
+    if tenant is None or not is_embedded_view(tenant):
         return None
 
     header_value = _read_header()
