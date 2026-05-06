@@ -15,15 +15,6 @@ from adcp.types import (
     CreativeAction,
     CreativeStatus,
 )
-# Pin to the listing-side ``Creative`` (list_creatives_response). The
-# top-level ``adcp.types.Creative`` resolves to the delivery-side type
-# (get_creative_delivery_response) since adcp 4.4 — that variant has only
-# ``creative_id, media_buy_id, format_id, totals, variant_count, variants``
-# and rejects ``tags`` / ``status`` / ``assets`` etc. Our Creative is
-# explicitly a listing-side schema, so we extend the listing variant.
-from adcp.types.generated_poc.creative.list_creatives_response import (
-    Creative as LibraryCreative,
-)
 from adcp.types import FormatId as LibraryFormatId
 from adcp.types import (
     ListCreativeFormatsRequest as LibraryListCreativeFormatsRequest,
@@ -46,6 +37,16 @@ from adcp.types import (
 )
 from adcp.types import (
     SyncCreativesRequest as LibrarySyncCreativesRequest,
+)
+
+# Pin to the listing-side ``Creative`` (list_creatives_response). The
+# top-level ``adcp.types.Creative`` resolves to the delivery-side type
+# (get_creative_delivery_response) since adcp 4.4 — that variant has only
+# ``creative_id, media_buy_id, format_id, totals, variant_count, variants``
+# and rejects ``tags`` / ``status`` / ``assets`` etc. Our Creative is
+# explicitly a listing-side schema, so we extend the listing variant.
+from adcp.types.generated_poc.creative.list_creatives_response import (
+    Creative as LibraryCreative,
 )
 from adcp.types.generated_poc.creative.sync_creatives_response import (
     SyncCreativesResponse1 as LibrarySyncCreativesSuccess,

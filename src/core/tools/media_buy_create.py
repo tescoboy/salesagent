@@ -1320,7 +1320,15 @@ async def _create_media_buy_impl(
 
     # Warn if unsupported reporting_webhook frequency is requested
     if req.reporting_webhook:
-        raw_freq = str(getattr(req.reporting_webhook, "reporting_frequency", None) or "daily").lower()
+        freq_attr = getattr(req.reporting_webhook, "reporting_frequency", None)
+        # Enums (ReportingFrequency.daily) format as "ReportingFrequency.daily"
+        # via str(), which is unhelpful in logs. Prefer .value for the wire form.
+        if freq_attr is None:
+            raw_freq = "daily"
+        elif hasattr(freq_attr, "value"):
+            raw_freq = str(freq_attr.value).lower()
+        else:
+            raw_freq = str(freq_attr).lower()
         if raw_freq != "daily":
             logger.warning(
                 "CreateMediaBuy requested reporting webhook frequency '%s', "
