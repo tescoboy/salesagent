@@ -97,66 +97,71 @@ class TestMultiTenantIsolation:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_cross_tenant_header_is_ignored_token_wins(self, docker_services_e2e, live_server):
-        """``x-adcp-tenant`` header is advisory and grants no access — the
-        bearer token's bound tenant is the only thing that selects scope.
+    async def test_misleading_tenant_header_does_not_grant_cross_tenant_access(
+        self, docker_services_e2e, live_server
+    ):
+        """Cross-tenant header injection must not grant access to another tenant.
 
-        The legacy stack (deleted in PR #17) honoured ``x-adcp-tenant`` for
-        path-based tenant routing, so a header-injection attack was a real
-        concern: a buyer holding a ci-test token could *attempt* to set
-        ``x-adcp-tenant: iso-test``, and the legacy stack relied on the
-        token-validation step to reject the mismatch.
+        Contract: tenant scope is derived from ``Principal.access_token``
+        (see ``adcp/server/auth.py:121-145`` and ``auth.py:308-309``); the
+        ``x-adcp-tenant`` header is not part of that derivation. A buyer
+        sending a ci-test token + misleading ``x-adcp-tenant: iso-test``
+        must receive ci-test data, never iso-test data.
 
-        The modern stack (``adcp.server.serve()`` +
-        :class:`BearerTokenAuthMiddleware`) takes a stronger position: the
-        ``x-adcp-tenant`` header is not consumed at all. Tenant scope is
-        derived from ``Principal.access_token`` lookup
-        (:func:`core.main._validate_token` returns
-        ``Principal(tenant_id=row.tenant_id)``), and the auth middleware
-        seeds ``current_tenant`` from that. Header-injection is a
-        non-attack: the buyer's own tenant is what they get, regardless of
-        what the header claims.
-
-        This test asserts the post-deletion contract: send a misleading
-        header, verify the response is scoped to the token's tenant
-        (ci-test), NOT the header's claim (iso-test). If a future change
-        ever wires the ``x-adcp-tenant`` header back into tenant selection,
-        this test will catch it — the response would either start showing
-        iso-test products or rejecting outright, both of which break the
-        assertion below.
-
-        Exercises: bearer token → ``current_tenant`` ContextVar → tenant
-        scoping in ``_get_products_impl``.
+        Compares two real catalogs (one per tenant) and asserts the cross-
+        tenant call returns the ci-test catalog disjoint from iso-test —
+        catches a regression that wires the header into tenant selection
+        even if seed-data IDs change shape.
         """
-        headers = {
-            "x-adcp-auth": "ci-test-token",  # Token belongs to ci-test
-            "x-adcp-tenant": "iso-test",  # Misleading header — must be ignored
-        }
-        transport = StreamableHttpTransport(
-            url=f"{live_server['mcp']}/mcp/",
-            headers=headers,
+        # First, fetch each tenant's authoritative catalog via the matching
+        # token+header pair. These are the ground-truth product-ID sets
+        # the cross-tenant call's response must be disjoint with.
+        async def _fetch_catalog(token: str, tenant: str) -> set[str]:
+            transport = StreamableHttpTransport(
+                url=f"{live_server['mcp']}/mcp/",
+                headers={"x-adcp-auth": token, "x-adcp-tenant": tenant},
+            )
+            async with Client(transport=transport) as client:
+                result = await client.call_tool(
+                    "get_products",
+                    {"brief": "all products", "context": {"e2e": "cross_tenant_baseline"}},
+                )
+                data = parse_tool_result(result)
+                return {p["product_id"] for p in data.get("products", [])}
+
+        ci_test_catalog = await _fetch_catalog("ci-test-token", "ci-test")
+        iso_test_catalog = await _fetch_catalog("iso-test-token", "iso-test")
+        assert ci_test_catalog, "ci-test must have a non-empty seed catalog for this test"
+        assert iso_test_catalog, "iso-test must have a non-empty seed catalog for this test"
+        assert ci_test_catalog.isdisjoint(iso_test_catalog), (
+            "Test seed bug: ci-test and iso-test catalogs overlap, so this test "
+            "cannot prove tenant scoping. Fix init_database_ci.py."
         )
 
-        async with Client(transport=transport) as client:
+        # Now the actual injection attempt: ci-test token + iso-test header.
+        injection_transport = StreamableHttpTransport(
+            url=f"{live_server['mcp']}/mcp/",
+            headers={
+                "x-adcp-auth": "ci-test-token",  # Token belongs to ci-test
+                "x-adcp-tenant": "iso-test",  # Misleading header — must not grant access
+            },
+        )
+        async with Client(transport=injection_transport) as client:
             result = await client.call_tool(
                 "get_products",
                 {"brief": "header injection should not change scope", "context": {"e2e": "cross_tenant"}},
             )
-            data = parse_tool_result(result)
+            injected_catalog = {p["product_id"] for p in parse_tool_result(result).get("products", [])}
 
-        # Token wins: the response is scoped to ci-test (the token's bound
-        # tenant), not iso-test (the header's claim). ci-test products
-        # have IDs that do NOT start with ``iso_``.
-        assert "products" in data, "Response must contain products key"
-        products = data["products"]
-        assert len(products) > 0, (
-            "ci-test tenant must have at least one product — confirms request was "
-            "scoped to the token's tenant, not the header's claim."
-        )
-        product_ids = [p["product_id"] for p in products]
-        for pid in product_ids:
-            assert not pid.startswith("iso_"), (
-                f"Header-injection breach: x-adcp-tenant: iso-test caused iso-test "
-                f"product {pid} to surface for a ci-test token. The modern stack "
-                f"must IGNORE x-adcp-tenant; only the token's bound tenant grants scope."
+            # Positive: the response IS the ci-test catalog (token's tenant won).
+            assert injected_catalog == ci_test_catalog, (
+                f"Token-bound scope broken: ci-test token returned products "
+                f"{injected_catalog}, not the expected ci-test catalog "
+                f"{ci_test_catalog}."
+            )
+            # Negative: zero overlap with iso-test (header's claim was ignored).
+            assert injected_catalog.isdisjoint(iso_test_catalog), (
+                f"Cross-tenant breach: ci-test token + x-adcp-tenant: iso-test "
+                f"surfaced iso-test products {injected_catalog & iso_test_catalog}. "
+                f"The modern stack must derive tenant from the bearer token only."
             )
