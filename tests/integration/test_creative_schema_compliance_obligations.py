@@ -73,8 +73,10 @@ class TestAllAssetTypesAcceptedThroughSync:
         ("html", {"content": "<div>hi</div>"}),
         ("css", {"content": ".x{}"}),
         ("javascript", {"content": "alert(1)"}),
-        ("vast", {"url": "https://example.com/vast.xml"}),
-        ("daast", {"url": "https://example.com/daast.xml"}),
+        # vast/daast are discriminated unions on ``delivery_type`` —
+        # URL-delivered variants must declare ``delivery_type="url"``.
+        ("vast", {"url": "https://example.com/vast.xml", "delivery_type": "url"}),
+        ("daast", {"url": "https://example.com/daast.xml", "delivery_type": "url"}),
         ("promoted_offerings", {"content": "Widget Pro | $99"}),
     ]
 
@@ -104,9 +106,9 @@ class TestAllAssetTypesAcceptedThroughSync:
             for asset_type, _ in self.ASSET_TYPES_BY_SHAPE:
                 cid = f"c_{asset_type}"
                 assert cid in actions, f"Missing result for creative with {asset_type} asset"
-                assert actions[cid] == CreativeAction.created, (
-                    f"Creative with {asset_type} asset should be created, got {actions[cid]}"
-                )
+                assert (
+                    actions[cid] == CreativeAction.created
+                ), f"Creative with {asset_type} asset should be created, got {actions[cid]}"
 
     def test_asset_data_preserved_through_roundtrip(self, integration_db):
         """Verify that asset data survives the sync -> list round-trip for each type.
@@ -249,9 +251,9 @@ class TestCreativeExtendsListingBase:
             assert len(matched) == 1
 
             # The Creative schema class must extend ListingCreative
-            assert isinstance(matched[0], ListingCreative), (
-                f"Creative in list response must be an instance of listing Creative, got {type(matched[0]).__mro__}"
-            )
+            assert isinstance(
+                matched[0], ListingCreative
+            ), f"Creative in list response must be an instance of listing Creative, got {type(matched[0]).__mro__}"
 
     def test_listing_creative_not_delivery_creative(self, integration_db):
         """Listed creative must NOT be an instance of delivery Creative.
@@ -272,9 +274,9 @@ class TestCreativeExtendsListingBase:
 
             matched = [c for c in list_response.creatives if c.creative_id == "c_not_delivery"]
             assert len(matched) == 1
-            assert not isinstance(matched[0], DeliveryCreative), (
-                "Creative in list response must NOT be an instance of delivery Creative"
-            )
+            assert not isinstance(
+                matched[0], DeliveryCreative
+            ), "Creative in list response must NOT be an instance of delivery Creative"
 
 
 # ---------------------------------------------------------------------------

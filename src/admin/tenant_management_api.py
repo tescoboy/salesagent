@@ -810,6 +810,13 @@ def provision_tenant():
                     bound_operator_id="embedded_host",
                 )
             )
+            # Flush so the principal row exists in the DB before the
+            # OperatorAdvertiserLink FK reference below. SQLAlchemy 2.0 doesn't
+            # always order inserts by FK dependency when the linking table
+            # references a composite key — without this flush, the
+            # ``operator_advertiser_link_tenant_id_principal_id_fkey`` insert
+            # races the principal insert.
+            session.flush()
 
         # Auto-install the host product as a single trusted operator. The
         # cryptographic verifier bypasses these rows entirely (network/header
