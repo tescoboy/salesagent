@@ -19,10 +19,16 @@ import uuid
 from datetime import UTC
 from typing import Any
 
-from adcp.types import (
+from adcp.types import PaginationRequest, PaginationResponse
+
+# Pin to the sync-accounts-response variant of Account. The top-level
+# ``adcp.types.Account`` resolves to the listing variant since 4.4 — same
+# name, different Pydantic class — and the SyncAccountsSuccessResponse's
+# ``accounts: list[Account]`` field rejects cross-module instances even
+# though the shapes are identical.
+from adcp.types.generated_poc.account.sync_accounts_response import (
     Account as SyncResponseAccount,
 )
-from adcp.types import PaginationRequest, PaginationResponse
 
 from src.core.audit_logger import get_audit_logger
 from src.core.database.models import Account as DBAccount
