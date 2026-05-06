@@ -38,8 +38,6 @@ def dispatch_request(ctx: dict, *, identity: Any = _SENTINEL, **kwargs: Any) -> 
             transport_map = {
                 "MCP": Transport.MCP,
                 "mcp": Transport.MCP,
-                "REST": Transport.REST,
-                "rest": Transport.REST,
                 "IMPL": Transport.IMPL,
                 "impl": Transport.IMPL,
             }

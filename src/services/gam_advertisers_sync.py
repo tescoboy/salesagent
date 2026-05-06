@@ -265,8 +265,7 @@ def sync_advertisers(
             # marking every cached row inactive on a transient empty
             # response would silently empty the Buyer Routing picker.
             logger.warning(
-                "[%s] GAM returned zero advertisers; preserving cache "
-                "(soft-delete sweep skipped)",
+                "[%s] GAM returned zero advertisers; preserving cache (soft-delete sweep skipped)",
                 sync_id,
             )
             upserted, soft_deleted = 0, 0

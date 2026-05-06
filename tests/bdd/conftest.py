@@ -209,30 +209,11 @@ _MCP_SELECTIVE_XFAIL: list[tuple[str, set[str], str, bool]] = [
     ("T-UC-005-inv-049-10-nofield", set(), "MCP wrapper does not accept input_format_ids (vacuous pass)", False),
 ]
 
-# REST xfails: REST endpoint drops all filter params (build_rest_body returns {}).
-# Only xfail scenarios that genuinely fail — many invariant "holds" scenarios
-# pass coincidentally because unfiltered results include the expected format.
-_REST_XFAIL_TAGS: set[str] = {
-    # Invariant filter scenarios where REST unfiltered results break assertions
-    "T-UC-005-inv-049-1-holds",  # type filter
-    "T-UC-005-inv-049-1-violated",
-    "T-UC-005-inv-049-2-holds",  # format_ids filter
-    "T-UC-005-inv-049-3-violated",  # asset_types filter
-    "T-UC-005-inv-049-4-violated",  # dimension filter
-    "T-UC-005-inv-049-4-nodim",  # dimension filter (no dimensions)
-    "T-UC-005-inv-049-5-holds",  # responsive=true filter
-    "T-UC-005-inv-049-6-holds",  # responsive=false filter
-    "T-UC-005-inv-049-7-holds",  # name_search filter
-    "T-UC-005-inv-049-7-violated",
-    "T-UC-005-inv-049-9-holds",  # output_format_ids filter
-    "T-UC-005-inv-049-9-violated",
-    "T-UC-005-inv-049-9-nofield",
-    "T-UC-005-inv-049-10-holds",  # input_format_ids filter
-    "T-UC-005-inv-049-10-violated",
-    "T-UC-005-inv-049-10-nofield",
-    "T-UC-005-inv-031-1-holds",  # multi-filter AND combination
-    "T-UC-005-inv-031-1-violated",
-}
+# REST is no longer a transport (legacy FastAPI app deleted alongside src.app).
+# REST_XFAIL_TAGS is kept as an empty set so the remaining xfail-application loop
+# below is a no-op — easier to read than removing the loop and re-adding it
+# when REST goes through the migration history.
+_REST_XFAIL_TAGS: set[str] = set()
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -252,9 +233,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(skip_a2a)
             continue
 
-        # Detect transport from parametrized nodeid: [mcp], [mcp-...], [rest], [rest-...]
+        # Detect transport from parametrized nodeid: [mcp], [mcp-...]
         is_mcp = "[mcp]" in nodeid or "[mcp-" in nodeid
-        is_rest = "[rest]" in nodeid or "[rest-" in nodeid
 
         # Transport-specific xfails: MCP wrappers don't accept certain filter params
         if is_mcp:
@@ -262,23 +242,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 if tag in marker_names:
                     if not substrings or any(s in nodeid for s in substrings):
                         item.add_marker(pytest.mark.xfail(reason=reason, strict=strict))
-                    break
-
-        # UC-011 REST: per-request auth implemented (salesagent-xms)
-        # UC-011 MCP: billing policy and approval mode now populated from DB via
-        # account_approval_mode column + proper harness writes (#1184 complete).
-
-        # FIXME(salesagent-9d5): UC-006 REST — account resolution through CreativeSyncEnv
-        # REST route for sync_creatives exists but account kwarg may not be
-        # forwarded at the route level (SyncCreativesBody doesn't have account field)
-        if is_rest and any(t.startswith("T-UC-006") for t in marker_names) and "account" in marker_names:
-            item.add_marker(pytest.mark.xfail(reason="REST route doesn't forward account param", strict=False))
-
-        # Transport-specific xfails: REST drops all filter params
-        if is_rest:
-            for tag in _REST_XFAIL_TAGS:
-                if tag in marker_names:
-                    item.add_marker(pytest.mark.xfail(reason="REST endpoint drops filter params", strict=True))
                     break
 
         # --- UC-005: disclosure/asset scenarios with partial impl ---
@@ -563,8 +526,8 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
     metafunc.parametrize(
         "ctx",
-        [Transport.IMPL, Transport.MCP, Transport.REST],
-        ids=["impl", "mcp", "rest"],
+        [Transport.IMPL, Transport.MCP],
+        ids=["impl", "mcp"],
         indirect=True,
     )
 

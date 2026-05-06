@@ -383,7 +383,7 @@ async def _sync_accounts_impl(
     if req is None:
         # idempotency_key is library-required (adcp 4.4) but the no-op empty
         # request handled below doesn't actually round-trip the field.
-        req = SyncAccountsRequest(accounts=[])  # type: ignore[call-arg]
+        req = SyncAccountsRequest(accounts=[])
 
     # BR-RULE-055: sync requires auth
     if identity is None or identity.principal_id is None or identity.tenant_id is None:

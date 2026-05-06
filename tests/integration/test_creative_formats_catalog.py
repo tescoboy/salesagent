@@ -18,7 +18,7 @@ AGENT_URL = "https://creative.adcontextprotocol.org"
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP, Transport.REST]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 
 def _make_format(

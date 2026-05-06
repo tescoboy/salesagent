@@ -15,7 +15,7 @@ from tests.harness.transport import Transport
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP, Transport.REST]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
 CUSTOM_AGENT_URL = "https://custom-dco.example.com"

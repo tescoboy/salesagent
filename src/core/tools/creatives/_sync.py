@@ -24,6 +24,39 @@ from ._workflow import _audit_log_sync, _create_sync_workflow_steps, _send_creat
 logger = logging.getLogger(__name__)
 
 
+def _infer_asset_types(assets: dict[str, Any]) -> dict[str, Any]:
+    """Backfill ``asset_type`` discriminator on raw asset values.
+
+    adcp 4.4.3 made ``asset_type`` a required discriminator on every asset
+    value (text/image/video/url/etc.). Pre-v3 callers and our own internal
+    test fixtures still pass shape-implicit dicts like ``{"content": "..."}``
+    or ``{"url": "..."}``. Infer the type so the discriminated union resolves
+    cleanly without forcing every caller to update.
+
+    Inference rules:
+    - dict already has ``asset_type`` → pass-through
+    - has ``content`` (and not ``url``) → ``text``
+    - has ``url`` (and not ``content``) → ``image`` (safe default; videos
+      can be authored explicitly with ``asset_type: 'video'``)
+    - everything else passes through unchanged so the strict library
+      validator still surfaces the original error
+    """
+    inferred: dict[str, Any] = {}
+    for key, value in assets.items():
+        if not isinstance(value, dict) or "asset_type" in value:
+            inferred[key] = value
+            continue
+        has_content = "content" in value
+        has_url = "url" in value
+        if has_content and not has_url:
+            inferred[key] = {"asset_type": "text", **value}
+        elif has_url and not has_content:
+            inferred[key] = {"asset_type": "image", **value}
+        else:
+            inferred[key] = value
+    return inferred
+
+
 def _sync_creatives_impl(
     creatives: Sequence[CreativeAsset | BaseModel | dict[str, Any]],
     assignments: dict | None = None,
@@ -154,6 +187,7 @@ def _sync_creatives_impl(
                     # Default required fields for raw dicts missing them
                     creative_data = raw_creative.copy()
                     creative_data.setdefault("assets", {})
+                    creative_data["assets"] = _infer_asset_types(creative_data["assets"])
                     creative = CreativeAsset(**creative_data)
                 else:
                     creative = CreativeAsset.model_validate(raw_creative, from_attributes=True)

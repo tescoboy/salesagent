@@ -9,7 +9,6 @@ beads: salesagent-97pn
 """
 
 
-
 class TestUnifiedAuthMiddlewareExists:
     """Verify UnifiedAuthMiddleware class exists as pure ASGI."""
 
@@ -61,6 +60,4 @@ class TestOldMiddlewaresDeleted:
         import pathlib
 
         legacy = pathlib.Path(__file__).resolve().parents[2] / "src" / "a2a_server"
-        assert not legacy.exists(), (
-            "src/a2a_server/ is back — modern A2A is served by adcp.server.serve()."
-        )
+        assert not legacy.exists(), "src/a2a_server/ is back — modern A2A is served by adcp.server.serve()."

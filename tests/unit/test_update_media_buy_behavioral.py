@@ -1368,10 +1368,9 @@ class TestUC003UpdateCreativeIds:
 
         from src.core.schemas import Creative
 
-        assert issubclass(Creative, (LibraryDeliveryCreative, LibraryListCreative)), (
-            f"Creative should extend an adcp library Creative, but MRO is: "
-            f"{[c.__name__ for c in Creative.__mro__]}"
-        )
+        assert issubclass(
+            Creative, (LibraryDeliveryCreative, LibraryListCreative)
+        ), f"Creative should extend an adcp library Creative, but MRO is: {[c.__name__ for c in Creative.__mro__]}"
 
 
 # ---------------------------------------------------------------------------
@@ -1408,13 +1407,27 @@ class TestUC003UploadInlineCreatives:
                                 "creative_id": "c1",
                                 "name": "Creative 1",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"asset_type": "image", "url": "https://example.com/a1.png", "width": 300, "height": 250}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/a1.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             },
                             {
                                 "creative_id": "c2",
                                 "name": "Creative 2",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"asset_type": "image", "url": "https://example.com/a2.png", "width": 300, "height": 250}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/a2.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             },
                         ],
                     }
@@ -1456,7 +1469,14 @@ class TestUC003UploadInlineCreatives:
                                 "creative_id": "c3",
                                 "name": "Creative 3",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"asset_type": "image", "url": "https://example.com/a3.png", "width": 300, "height": 250}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/a3.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             }
                         ],
                     }
@@ -1500,7 +1520,14 @@ class TestUC003UploadInlineCreatives:
                                 "creative_id": "c_fail",
                                 "name": "Bad Creative",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"asset_type": "image", "url": "https://example.com/fail.png", "width": 300, "height": 250}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/fail.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             }
                         ],
                     }
@@ -2267,7 +2294,14 @@ class TestUC003ExtK:
                                 "creative_id": "c_fail",
                                 "name": "Fail",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"asset_type": "image", "url": "https://example.com/fail.png", "width": 300, "height": 250}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/fail.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             }
                         ],
                     }
@@ -2306,7 +2340,14 @@ class TestUC003ExtK:
                                 "creative_id": "c_fail",
                                 "name": "Fail",
                                 "format_id": {"agent_url": "http://test.com", "id": "display"},
-                                "assets": {"main": {"asset_type": "image", "url": "https://example.com/fail.png", "width": 300, "height": 250}},
+                                "assets": {
+                                    "main": {
+                                        "asset_type": "image",
+                                        "url": "https://example.com/fail.png",
+                                        "width": 300,
+                                        "height": 250,
+                                    }
+                                },
                             }
                         ],
                     }

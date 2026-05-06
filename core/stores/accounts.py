@@ -49,11 +49,7 @@ class SalesagentAccountStore:
         ref: dict[str, Any] | None = None,
         auth_info: AuthInfo | None = None,
     ) -> Account[dict[str, Any]]:
-        tenant_id = (
-            self._tenant_from_principal()
-            or self._tenant_from_subdomain()
-            or self._tenant_from_ref(ref)
-        )
+        tenant_id = self._tenant_from_principal() or self._tenant_from_subdomain() or self._tenant_from_ref(ref)
         if tenant_id is None or not self._tenant_exists(tenant_id):
             raise AdcpError(
                 "ACCOUNT_NOT_FOUND",

@@ -72,7 +72,9 @@ class TestFallback:
     """Falls back to first available asset URL."""
 
     def test_unknown_key_fallback(self):
-        creative = _make_creative(assets={"custom_banner": {"asset_type": "image", "url": "https://example.com/banner.png"}})
+        creative = _make_creative(
+            assets={"custom_banner": {"asset_type": "image", "url": "https://example.com/banner.png"}}
+        )
         assert _extract_url_from_assets(creative) == "https://example.com/banner.png"
 
 

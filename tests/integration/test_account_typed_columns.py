@@ -48,9 +48,9 @@ class TestAccountTypedBrand:
             ).first()
 
         assert result is not None
-        assert isinstance(result.brand, BrandReference), (
-            f"Expected BrandReference, got {type(result.brand).__name__}: {result.brand}"
-        )
+        assert isinstance(
+            result.brand, BrandReference
+        ), f"Expected BrandReference, got {type(result.brand).__name__}: {result.brand}"
         assert result.brand.domain == "typed-test.com"
         # BrandId is RootModel[str] — access via .root
         assert result.brand.brand_id.root == "spark"
@@ -82,7 +82,7 @@ class TestAccountTypedCreditLimit:
 
     def test_credit_limit_is_pydantic_model(self, integration_db):
         """After DB roundtrip, credit_limit is a CreditLimit instance."""
-        from adcp.types.generated_poc.core.account import CreditLimit
+        from adcp.types import CreditLimit
 
         from src.core.database.models import Account
         from tests.factories import AccountFactory, TenantFactory
@@ -101,8 +101,8 @@ class TestAccountTypedCreditLimit:
             ).first()
 
         assert result is not None
-        assert isinstance(result.credit_limit, CreditLimit), (
-            f"Expected CreditLimit, got {type(result.credit_limit).__name__}"
-        )
+        assert isinstance(
+            result.credit_limit, CreditLimit
+        ), f"Expected CreditLimit, got {type(result.credit_limit).__name__}"
         assert result.credit_limit.amount == 50000.0
         assert result.credit_limit.currency == "USD"

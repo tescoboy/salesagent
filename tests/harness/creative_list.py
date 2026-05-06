@@ -42,7 +42,6 @@ class CreativeListEnv(IntegrationEnv):
     EXTERNAL_PATCHES = {
         "audit_logger": "src.core.tools.creatives.listing.get_audit_logger",
     }
-    REST_ENDPOINT = "/api/v1/creatives"
 
     def _configure_mocks(self) -> None:
         """Set up happy-path defaults for audit logger."""
@@ -64,15 +63,3 @@ class CreativeListEnv(IntegrationEnv):
     def call_mcp(self, **kwargs: Any) -> ListCreativesResponse:
         """Call list_creatives via Client(mcp) — full pipeline dispatch."""
         return self._run_mcp_client("list_creatives", ListCreativesResponse, **kwargs)
-
-    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        """Convert kwargs to ListCreativesBody shape for REST POST."""
-        body: dict[str, Any] = {}
-        for key in ("media_buy_id", "media_buy_ids", "buyer_ref", "status", "format"):
-            if key in kwargs and kwargs[key] is not None:
-                body[key] = kwargs[key]
-        return body
-
-    def parse_rest_response(self, data: dict[str, Any]) -> ListCreativesResponse:
-        """Parse REST JSON into ListCreativesResponse."""
-        return ListCreativesResponse(**data)

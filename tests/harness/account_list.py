@@ -67,9 +67,3 @@ class AccountListEnv(IntegrationEnv):
     def call_mcp(self, **kwargs: Any) -> ListAccountsResponse:
         """Call list_accounts via Client(mcp) — full pipeline dispatch."""
         return self._run_mcp_client("list_accounts", ListAccountsResponse, **kwargs)
-
-    REST_ENDPOINT = "/api/v1/accounts"
-
-    def parse_rest_response(self, data: dict[str, Any]) -> ListAccountsResponse:
-        """Parse REST JSON into ListAccountsResponse."""
-        return ListAccountsResponse(**data)

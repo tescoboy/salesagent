@@ -27,7 +27,7 @@ from src.core.database.models import Creative as DBCreative
 from src.core.exceptions import AdCPAuthenticationError, AdCPNotFoundError
 from tests.harness import CreativeSyncEnv, Transport, assert_envelope, make_identity
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.REST, Transport.MCP]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 
 @pytest.mark.requires_db
@@ -1136,13 +1136,12 @@ class TestSlackNotificationOnSync:
         _send_creative_notifications is called with the creative info."""
         with CreativeSyncEnv() as env:
             env.setup_default_data()
-            # Set tenant fields on the REST-specific identity
-            identity = env.identity_for(Transport.REST)
+            identity = env.identity_for(Transport.MCP)
             identity.tenant["approval_mode"] = "require-human"
             identity.tenant["slack_webhook_url"] = "https://hooks.slack.com/test"
 
             result = env.call_via(
-                Transport.REST,
+                Transport.MCP,
                 creatives=[_creative(creative_id="c_slack_test", name="Slack Notify Creative")],
             )
 

@@ -16,7 +16,7 @@ from tests.harness.account_sync import AccountSyncEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
-ALL_TRANSPORTS = [Transport.IMPL, Transport.REST, Transport.MCP]
+ALL_TRANSPORTS = [Transport.IMPL, Transport.MCP]
 
 
 def _action_value(action):

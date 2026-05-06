@@ -41,7 +41,7 @@ def _call_via(ctx: dict, transport: str | Transport, req: ListCreativeFormatsReq
     if isinstance(transport, Transport):
         t = transport
     else:
-        transport_map = {"mcp": Transport.MCP, "rest": Transport.REST}
+        transport_map = {"mcp": Transport.MCP}
         t = transport_map.get(transport, Transport.IMPL)
     env = ctx["env"]
 

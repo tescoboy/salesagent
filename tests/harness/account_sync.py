@@ -138,9 +138,3 @@ class AccountSyncEnv(IntegrationEnv):
     def call_mcp(self, **kwargs: Any) -> SyncAccountsResponse:
         """Call sync_accounts via Client(mcp) — full pipeline dispatch."""
         return self._run_mcp_client("sync_accounts", SyncAccountsResponse, **kwargs)
-
-    REST_ENDPOINT = "/api/v1/accounts/sync"
-
-    def parse_rest_response(self, data: dict[str, Any]) -> SyncAccountsResponse:
-        """Parse REST JSON into SyncAccountsResponse."""
-        return SyncAccountsResponse(**data)

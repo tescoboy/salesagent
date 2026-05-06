@@ -1,3 +1,4 @@
+import uuid
 import warnings
 from datetime import date, datetime
 
@@ -1990,8 +1991,9 @@ class GetSignalsResponse(NestedModelSerializerMixin, LibraryGetSignalsResponse):
 class ActivateSignalRequest(LibraryActivateSignalRequest):
     """Extends library ActivateSignalRequest with local extension fields.
 
-    Library provides: signal_agent_segment_id, deployments, context, ext.
-    Local extensions: campaign_id, media_buy_id (unused in impl, kept for API compat).
+    Library provides: signal_agent_segment_id, deployments, idempotency_key,
+    context, ext. Local extensions: campaign_id, media_buy_id (unused in impl,
+    kept for API compat).
 
     NOTE: ActivateSignalResponse is NOT migrated — library uses RootModel
     discriminated union (success|error) which is fundamentally incompatible
@@ -1999,6 +2001,17 @@ class ActivateSignalRequest(LibraryActivateSignalRequest):
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
+
+    # adcp 4.4.3 made idempotency_key required. Per spec it's "client-generated"
+    # but pre-v3 callers (and most internal tests) don't set it; auto-generate
+    # so the contract is preserved without forcing every caller to mint a UUID.
+    idempotency_key: str = Field(
+        default_factory=lambda: f"idem_{uuid.uuid4()}",
+        description="Client-generated unique key. Auto-defaults to a fresh UUID when omitted.",
+        min_length=16,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9_.:-]{16,255}$",
+    )
 
     # Extension fields (not in library spec)
     campaign_id: str | None = Field(None, description="Optional campaign ID to activate signal for")

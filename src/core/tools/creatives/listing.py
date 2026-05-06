@@ -151,8 +151,7 @@ def _list_creatives_impl(
     _SPEC_SORT_FIELDS = {"created_date", "updated_date", "name", "status", "assignment_count"}
     if sort_by not in _SPEC_SORT_FIELDS:
         raise AdCPValidationError(
-            f"Unsupported sort_by={sort_by!r}. Must be one of: "
-            f"{sorted(_SPEC_SORT_FIELDS)}",
+            f"Unsupported sort_by={sort_by!r}. Must be one of: {sorted(_SPEC_SORT_FIELDS)}",
             recovery="correctable",
         )
     structured_sort = LibrarySort(field=sort_by, direction=valid_sort_order)

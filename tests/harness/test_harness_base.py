@@ -192,14 +192,11 @@ class TestBaseClassContract:
         impl_id = env.identity_for(Transport.IMPL)
         assert impl_id.protocol == "mcp"
 
-        rest_id = env.identity_for(Transport.REST)
-        assert rest_id.protocol == "rest"
-
         mcp_id = env.identity_for(Transport.MCP)
         assert mcp_id.protocol == "mcp"
 
         # All share same principal/tenant
-        for ident in [impl_id, rest_id, mcp_id]:
+        for ident in [impl_id, mcp_id]:
             assert ident.principal_id == "p1"
             assert ident.tenant_id == "t1"
 
@@ -209,8 +206,8 @@ class TestBaseClassContract:
         from tests.harness.transport import Transport
 
         env = BaseTestEnv()
-        id1 = env.identity_for(Transport.REST)
-        id2 = env.identity_for(Transport.REST)
+        id1 = env.identity_for(Transport.MCP)
+        id2 = env.identity_for(Transport.MCP)
         assert id1 is id2
 
     def test_identity_backward_compat(self):

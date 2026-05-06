@@ -65,29 +65,6 @@ class TestCreativeSyncEnvContract:
             # Registry mock should have a return value configured
             assert env.mock["registry"].return_value is not None
 
-    def test_has_rest_endpoint(self):
-        """CreativeSyncEnv defines REST_ENDPOINT for REST dispatch."""
-        from tests.harness.creative_sync import CreativeSyncEnv
-
-        assert CreativeSyncEnv.REST_ENDPOINT == "/api/v1/creatives/sync"
-
-    def test_has_build_rest_body(self):
-        """CreativeSyncEnv implements build_rest_body for REST dispatch."""
-        from tests.harness.creative_sync import CreativeSyncEnv
-
-        env = CreativeSyncEnv()
-        body = env.build_rest_body(creatives=[], dry_run=True)
-        assert body == {"creatives": [], "dry_run": True}
-
-    def test_has_parse_rest_response(self):
-        """CreativeSyncEnv implements parse_rest_response."""
-        from tests.harness.creative_sync import CreativeSyncEnv
-
-        env = CreativeSyncEnv()
-        # Smoke test: should accept a dict with expected shape
-        response = env.parse_rest_response({"creatives": [], "dry_run": False})
-        assert response is not None
-
     def test_has_call_mcp(self):
         """CreativeSyncEnv implements call_mcp for MCP dispatch."""
         from tests.harness.creative_sync import CreativeSyncEnv

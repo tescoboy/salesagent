@@ -228,6 +228,8 @@ class TestSchemaInheritance:
             ("UpdateMediaBuyRequest", "account"),
             ("UpdateMediaBuyRequest", "idempotency_key"),
             ("SyncCreativesRequest", "idempotency_key"),
+            ("ActivateSignalRequest", "idempotency_key"),
+            ("SyncAccountsRequest", "idempotency_key"),
             # Schema overrides for partial-construction tolerance / wider types
             ("Creative", "variants"),
             ("Product", "reporting_capabilities"),

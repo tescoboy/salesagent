@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 from adcp.types import (
-    ImageFormatAsset,
+    ImageFormatGroupAsset,
     RepeatableAssetGroup,
-    TextFormatAsset,
+    TextFormatGroupAsset,
     VideoFormatAsset,
 )
 from adcp.types.generated_poc.core.format import Dimensions, Renders, Responsive
@@ -204,8 +204,8 @@ class TestFormatsAssetTypes:
             min_count=1,
             max_count=5,
             assets=[
-                ImageFormatAsset(asset_id="product_image", required=True),
-                TextFormatAsset(asset_id="product_title", required=True),
+                ImageFormatGroupAsset(asset_id="product_image", required=True),
+                TextFormatGroupAsset(asset_id="product_title", required=True),
             ],
         )
         fmt = Format(
@@ -230,7 +230,7 @@ class TestFormatsAssetTypes:
             required=True,
             min_count=1,
             max_count=3,
-            assets=[TextFormatAsset(asset_id="headline", required=True)],
+            assets=[TextFormatGroupAsset(asset_id="headline", required=True)],
         )
         fmt = Format(
             format_id=FormatId(agent_url=DEFAULT_AGENT_URL, id="text_only"),
@@ -254,7 +254,7 @@ class TestFormatsAssetTypes:
             required=False,
             min_count=0,
             max_count=5,
-            assets=[ImageFormatAsset(asset_id="product_image", required=True)],
+            assets=[ImageFormatGroupAsset(asset_id="product_image", required=True)],
         )
         fmt = Format(
             format_id=FormatId(agent_url=DEFAULT_AGENT_URL, id="mixed"),
