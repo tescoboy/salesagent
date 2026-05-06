@@ -88,6 +88,48 @@ def wonderstruck_creds():
 
 
 @pytest.fixture
+def wonderstruck_sa_can_approve_orders(wonderstruck_creds):
+    """Skip unless the Wonderstruck SA has a role that can approve orders.
+
+    GAM's ``OrderActionService.performOrderAction(approve)`` requires the
+    Approve Orders permission. The Trafficker built-in role doesn't include
+    it; Sales Manager / Salesperson / Admin do. See issue #45 — until the
+    Wonderstruck SA is upgraded, any test that asserts post-DRAFT
+    progression cannot pass.
+
+    Returns the SA's role name on success.
+    """
+    from src.adapters.gam.client import GAMClientManager
+
+    cm = GAMClientManager(
+        {"service_account_json": wonderstruck_creds},
+        network_code=WONDERSTRUCK_NETWORK_CODE,
+    )
+    try:
+        user = cm.get_service("UserService").getCurrentUser()
+    except Exception as exc:
+        # Transient network / proxy errors during role probe shouldn't
+        # explode the test — skip with the underlying reason so re-runs
+        # naturally pick up the role once GAM is reachable again.
+        pytest.skip(f"GAM UserService probe failed: {exc!r}. Re-run when GAM is reachable.")
+
+    # zeep ComplexType doesn't support .get(); fall back to attr access.
+    try:
+        role_name = user["roleName"]
+    except (KeyError, AttributeError):
+        role_name = getattr(user, "roleName", "") or ""
+
+    role_name = str(role_name)
+    if role_name == "Trafficker":
+        pytest.skip(
+            f"Wonderstruck SA role is {role_name!r}. Order approval requires "
+            f"Sales Manager (or any role with the 'Approve Orders' permission). "
+            f"See issue #45 — upgrade the SA's GAM role to enable this test."
+        )
+    return role_name
+
+
+@pytest.fixture
 def gam_order_archive_cleanup(wonderstruck_creds):
     """Archive every non-archived order on the test advertiser at teardown.
 
@@ -358,3 +400,113 @@ class TestGAMRealMediaBuyLifecycle:
             errors = delivery_resp.errors or []
             unexpected = [e for e in errors if getattr(e, "code", None) != "adapter_error"]
             assert not unexpected, f"Unexpected delivery errors: {unexpected}"
+
+
+class TestGAMOrderProgressesPastDraft:
+    """Issue #45: Verify orders progress past DRAFT once the Wonderstruck SA
+    has Sales Manager (or any role with the 'Approve Orders' permission).
+
+    Skips automatically while the SA is still Trafficker. The moment the
+    GAM Admin role is upgraded, this test starts running and proves:
+      1. ``performOrderAction(approve)`` succeeds (no PERMISSION_DENIED).
+      2. Order status leaves DRAFT (transitions to APPROVED / READY / DELIVERING).
+      3. Background approval polling task converges instead of looping.
+      4. ReportingService can now satisfy the freshness check (no
+         ``adapter_error`` escape hatch for delivery).
+    """
+
+    async def test_order_status_leaves_draft_after_approval(
+        self,
+        integration_db,
+        wonderstruck_creds,
+        wonderstruck_sa_can_approve_orders,
+        gam_order_archive_cleanup,
+    ):
+        from googleads import ad_manager
+
+        from src.adapters.gam.client import GAMClientManager
+        from src.core.schemas import (
+            CreateMediaBuyRequest,
+            GetMediaBuyDeliveryRequest,
+        )
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
+
+        with IntegrationEnv(tenant_id=GAM_TENANT_ID, principal_id=GAM_PRINCIPAL_ID):
+            _seed_gam_tenant(wonderstruck_creds)
+            identity = _identity()
+
+            create_result = await _create_media_buy_impl(
+                req=CreateMediaBuyRequest(
+                    brand={"domain": "testbrand.com"},
+                    start_time=_future(1),
+                    end_time=_future(8),
+                    po_number=f"E2E-#45-{uuid.uuid4().hex[:6]}",
+                    packages=[
+                        {
+                            "product_id": GAM_PRODUCT_ID,
+                            "budget": 100.0,
+                            "pricing_option_id": "cpm_usd_fixed",
+                        }
+                    ],
+                ),
+                identity=identity,
+            )
+            assert create_result.status not in ("failed",), (
+                f"create_media_buy failed: errors={getattr(create_result.response, 'errors', None)}"
+            )
+            order_id = create_result.response.media_buy_id
+            assert order_id
+            gam_order_archive_cleanup.append(order_id)
+
+            # Poll OrderService for the order's current status. The adapter
+            # kicks off a background approval polling task on order creation;
+            # once forecasting catches up GAM auto-approves. Bound the wait
+            # at ~60s — Wonderstruck sandbox is small and forecast is fast.
+            cm = GAMClientManager(
+                {"service_account_json": wonderstruck_creds},
+                network_code=WONDERSTRUCK_NETWORK_CODE,
+            )
+            order_service = cm.get_service("OrderService")
+            terminal_statuses = {"APPROVED", "READY", "DELIVERING", "PAUSED", "COMPLETED"}
+
+            from time import sleep, time
+
+            deadline = time() + 60
+            final_status = "DRAFT"
+            while time() < deadline:
+                sb = ad_manager.StatementBuilder()
+                sb.Where("id = :id").WithBindVariable("id", int(order_id))
+                page = order_service.getOrdersByStatement(sb.ToStatement())
+                results = getattr(page, "results", None) or []
+                if not results:
+                    break
+                final_status = str(getattr(results[0], "status", "") or "")
+                if final_status in terminal_statuses:
+                    break
+                sleep(3)
+
+            assert final_status in terminal_statuses, (
+                f"Order {order_id} stayed in status={final_status!r} after 60s. "
+                f"Expected one of {sorted(terminal_statuses)}. "
+                f"If the Wonderstruck SA was just upgraded, the background "
+                f"approval polling task may need longer than 60s on first run."
+            )
+
+            # Tighten the delivery assertion: now that the order is past
+            # DRAFT, ReportingService freshness should be satisfied.
+            delivery_resp = _get_media_buy_delivery_impl(
+                GetMediaBuyDeliveryRequest(
+                    media_buy_ids=[order_id],
+                    start_date=datetime.now(UTC).date().isoformat(),
+                    end_date=(datetime.now(UTC) + timedelta(days=8)).date().isoformat(),
+                ),
+                identity,
+            )
+            assert not delivery_resp.errors, (
+                f"Delivery errors after order left DRAFT: {delivery_resp.errors}. "
+                f"#45 expects clean delivery once SA is approved."
+            )
+            assert order_id in [d.media_buy_id for d in delivery_resp.media_buy_deliveries or []], (
+                f"order {order_id} missing from delivery response"
+            )
