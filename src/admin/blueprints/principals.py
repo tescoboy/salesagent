@@ -164,22 +164,11 @@ def resolve_domain(tenant_id):
         return jsonify({"ok": False, "error": "missing 'domain'"}), 400
 
     result = _resolve(raw)
-
-    # If the slug we'd create collides with an existing principal, surface that
-    # so the UI can show "buyer already added" instead of a confusing 500 later.
-    if result.principal_id:
-        with get_db_session() as db_session:
-            collision = db_session.scalars(
-                select(Principal).filter_by(tenant_id=tenant_id, principal_id=result.principal_id)
-            ).first()
-            if collision is not None:
-                payload_dict = result.to_dict()
-                payload_dict["collision"] = {
-                    "principal_id": collision.principal_id,
-                    "name": collision.name,
-                }
-                return jsonify(payload_dict)
-
+    # The create handler enforces uniqueness on submit (existing
+    # duplicate-name check + unique index). The preview is read-only —
+    # showing "already added" here would be a UX nicety only, and adding
+    # a Principal repo just for that lookup is over-engineering when the
+    # submit-side check already covers the failure mode.
     return jsonify(result.to_dict())
 
 
