@@ -616,7 +616,7 @@ async def _sync_accounts_impl(
     audit_logger = get_audit_logger("sync_accounts", tenant_id)
     action_counts: dict[str, int] = {}
     for r in results:
-        act = _enum_to_str(r.action) or "unknown"  # type: ignore[attr-defined]
+        act = _enum_to_str(r.action) or "unknown"
         action_counts[act] = action_counts.get(act, 0) + 1
     audit_logger.log_info(f"sync_accounts completed: {action_counts} (dry_run={dry_run}, principal={principal_id})")
 

@@ -74,7 +74,7 @@ def _ensure_seed() -> None:
                 authorized_emails=["test@example.com"],
                 authorized_domains=["example.com"],
                 human_review_required=False,
-                admin_token=f"capinspect_{uuid4().hex[:8]}",  # noqa: smoke-credential — generated stub
+                admin_token=f"capinspect_{uuid4().hex[:8]}",  # generated dev stub, not a credential
                 created_at=now,
                 updated_at=now,
             )
