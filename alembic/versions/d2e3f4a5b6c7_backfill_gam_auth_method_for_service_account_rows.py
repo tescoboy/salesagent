@@ -25,6 +25,7 @@ Create Date: 2026-05-06 13:05:00.000000
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -51,23 +52,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Reverse: set repaired rows back to oauth.
+    """Backfills are not reversed.
 
-    Identifies rows by the inverse of the upgrade selector — rows currently
-    marked service_account that have SA JSON but no refresh token. This may
-    over-revert rows that were always service_account, but the column has a
-    safe server_default of 'oauth' and the sync code no longer trusts it,
-    so the operation is non-destructive.
+    The upgrade query cannot be inverted unambiguously — rows that were
+    always `service_account` are indistinguishable from rows the upgrade
+    flipped. The column has a safe server_default of 'oauth' and the runtime
+    detects auth method from credential presence (see
+    build_gam_config_from_adapter), so leaving repaired rows as
+    service_account is harmless if the code is rolled back too.
     """
-    op.execute(
-        sa.text(
-            """
-            UPDATE adapter_config
-               SET gam_auth_method = 'oauth'
-             WHERE adapter_type = 'google_ad_manager'
-               AND gam_auth_method = 'service_account'
-               AND gam_service_account_json IS NOT NULL
-               AND (gam_refresh_token IS NULL OR gam_refresh_token = '')
-            """
-        )
-    )
+    pass

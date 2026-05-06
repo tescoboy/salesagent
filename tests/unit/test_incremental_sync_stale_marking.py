@@ -126,7 +126,9 @@ def _run_sync_with_mode(sync_mode, mocks, *, adapter_config_overrides=None):
         # GAMClientManager is bypassed at the seam — the GAM client itself is
         # not under test here; we want to exercise build_gam_config_from_adapter
         # and the orchestration in _run_sync_thread without dragging in real
-        # google-auth credential machinery.
+        # google-auth credential machinery. Patch at the canonical definition
+        # (src.adapters.gam.client) so the test isn't sensitive to whether
+        # background_sync_service hoists its import or keeps it local.
         mock_client_manager_cls = MagicMock()
         mock_client_manager_cls.return_value.get_client.return_value = MagicMock()
         with (
@@ -141,6 +143,10 @@ def _run_sync_with_mode(sync_mode, mocks, *, adapter_config_overrides=None):
             patch(
                 "src.services.gam_inventory_service.GAMInventoryService",
                 return_value=mocks["inventory_service"],
+            ),
+            patch(
+                "src.adapters.gam.client.GAMClientManager",
+                mock_client_manager_cls,
             ),
             patch(
                 "src.adapters.gam.GAMClientManager",
