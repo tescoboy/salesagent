@@ -13,15 +13,24 @@ See: tests/integration/issues/41.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 
 def test_router_capabilities_declare_idempotency_supported() -> None:
     """The wire-level Adcp object built by ``core/main.build_router`` has
-    ``idempotency`` set so the response shape passes Pydantic validation."""
+    ``idempotency`` set so the response shape passes Pydantic validation.
+
+    Stubs ``_build_proposal_managers`` to bypass its DB query — the
+    capabilities object is constructed inline in ``build_router`` from
+    constants, so the proposal-manager dict is irrelevant to what we're
+    asserting.
+    """
     from adcp.decisioning.capabilities import IdempotencySupported
 
     from core.main import build_router
 
-    router = build_router()
+    with patch("core.main._build_proposal_managers", return_value={}):
+        router = build_router()
     adcp_block = router.capabilities.adcp
 
     assert adcp_block is not None, "DecisioningCapabilities.adcp must be set"
