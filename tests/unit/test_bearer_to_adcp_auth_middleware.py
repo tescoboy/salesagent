@@ -163,3 +163,94 @@ async def test_empty_bearer_token_is_not_injected():
     assert inner.captured_scope is not None
     headers = dict(inner.captured_scope["headers"])
     assert b"x-adcp-auth" not in headers
+
+
+@pytest.mark.asyncio
+async def test_bare_bearer_with_no_trailing_space_is_not_injected():
+    """``Authorization: Bearer`` exactly (no trailing space) must not
+    match — the prefix is ``Bearer<space>`` per RFC 6750 §2.1."""
+    inner = _CapturingApp()
+    mw = BearerToAdcpAuthMiddleware(inner)
+    scope = _http_scope([(b"authorization", b"Bearer")])
+
+    await mw(scope, lambda: None, lambda msg: None)
+
+    assert inner.captured_scope is not None
+    headers = dict(inner.captured_scope["headers"])
+    assert b"x-adcp-auth" not in headers
+
+
+@pytest.mark.asyncio
+async def test_first_authorization_header_wins():
+    """When duplicate ``Authorization`` headers arrive (rare but legal),
+    the first one's token is the one that gets translated. Locks the
+    documented precedence so a later refactor can't silently change it."""
+    inner = _CapturingApp()
+    mw = BearerToAdcpAuthMiddleware(inner)
+    scope = _http_scope(
+        [
+            (b"authorization", b"Bearer first-token"),
+            (b"authorization", b"Bearer second-token"),
+        ]
+    )
+
+    await mw(scope, lambda: None, lambda msg: None)
+
+    assert inner.captured_scope is not None
+    headers = dict(inner.captured_scope["headers"])
+    assert headers.get(b"x-adcp-auth") == b"first-token"
+
+
+@pytest.mark.asyncio
+async def test_dual_credential_mismatch_is_logged(caplog):
+    """When both ``x-adcp-auth`` and ``Authorization: Bearer`` arrive
+    with different tokens, the operator-supplied header wins (no
+    behavior change) but a warning is logged for audit."""
+    import logging
+
+    inner = _CapturingApp()
+    mw = BearerToAdcpAuthMiddleware(inner)
+    scope = _http_scope(
+        [
+            (b"x-adcp-auth", b"canonical-token"),
+            (b"authorization", b"Bearer translated-token"),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="core.middleware.bearer_to_adcp_auth"):
+        await mw(scope, lambda: None, lambda msg: None)
+
+    assert inner.captured_scope is not None
+    # No header injection — operator's wins.
+    adcp_auth_values = [v for n, v in inner.captured_scope["headers"] if n == b"x-adcp-auth"]
+    assert adcp_auth_values == [b"canonical-token"]
+    # Warning surfaced.
+    assert any("different tokens" in record.getMessage() for record in caplog.records), (
+        "Expected a warning log on dual-credential mismatch; got: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+    # Token values must NOT appear in the log message.
+    for record in caplog.records:
+        assert b"canonical-token".decode() not in record.getMessage()
+        assert b"translated-token".decode() not in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_dual_credential_match_is_silent(caplog):
+    """Same token in both headers → no warning, no injection (canonical
+    wins, but nothing is suspicious)."""
+    import logging
+
+    inner = _CapturingApp()
+    mw = BearerToAdcpAuthMiddleware(inner)
+    scope = _http_scope(
+        [
+            (b"x-adcp-auth", b"same-token"),
+            (b"authorization", b"Bearer same-token"),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="core.middleware.bearer_to_adcp_auth"):
+        await mw(scope, lambda: None, lambda msg: None)
+
+    assert not any("different tokens" in record.getMessage() for record in caplog.records)
