@@ -189,10 +189,26 @@ def build_sync_creatives_request(
         "dry_run": dry_run,
         "validation_mode": validation_mode,
         "delete_missing": delete_missing,
+        # adcp 4.4 made idempotency_key required at the wire boundary —
+        # real buyers must generate one for retry-safe dedupe. Tests
+        # follow the same contract so the SDK validator accepts the call
+        # without server-side autogen.
+        "idempotency_key": f"e2e-sync-{uuid.uuid4()}",
     }
 
     if assignments:
-        request["assignments"] = assignments
+        # adcp 4.4 changed Assignment from a dict
+        # ``{creative_id: [package_id, ...]}`` to a flat list of
+        # ``Assignment`` objects ``{creative_id, package_id, weight?, placement_ids?}``.
+        # Accept the legacy dict shape for caller convenience and explode
+        # it to the 4.4 list shape — eventually callers should pass the
+        # list themselves and this branch can go.
+        if isinstance(assignments, dict):
+            request["assignments"] = [
+                {"creative_id": cid, "package_id": pid} for cid, pids in assignments.items() for pid in pids
+            ]
+        else:
+            request["assignments"] = assignments
 
     if creative_ids:
         request["creative_ids"] = creative_ids
