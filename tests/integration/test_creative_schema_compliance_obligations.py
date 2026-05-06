@@ -77,7 +77,11 @@ class TestAllAssetTypesAcceptedThroughSync:
         # URL-delivered variants must declare ``delivery_type="url"``.
         ("vast", {"url": "https://example.com/vast.xml", "delivery_type": "url"}),
         ("daast", {"url": "https://example.com/daast.xml", "delivery_type": "url"}),
-        ("promoted_offerings", {"content": "Widget Pro | $99"}),
+        # adcp 4.4 dropped ``promoted_offerings`` from the AssetVariant
+        # discriminator (it lives elsewhere in the schema now). The
+        # closest 4.4 equivalent is ``catalog`` — minimum-valid payload
+        # carries a catalog_id since the Catalog model has ``extra=allow``.
+        ("catalog", {"catalog_id": "test_catalog_001"}),
     ]
 
     def test_all_11_asset_types_accepted(self, integration_db):
