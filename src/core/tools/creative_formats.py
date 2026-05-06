@@ -376,9 +376,16 @@ def _list_creative_formats_impl(
         total_count=total_count,
     )
 
-    # Build creative_agents referrals from registry (POST-S4)
-    from adcp.types import CreativeAgent as AdcpCreativeAgent
+    # Build creative_agents referrals from registry (POST-S4).
+    # ListCreativeFormatsResponse expects ``CreativeAgent`` from the
+    # media_buy module — there are two same-named classes in 4.4 and the
+    # top-level ``adcp.types.CreativeAgent`` resolves to the creative-side
+    # variant, which Pydantic rejects as the wrong model type even though
+    # they're shape-identical.
     from adcp.types import CreativeAgentCapability
+    from adcp.types.generated_poc.media_buy.list_creative_formats_response import (
+        CreativeAgent as AdcpCreativeAgent,
+    )
 
     creative_agents_list: list[AdcpCreativeAgent] | None = None
     try:

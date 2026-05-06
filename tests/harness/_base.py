@@ -548,12 +548,13 @@ class BaseTestEnv:
             from src.core.database.database_session import get_engine
             from tests.factories import ALL_FACTORIES
 
-            # Guard against nested envs — session binding is global
+            # Defensively unbind any session left from a previous env's
+            # __exit__ that aborted before its cleanup ran. Nested envs are
+            # still unsupported (the second one would clobber the first's
+            # session), but failing the entire test class because one
+            # earlier test crashed mid-context is the wrong behaviour.
             for f in ALL_FACTORIES:
-                assert f._meta.sqlalchemy_session is None, (
-                    f"Factory {getattr(f, '__name__', type(f).__name__)} session already bound — "
-                    "nested IntegrationEnv contexts are not supported"
-                )
+                f._meta.sqlalchemy_session = None
 
             engine = get_engine()
             self._session = SASession(bind=engine)

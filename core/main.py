@@ -236,14 +236,17 @@ def build_router() -> LazyPlatformRouter:
         account=CapabilitiesAccount(supported_billing=["operator"]),
         media_buy=MediaBuy(
             supported_pricing_models=["cpm"],
-            # property_list_filtering: filters products by buyer property
-            # lists; wired through ``_get_products_impl``. Declared here so
-            # ``PlatformHandler.get_adcp_capabilities`` projects it onto
-            # the wire response (``media_buy.features``).
             # inline_creative_management: sync_creatives / list_creatives
             # tools land creatives synchronously without a separate review
             # round-trip.
-            features=Features(inline_creative_management=True, property_list_filtering=True),
+            #
+            # property_list_filtering is intentionally NOT declared here.
+            # ``_get_products_impl`` does its own property-list filtering,
+            # but declaring the capability tells the SDK to route through
+            # its own ``PropertyListFetcher`` plug — and we don't ship one,
+            # so SDK boot fails fast (``no PropertyListFetcher was
+            # wired``). Declare when we wire that plug.
+            features=Features(inline_creative_management=True),
         ),
         supported_protocols=[SupportedProtocol.media_buy],
     )

@@ -301,21 +301,19 @@ class TestCreateGetProductsRequestWithPropertyList:
 
 
 class TestCapabilitiesPropertyListFiltering:
-    """Test that capabilities reports property_list_filtering=True.
+    """Capabilities does NOT advertise ``property_list_filtering`` on the wire.
 
-    The capabilities response is built by
-    :meth:`adcp.decisioning.PlatformHandler.get_adcp_capabilities` from
-    the :class:`DecisioningCapabilities` object handed to the router in
-    ``core/main.py:build_router``. Verify the declaration directly so a
-    regression on the router side surfaces before it reaches the wire.
+    The SDK's ``PropertyListFetcher`` plug is the spec-routed path for
+    this capability. We don't ship a fetcher (our own
+    ``_get_products_impl`` filters property_list inline), so declaring
+    the capability would trigger SDK boot fail-fast. The advertisement
+    is intentionally omitted until the fetcher is wired.
     """
 
-    def test_router_declares_property_list_filtering(self):
-        # Patch the proposal-manager builder out — building the router
-        # opens DB sessions when proposal managers are enumerated.
+    def test_router_does_not_advertise_property_list_filtering(self):
         with patch("core.main._build_proposal_managers", return_value={}):
             from core.main import build_router
 
             router = build_router()
         features = router.capabilities.media_buy.features
-        assert features.property_list_filtering is True
+        assert features.property_list_filtering is None or features.property_list_filtering is False

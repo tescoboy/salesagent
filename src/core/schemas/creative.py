@@ -15,7 +15,13 @@ from adcp.types import (
     CreativeAction,
     CreativeStatus,
 )
-from adcp.types import (
+# Pin to the listing-side ``Creative`` (list_creatives_response). The
+# top-level ``adcp.types.Creative`` resolves to the delivery-side type
+# (get_creative_delivery_response) since adcp 4.4 — that variant has only
+# ``creative_id, media_buy_id, format_id, totals, variant_count, variants``
+# and rejects ``tags`` / ``status`` / ``assets`` etc. Our Creative is
+# explicitly a listing-side schema, so we extend the listing variant.
+from adcp.types.generated_poc.creative.list_creatives_response import (
     Creative as LibraryCreative,
 )
 from adcp.types import FormatId as LibraryFormatId
@@ -159,7 +165,7 @@ class Creative(LibraryCreative):
     # to empty list so legacy creatives still serialize without a forced
     # backfill. Tests asserting AdCP compliance now need to expect either an
     # empty list or omit the field — the override makes both work.
-    variants: list[Any] | None = Field(default=None, description="AdCP creative variants (v4.4.0+)")  # type: ignore[assignment]
+    variants: list[Any] | None = Field(default=None, description="AdCP creative variants (v4.4.0+)")
 
     # === AI Provenance (EU AI Act Article 50) ===
     provenance: Provenance | None = Field(default=None, description="AI provenance metadata per EU AI Act Article 50")
