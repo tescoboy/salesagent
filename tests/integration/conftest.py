@@ -290,6 +290,13 @@ def sample_tenant(integration_db):
             auto_approve_format_ids=["display_300x250"],
             human_review_required=False,
             admin_token="test_admin_token",
+            # AAO setup-checklist prerequisites — without these,
+            # ``validate_setup_complete`` raises in ``_create_media_buy_impl``
+            # and tests have to set ``test_session_id`` to short-circuit it.
+            # Seeding here lets the production validator path run end-to-end
+            # against the fixture (closes #43).
+            house_domain="example.com",
+            public_agent_url="https://test.example.com/agent",
             created_at=now,
             updated_at=now,
         )

@@ -72,15 +72,17 @@ def make_lifecycle_identity(
     tenant_dict: dict[str, Any],
     principal_id: str,
     *,
-    test_session_id: str = "lifecycle-test",
+    test_session_id: str | None = None,
 ) -> ResolvedIdentity:
     """Build a ResolvedIdentity matching what the transport boundary produces.
 
-    ``test_session_id`` is set so ``_create_media_buy_impl`` skips
-    ``validate_setup_complete()`` — the ``sample_tenant`` fixture doesn't
-    seed Publisher House Domain / Public Agent URL, and validating those
-    is out of scope for the lifecycle tests. (Tracked separately as a
-    fixture-completeness follow-up.)
+    By default ``test_session_id`` is ``None`` — ``_create_media_buy_impl``
+    runs the production ``validate_setup_complete()`` path against the
+    ``sample_tenant`` fixture's seeded house_domain + public_agent_url
+    (closes #43). Tests that intentionally exercise unseeded tenants can
+    pass an explicit ``test_session_id`` to short-circuit the validator,
+    but doing so for routine lifecycle coverage is the test-integrity
+    anti-pattern flagged in #43.
     """
     return ResolvedIdentity(
         principal_id=principal_id,
