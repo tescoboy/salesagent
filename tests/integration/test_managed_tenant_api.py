@@ -205,6 +205,11 @@ class TestProvision:
             assert adapter is not None
             # The encrypted column must round-trip via the property accessor.
             assert adapter.gam_service_account_json == '{"type":"service_account"}'
+            # Provisioning must mark this row as service-account auth so the
+            # inventory + custom-targeting sync paths don't fall through to
+            # GoogleRefreshTokenClient(refresh_token=None).
+            assert adapter.gam_auth_method == "service_account"
+            assert adapter.gam_refresh_token is None
 
     def test_provision_with_initial_principal(self, client, auth_headers, cleanup_tenants):
         payload = _provision_payload(

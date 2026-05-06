@@ -36,11 +36,18 @@ def build_gam_config_from_adapter(adapter_config) -> dict:
         "manual_approval_required": adapter_config.gam_manual_approval_required,
     }
 
-    # Add authentication credentials based on method
-    if adapter_config.gam_auth_method == "service_account" and adapter_config.gam_service_account_json:
+    # Detect auth method from credential presence rather than trusting
+    # gam_auth_method alone — embedded-mode provisioning paths can leave
+    # gam_auth_method at its "oauth" server-default while populating
+    # gam_service_account_json. Service-account JSON wins over refresh_token
+    # when both are present so that an unintentionally-stored refresh token
+    # can't override an explicit SA JSON. _build_gam_client_for_tenant in
+    # gam_advertisers_sync.py uses the opposite precedence today; that is
+    # tracked separately and does not affect the bug class fixed here
+    # (refresh_token is always None on the broken tenants).
+    if adapter_config.gam_service_account_json:
         config["service_account_json"] = adapter_config.gam_service_account_json
     elif adapter_config.gam_refresh_token:
-        # OAuth (default)
         config["refresh_token"] = adapter_config.gam_refresh_token
 
     return config
