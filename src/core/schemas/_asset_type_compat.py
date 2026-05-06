@@ -88,7 +88,7 @@ def _apply_patch() -> None:
             data["assets"] = infer_asset_types(assets)
         original_init(self, **data)
 
-    CreativeAsset.__init__ = patched_init  # type: ignore[method-assign]
+    CreativeAsset.__init__ = patched_init  # type: ignore[method-assign,assignment]
     CreativeAsset._asset_type_compat_applied = True  # type: ignore[attr-defined]
 
 
