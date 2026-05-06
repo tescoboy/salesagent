@@ -14,7 +14,7 @@ Filtering rules:
 - Products with property_targeting_allowed=true require ANY intersection
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 from adcp.types.generated_poc.core.property_id import PropertyId
 from adcp.types.generated_poc.core.publisher_property_selector import (
@@ -301,34 +301,21 @@ class TestCreateGetProductsRequestWithPropertyList:
 
 
 class TestCapabilitiesPropertyListFiltering:
-    """Test that capabilities reports property_list_filtering=True."""
+    """Test that capabilities reports property_list_filtering=True.
 
-    def test_capabilities_reports_property_list_filtering(self):
-        from src.core.resolved_identity import ResolvedIdentity
-        from src.core.tools.capabilities import _get_adcp_capabilities_impl
+    The capabilities response is built by
+    :meth:`adcp.decisioning.PlatformHandler.get_adcp_capabilities` from
+    the :class:`DecisioningCapabilities` object handed to the router in
+    ``core/main.py:build_router``. Verify the declaration directly so a
+    regression on the router side surfaces before it reaches the wire.
+    """
 
-        identity = ResolvedIdentity(
-            principal_id="test_principal",
-            tenant_id="test_tenant",
-            tenant={
-                "tenant_id": "test_tenant",
-                "name": "Test Tenant",
-                "subdomain": "test",
-            },
-        )
+    def test_router_declares_property_list_filtering(self):
+        # Patch the proposal-manager builder out — building the router
+        # opens DB sessions when proposal managers are enumerated.
+        with patch("core.main._build_proposal_managers", return_value={}):
+            from core.main import build_router
 
-        mock_repo = MagicMock()
-        mock_repo.list_publisher_partners.return_value = []
-        mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
-        mock_uow.tenant_config = mock_repo
-
-        with (
-            patch("src.core.tools.capabilities.get_principal_object", return_value=None),
-            patch("src.core.tools.capabilities.TenantConfigUoW", return_value=mock_uow),
-        ):
-            response = _get_adcp_capabilities_impl(None, identity)
-
-        features = response.media_buy.features
+            router = build_router()
+        features = router.capabilities.media_buy.features
         assert features.property_list_filtering is True

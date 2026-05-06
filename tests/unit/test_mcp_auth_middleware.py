@@ -231,7 +231,6 @@ class TestImplsDoNotCallResolveIdentityDirectly:
     """
 
     IMPL_FUNCTIONS = [
-        ("_get_adcp_capabilities_impl", "src/core/tools/capabilities.py"),
         ("_get_products_impl", "src/core/tools/products.py"),
         ("_list_creative_formats_impl", "src/core/tools/creative_formats.py"),
         ("_sync_creatives_impl", "src/core/tools/creatives/_sync.py"),

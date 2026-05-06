@@ -223,6 +223,8 @@ def _build_proposal_managers() -> dict[str, SalesAgentProposalManager]:
 
 
 def build_router() -> LazyPlatformRouter:
+    from adcp.types.generated_poc.bundled.protocol.get_adcp_capabilities_response import Features
+
     from src.core.tools.capabilities import IDEMPOTENCY_REPLAY_TTL_SECONDS
 
     capabilities = DecisioningCapabilities(
@@ -232,7 +234,17 @@ def build_router() -> LazyPlatformRouter:
             idempotency=IdempotencySupported(supported=True, replay_ttl_seconds=IDEMPOTENCY_REPLAY_TTL_SECONDS),
         ),
         account=CapabilitiesAccount(supported_billing=["operator"]),
-        media_buy=MediaBuy(supported_pricing_models=["cpm"]),
+        media_buy=MediaBuy(
+            supported_pricing_models=["cpm"],
+            # property_list_filtering: filters products by buyer property
+            # lists; wired through ``_get_products_impl``. Declared here so
+            # ``PlatformHandler.get_adcp_capabilities`` projects it onto
+            # the wire response (``media_buy.features``).
+            # inline_creative_management: sync_creatives / list_creatives
+            # tools land creatives synchronously without a separate review
+            # round-trip.
+            features=Features(inline_creative_management=True, property_list_filtering=True),
+        ),
         supported_protocols=[SupportedProtocol.media_buy],
     )
     # ProposalManager is wired per-tenant. Today every active tenant

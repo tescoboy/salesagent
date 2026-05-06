@@ -20,7 +20,8 @@ TOOLS_DIR = Path("src/core/tools")
 
 # All _impl functions and their modules
 IMPL_REGISTRY = [
-    ("src.core.tools.capabilities", "_get_adcp_capabilities_impl"),
+    # capabilities response is built by adcp.decisioning.PlatformHandler from
+    # the DecisioningCapabilities object; no local _impl on the new architecture.
     ("src.core.tools.creative_formats", "_list_creative_formats_impl"),
     ("src.core.tools.properties", "_list_authorized_properties_impl"),
     ("src.core.tools.products", "_get_products_impl"),
