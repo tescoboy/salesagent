@@ -83,10 +83,17 @@ def _infer_asset_type(key: str, value: dict[str, Any]) -> str | None:
         return key
     has_content = "content" in value
     has_url = "url" in value
+    has_dims = "width" in value and "height" in value
     if has_content and not has_url:
         return "text"
-    if has_url and not has_content:
+    if has_url and has_dims:
+        # Image assets require url + width + height. Only confidently
+        # infer ``image`` when all three are present.
         return "image"
+    if has_url:
+        # ``url`` asset only requires ``url`` — safer default when caller
+        # supplied just a URL with no dimensions.
+        return "url"
     return None
 
 

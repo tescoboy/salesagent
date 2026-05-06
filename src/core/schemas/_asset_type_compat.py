@@ -67,10 +67,17 @@ def infer_asset_types(assets: dict[str, Any]) -> dict[str, Any]:
             continue
         has_content = "content" in value
         has_url = "url" in value
+        has_dims = "width" in value and "height" in value
         if has_content and not has_url:
             inferred[key] = {"asset_type": "text", **value}
-        elif has_url and not has_content:
+        elif has_url and has_dims:
+            # Image assets require url + width + height in adcp 4.4. When
+            # the caller supplies all three we can confidently infer image.
             inferred[key] = {"asset_type": "image", **value}
+        elif has_url:
+            # ``url`` asset is the safe default when only a URL is supplied —
+            # only ``url`` is required, no width/height needed.
+            inferred[key] = {"asset_type": "url", **value}
         else:
             inferred[key] = value
     return inferred
