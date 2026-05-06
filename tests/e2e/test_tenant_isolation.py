@@ -97,36 +97,66 @@ class TestMultiTenantIsolation:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_cross_tenant_token_rejected(self, docker_services_e2e, live_server):
-        """ci-test token must be rejected when targeting iso-test tenant.
+    async def test_cross_tenant_header_is_ignored_token_wins(self, docker_services_e2e, live_server):
+        """``x-adcp-tenant`` header is advisory and grants no access — the
+        bearer token's bound tenant is the only thing that selects scope.
 
-        This prevents a principal from one tenant accessing another tenant's
-        resources by manipulating the tenant header.
+        The legacy stack (deleted in PR #17) honoured ``x-adcp-tenant`` for
+        path-based tenant routing, so a header-injection attack was a real
+        concern: a buyer holding a ci-test token could *attempt* to set
+        ``x-adcp-tenant: iso-test``, and the legacy stack relied on the
+        token-validation step to reject the mismatch.
 
-        Exercises: x-adcp-tenant header -> tenant resolution -> token validation
-        -> cross-tenant rejection.
+        The modern stack (``adcp.server.serve()`` +
+        :class:`BearerTokenAuthMiddleware`) takes a stronger position: the
+        ``x-adcp-tenant`` header is not consumed at all. Tenant scope is
+        derived from ``Principal.access_token`` lookup
+        (:func:`core.main._validate_token` returns
+        ``Principal(tenant_id=row.tenant_id)``), and the auth middleware
+        seeds ``current_tenant`` from that. Header-injection is a
+        non-attack: the buyer's own tenant is what they get, regardless of
+        what the header claims.
+
+        This test asserts the post-deletion contract: send a misleading
+        header, verify the response is scoped to the token's tenant
+        (ci-test), NOT the header's claim (iso-test). If a future change
+        ever wires the ``x-adcp-tenant`` header back into tenant selection,
+        this test will catch it — the response would either start showing
+        iso-test products or rejecting outright, both of which break the
+        assertion below.
+
+        Exercises: bearer token → ``current_tenant`` ContextVar → tenant
+        scoping in ``_get_products_impl``.
         """
         headers = {
             "x-adcp-auth": "ci-test-token",  # Token belongs to ci-test
-            "x-adcp-tenant": "iso-test",  # But targeting iso-test tenant
+            "x-adcp-tenant": "iso-test",  # Misleading header — must be ignored
         }
         transport = StreamableHttpTransport(
             url=f"{live_server['mcp']}/mcp/",
             headers=headers,
         )
 
-        # The MCP client should either fail during session init or tool call
-        # because the token doesn't belong to the targeted tenant
-        with pytest.raises(Exception) as exc_info:
-            async with Client(transport=transport) as client:
-                await client.call_tool(
-                    "get_products",
-                    {"brief": "should fail", "context": {"e2e": "cross_tenant"}},
-                )
+        async with Client(transport=transport) as client:
+            result = await client.call_tool(
+                "get_products",
+                {"brief": "header injection should not change scope", "context": {"e2e": "cross_tenant"}},
+            )
+            data = parse_tool_result(result)
 
-        # Verify the error is auth-related, not a random failure
-        error_str = str(exc_info.value).lower()
-        assert any(
-            keyword in error_str
-            for keyword in ["auth", "token", "invalid", "tenant", "denied", "forbidden", "unauthorized"]
-        ), f"Expected authentication/authorization error, got: {exc_info.value}"
+        # Token wins: the response is scoped to ci-test (the token's bound
+        # tenant), not iso-test (the header's claim). ci-test products
+        # have IDs that do NOT start with ``iso_``.
+        assert "products" in data, "Response must contain products key"
+        products = data["products"]
+        assert len(products) > 0, (
+            "ci-test tenant must have at least one product — confirms request was "
+            "scoped to the token's tenant, not the header's claim."
+        )
+        product_ids = [p["product_id"] for p in products]
+        for pid in product_ids:
+            assert not pid.startswith("iso_"), (
+                f"Header-injection breach: x-adcp-tenant: iso-test caused iso-test "
+                f"product {pid} to surface for a ci-test token. The modern stack "
+                f"must IGNORE x-adcp-tenant; only the token's bound tenant grants scope."
+            )
