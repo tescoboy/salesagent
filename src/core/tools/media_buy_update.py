@@ -167,6 +167,38 @@ def _update_media_buy_impl(
         # Extract testing context early (needed for dry_run check)
         testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()
 
+        # Impl-layer idempotency replay (defence in depth on top of the
+        # framework-level adcp.server.idempotency.IdempotencyStore wrap).
+        # Mirrors the create-path pattern at media_buy_create.py:1471. The
+        # SDK wrap is post-hoc — two concurrent same-key calls both miss
+        # the cache before the first response is stored, both reach the
+        # impl, and race on the SQLAlchemy session (observed:
+        # InvalidRequestError "session is provisioning a new connection").
+        # Replay an existing workflow step's persisted response when the
+        # idempotency_key + principal + tool_name + media_buy_id all match.
+        # Skip in dry-run (no side effects to dedup).
+        if not testing_ctx.dry_run and req.idempotency_key:
+            from src.core.database.repositories.workflow import WorkflowRepository
+
+            workflow_repo = WorkflowRepository(session, tenant["tenant_id"])
+            existing_step = workflow_repo.find_by_idempotency_key(
+                req.idempotency_key, principal_id, tool_name="update_media_buy"
+            )
+            if existing_step and existing_step.response_data:
+                logger.info(
+                    "[IDEMPOTENCY] update_media_buy replaying step %s for key=%s...",
+                    existing_step.step_id,
+                    req.idempotency_key[:8],
+                )
+                cached = existing_step.response_data
+                # The persisted response_data is an UpdateMediaBuySuccess /
+                # UpdateMediaBuyError model_dump. Strip impl-only sidecar
+                # keys (request_data) before re-validation.
+                cached_clean = {k: v for k, v in cached.items() if k != "request_data"}
+                if "errors" in cached_clean:
+                    return UpdateMediaBuyError.model_validate(cached_clean)
+                return UpdateMediaBuySuccess.model_validate(cached_clean)
+
         # Create or get persistent context and workflow step
         # Skip for dry_run mode (no side effects, no database writes)
         ctx_manager = get_context_manager()

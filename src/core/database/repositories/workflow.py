@@ -60,6 +60,32 @@ class WorkflowRepository:
             )
         ).first()
 
+    def find_by_idempotency_key(
+        self,
+        idempotency_key: str,
+        principal_id: str,
+        tool_name: str,
+    ) -> WorkflowStep | None:
+        """Find an existing workflow step by idempotency_key + tool_name + principal.
+
+        Mirrors MediaBuyRepository.find_by_idempotency_key for impl-layer
+        replay protection on tools whose framework wrap (adcp.server.idempotency)
+        only dedups post-hoc — concurrent same-key calls otherwise both reach
+        the impl and race. Tenant scope is enforced via the Context join;
+        principal scope is enforced via Context.principal_id.
+        """
+        return self._session.scalars(
+            select(WorkflowStep)
+            .join(DBContext)
+            .where(
+                DBContext.tenant_id == self._tenant_id,
+                DBContext.principal_id == principal_id,
+                WorkflowStep.tool_name == tool_name,
+                WorkflowStep.request_data["idempotency_key"].as_string() == idempotency_key,
+            )
+            .order_by(WorkflowStep.created_at.asc())
+        ).first()
+
     def list_by_tenant(
         self,
         *,
