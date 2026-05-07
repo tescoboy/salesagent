@@ -24,6 +24,18 @@ from src.adapters.base import BaseConnectionConfig, BaseProductConfig
 from src.core.utils.encryption import decrypt_api_key, encrypt_api_key, is_encrypted
 
 
+def _require_https(url: str, field_name: str) -> str:
+    """Reject non-https URLs to prevent credential exfiltration to attacker hosts.
+
+    A tenant admin who can edit connection config must not be able to point the
+    auth flow at ``http://attacker.example`` and have us POST publisher
+    credentials there.
+    """
+    if not url.startswith("https://"):
+        raise ValueError(f"{field_name} must be an https:// URL — got {url!r}")
+    return url
+
+
 class TritonConnectionConfig(BaseConnectionConfig):
     """Publisher-level credentials for the Triton TAP Media Buying API.
 
@@ -76,6 +88,11 @@ class TritonConnectionConfig(BaseConnectionConfig):
     @classmethod
     def _decrypt_password(cls, value: str) -> str:
         return decrypt_api_key(value) if is_encrypted(value) else value
+
+    @field_validator("base_url", "login_url", mode="after")
+    @classmethod
+    def _enforce_https(cls, value: str, info) -> str:
+        return _require_https(value, info.field_name)
 
 
 class TritonProductConfig(BaseProductConfig):

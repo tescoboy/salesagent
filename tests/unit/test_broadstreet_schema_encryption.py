@@ -55,3 +55,17 @@ class TestBroadstreetApiKeyEncryption:
         # Re-dump now produces ciphertext — the next save persists the encrypted form.
         re_dumped = rehydrated.model_dump()
         assert is_encrypted(re_dumped["api_key"])
+
+    def test_double_dump_validate_does_not_corrupt(self, encryption_key):
+        """dump → validate → dump → validate must yield the original plaintext.
+
+        Catches the re-encryption hazard where ``is_encrypted()`` failing to
+        recognise a Fernet token would cause the field_serializer to encrypt
+        ciphertext, producing un-decryptable double-encrypted data.
+        """
+        original = BroadstreetConnectionConfig(network_id="123", api_key="bs-secret")
+        first_dump = original.model_dump()
+        rehydrated = BroadstreetConnectionConfig.model_validate(first_dump)
+        second_dump = rehydrated.model_dump()
+        again = BroadstreetConnectionConfig.model_validate(second_dump)
+        assert again.api_key == "bs-secret"

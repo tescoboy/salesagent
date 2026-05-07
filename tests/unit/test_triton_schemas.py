@@ -65,6 +65,21 @@ class TestTritonConnectionConfig:
         with pytest.raises(ValidationError):
             TritonConnectionConfig(username="alice", password="hunter2", auth_type="basic")
 
+    def test_http_login_url_rejected(self):
+        """Tenant admin must not be able to redirect credential POST to attacker host."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="https://"):
+            TritonConnectionConfig(
+                username="alice@example.com", password="hunter2", login_url="http://attacker.example/oauth2/token"
+            )
+
+    def test_http_base_url_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="https://"):
+            TritonConnectionConfig(username="alice@example.com", password="hunter2", base_url="http://attacker.example")
+
 
 class TestTritonProductConfig:
     def test_defaults_are_empty_lists(self):

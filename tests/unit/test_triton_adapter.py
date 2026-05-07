@@ -140,7 +140,8 @@ class TestClientJWTRefresh:
         assert body == {"username": "alice@example.com", "password": "hunter2"}
 
     @patch("src.adapters.triton.client.requests.post")
-    def test_oauth_client_credentials_auth_posts_grant_type_body(self, mock_post):
+    def test_oauth_client_credentials_auth_posts_form_encoded_body(self, mock_post):
+        """RFC 6749 §4.4: client_credentials grants use form-encoded bodies, not JSON."""
         mock_post.return_value = MagicMock(
             status_code=200, json=lambda: {"access_token": "jwt"}, content=b'{"access_token":"jwt"}'
         )
@@ -148,7 +149,9 @@ class TestClientJWTRefresh:
             username="client-id-abc", password="client-secret-xyz", auth_type="oauth_client_credentials"
         )
         client.login()
-        body = mock_post.call_args.kwargs["json"]
+        # Posted as form-encoded `data=`, not JSON `json=`
+        assert "json" not in mock_post.call_args.kwargs
+        body = mock_post.call_args.kwargs["data"]
         assert body == {
             "grant_type": "client_credentials",
             "client_id": "client-id-abc",

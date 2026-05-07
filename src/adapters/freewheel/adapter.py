@@ -80,6 +80,12 @@ class FreeWheelAdapter(AdServerAdapter):
         creative_engine: CreativeEngineAdapter | None = None,
         tenant_id: str | None = None,
     ):
+        """Resolve OAuth client credentials and the target environment host.
+
+        Dry-run defers OAuth client construction so the adapter can be
+        configured before staging credentials are provisioned by FreeWheel's
+        Account Team.
+        """
         super().__init__(config, principal, dry_run, creative_engine, tenant_id)
 
         self.advertiser_id = self.principal.get_adapter_id("freewheel") or self.config.get("default_advertiser_id")
@@ -249,7 +255,7 @@ class FreeWheelAdapter(AdServerAdapter):
             return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status="active")
         assert self._client is not None
         try:
-            campaign = self._client.get_campaign(media_buy_id.replace("freewheel_", ""))
+            campaign = self._client.get_campaign(media_buy_id.removeprefix("freewheel_"))
             status = campaign.get("status", "active").lower()
             return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status=status)
         except FreeWheelAPIError as exc:
@@ -289,7 +295,7 @@ class FreeWheelAdapter(AdServerAdapter):
             return self._unsupported_action_error(action)
 
         if self.dry_run:
-            campaign_id = media_buy_id.replace("freewheel_", "")
+            campaign_id = media_buy_id.removeprefix("freewheel_")
             if action == "pause_media_buy":
                 self.log(f"Would PATCH .../campaigns/{campaign_id} status=paused")
             elif action == "resume_media_buy":

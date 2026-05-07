@@ -160,9 +160,14 @@ def save_adapter_config(tenant_id, **kwargs):
         if not adapter_type:
             return jsonify({"success": False, "error": "adapter_type is required"}), 400
 
-        # For adapters whose schemas mark a field as `secret`, preserve the
-        # previously-stored value when the caller omits it (typical UX: leave
-        # password field blank to keep the existing credential).
+        # For adapters whose schemas mark a field as `secret`, two rules:
+        # (a) reject any submitted ciphertext on the wire — a tenant admin must
+        #     not be able to authenticate a session by replaying another tenant's
+        #     leaked DB-row ciphertext (cross-tenant credential smuggling),
+        # (b) preserve the previously-stored value when the caller omits the
+        #     field (UX: leave password blank to keep existing credential).
+        from src.core.utils.encryption import is_encrypted
+
         schemas = get_adapter_schemas(adapter_type)
         if schemas and schemas.connection_config:
             secret_fields = [
@@ -170,6 +175,18 @@ def save_adapter_config(tenant_id, **kwargs):
                 for name, field in schemas.connection_config.model_fields.items()
                 if isinstance(field.json_schema_extra, dict) and field.json_schema_extra.get("secret")
             ]
+            for field_name in secret_fields:
+                submitted = config_data.get(field_name)
+                if submitted and is_encrypted(submitted):
+                    return (
+                        jsonify(
+                            {
+                                "success": False,
+                                "error": f"{field_name} must be plaintext (encrypted-token replay rejected)",
+                            }
+                        ),
+                        400,
+                    )
             if secret_fields:
                 missing = [f for f in secret_fields if not config_data.get(f)]
                 if missing:
@@ -259,6 +276,8 @@ def test_freewheel_connection(tenant_id, **kwargs):
     ``client_secret`` (optional — falls back to the encrypted secret already stored
     on AdapterConfig.config_json).
     """
+    from src.core.utils.encryption import is_encrypted
+
     try:
         data = request.get_json() or {}
         client_id = data.get("client_id")
@@ -268,6 +287,17 @@ def test_freewheel_connection(tenant_id, **kwargs):
 
         if not client_id or not network_id:
             return jsonify({"success": False, "error": "client_id and network_id are required"}), 400
+
+        # Reject submitted ciphertext — only the DB-fallback path is allowed
+        # to use the stored ciphertext. See cross-tenant smuggling note in
+        # save_adapter_config.
+        if client_secret and is_encrypted(client_secret):
+            return (
+                jsonify(
+                    {"success": False, "error": "client_secret must be plaintext (encrypted-token replay rejected)"}
+                ),
+                400,
+            )
 
         if not client_secret:
             with get_db_session() as session:
@@ -300,7 +330,11 @@ def test_freewheel_connection(tenant_id, **kwargs):
         try:
             client._fetch_token()
         except FreeWheelAPIError as exc:
-            return jsonify({"success": False, "error": str(exc)}), 200
+            # Log the full upstream body server-side; return only a generic
+            # message to the client to avoid echoing reflected request data
+            # or hint messages from the auth provider.
+            logger.warning("FreeWheel auth probe failed: %s body=%s", exc, exc.body)
+            return jsonify({"success": False, "error": "FreeWheel rejected the credentials"}), 200
 
         network_name: str | None = None
         try:
@@ -313,7 +347,7 @@ def test_freewheel_connection(tenant_id, **kwargs):
 
     except Exception as e:
         logger.error(f"FreeWheel connection test failed: {e}", exc_info=True)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
 
 
 # Triton-specific endpoints
@@ -327,6 +361,8 @@ def test_triton_connection(tenant_id, **kwargs):
     Accepts ``username`` (required) and ``password`` (optional — falls back to
     the encrypted password already stored on AdapterConfig.config_json).
     """
+    from src.core.utils.encryption import is_encrypted
+
     try:
         data = request.get_json() or {}
         username = data.get("username")
@@ -336,6 +372,19 @@ def test_triton_connection(tenant_id, **kwargs):
 
         if not username:
             return jsonify({"success": False, "error": "username is required"}), 400
+
+        # https-only — prevent the form from redirecting credential POST to an
+        # attacker-controlled host.
+        if not base_url.startswith("https://") or not login_url.startswith("https://"):
+            return jsonify({"success": False, "error": "base_url and login_url must be https://"}), 400
+
+        # Reject submitted ciphertext — see cross-tenant smuggling note in
+        # save_adapter_config.
+        if password and is_encrypted(password):
+            return (
+                jsonify({"success": False, "error": "password must be plaintext (encrypted-token replay rejected)"}),
+                400,
+            )
 
         if not password:
             with get_db_session() as session:
@@ -358,7 +407,8 @@ def test_triton_connection(tenant_id, **kwargs):
         try:
             client.login()
         except TritonAPIError as exc:
-            return jsonify({"success": False, "error": str(exc)}), 200
+            logger.warning("Triton auth probe failed: %s body=%s", exc, exc.body)
+            return jsonify({"success": False, "error": "Triton rejected the credentials"}), 200
 
         publisher_name: str | None = None
         try:
@@ -371,7 +421,7 @@ def test_triton_connection(tenant_id, **kwargs):
 
     except Exception as e:
         logger.error(f"Triton connection test failed: {e}", exc_info=True)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
 
 
 # Broadstreet-specific endpoints

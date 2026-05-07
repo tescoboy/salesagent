@@ -86,6 +86,12 @@ def validate_targeting(targeting_overlay: Any) -> list[str]:
     TAP is audio-only: video/display/CTV-specific targeting dimensions don't
     apply. IAB content categories don't map onto TAP's content model — use
     genre targeting via product config instead.
+
+    Buyers see a clear ``unsupported_targeting`` error rather than have a
+    dimension silently dropped at translation time. The ``daypart`` overlay
+    is rejected because TAP dayparts are pre-built entities referenced by ID
+    via product config — there's no way to translate a free-form daypart spec
+    here.
     """
     unsupported: list[str] = []
     if targeting_overlay is None:
@@ -108,5 +114,19 @@ def validate_targeting(targeting_overlay: Any) -> list[str]:
 
     if getattr(targeting_overlay, "browser_any_of", None):
         unsupported.append("Browser targeting not supported (audio platform)")
+
+    if getattr(targeting_overlay, "frequency_cap", None):
+        unsupported.append(
+            "Frequency cap targeting not yet supported — file a follow-up if your TAP account uses flight-level caps"
+        )
+
+    if getattr(targeting_overlay, "audiences_any_of", None):
+        unsupported.append("Audience/segment targeting not supported by the Triton adapter")
+
+    if getattr(targeting_overlay, "dayparting", None):
+        unsupported.append(
+            "Free-form dayparting not supported — reference pre-built TAP daypart entities via "
+            "TritonProductConfig.daypart_ids instead"
+        )
 
     return unsupported

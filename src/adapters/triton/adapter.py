@@ -56,14 +56,19 @@ class TritonAdapter(AdServerAdapter):
 
     connection_config_class = TritonConnectionConfig
     product_config_class = TritonProductConfig
+    # Triton publishes audio inventory only — see TritonAdapter docstring for
+    # the entity model. supports_custom_targeting is true because the targeting
+    # translator emits station/genre/daypart/stream-type rules from product
+    # config and per-package custom["triton"] overrides — custom-KV in
+    # everything but name.
     capabilities = AdapterCapabilities(
-        supports_inventory_sync=True,
-        supports_inventory_profiles=False,
-        inventory_entity_label="Stations",
-        supports_custom_targeting=False,
-        supports_geo_targeting=True,
-        supports_dynamic_products=False,
         supported_pricing_models=["cpm", "flat_rate"],
+        inventory_entity_label="Stations",
+        supports_inventory_sync=True,
+        supports_geo_targeting=True,
+        supports_custom_targeting=True,
+        supports_inventory_profiles=False,
+        supports_dynamic_products=False,
         supports_webhooks=False,
         supports_realtime_reporting=False,
     )
@@ -76,6 +81,11 @@ class TritonAdapter(AdServerAdapter):
         creative_engine: CreativeEngineAdapter | None = None,
         tenant_id: str | None = None,
     ):
+        """Resolve TAP credentials from ``config`` and lazily construct the JWT client.
+
+        Dry-run defers client construction so the adapter can be selected
+        and configured without valid publisher credentials.
+        """
         super().__init__(config, principal, dry_run, creative_engine, tenant_id)
 
         self.advertiser_id = self.principal.get_adapter_id("triton") or self.config.get("default_advertiser_id")
@@ -255,7 +265,7 @@ class TritonAdapter(AdServerAdapter):
             return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status="active")
         assert self._client is not None
         try:
-            campaign = self._client.get_campaign(media_buy_id.replace("triton_", ""))
+            campaign = self._client.get_campaign(media_buy_id.removeprefix("triton_"))
             status = "active" if campaign.get("active") else "paused"
             return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status=status)
         except TritonAPIError as exc:
@@ -291,7 +301,7 @@ class TritonAdapter(AdServerAdapter):
         if action not in REQUIRED_UPDATE_ACTIONS:
             return self._unsupported_action_error(action)
 
-        campaign_id = media_buy_id.replace("triton_", "")
+        campaign_id = media_buy_id.removeprefix("triton_")
 
         if self.dry_run:
             return self._update_dry_run(action, media_buy_id, campaign_id, package_id, budget, today)
@@ -369,16 +379,33 @@ class TritonAdapter(AdServerAdapter):
                 implementation_date=today,
             )
 
-        if action in {"update_package_budget", "update_package_impressions"} and package_id and budget is not None:
+        if action == "update_package_impressions" and package_id and budget is not None:
             flight = self._find_flight_by_external_code(campaign_id, package_id)
             if not flight:
                 return UpdateMediaBuyError(
                     errors=[Error(code="flight_not_found", message=f"Flight '{package_id}' not found", details=None)]
                 )
-            new_impressions = budget if action == "update_package_impressions" else int((budget / 10.0) * 1000)
             self._client.update_flight(
                 str(flight.get("id") or flight.get("Id")),
-                {"goal": {"type": "IMPRESSIONS", "value": new_impressions}},
+                {"goal": {"type": "IMPRESSIONS", "value": budget}},
+            )
+
+        if action == "update_package_budget":
+            # Budget→impressions conversion needs the flight's actual rate from
+            # TAP. Until we implement a get-flight-rate path (and confirm the
+            # rate field shape in the Media Buying API), refuse rather than
+            # ship the wrong impression goal under an assumed CPM.
+            return UpdateMediaBuyError(
+                errors=[
+                    Error(
+                        code="not_implemented",
+                        message=(
+                            "update_package_budget pending TAP flight-rate read. "
+                            "Use update_package_impressions to set a goal directly."
+                        ),
+                        details=None,
+                    )
+                ]
             )
 
         return UpdateMediaBuySuccess(media_buy_id=media_buy_id, affected_packages=[], implementation_date=today)

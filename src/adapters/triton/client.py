@@ -54,25 +54,29 @@ class TritonClient:
     def login(self) -> str:
         """Exchange credentials for a JWT and cache it.
 
-        Posts the body shape that matches ``auth_type``:
-        - ``password`` (default): ``{"username": ..., "password": ...}``
-        - ``oauth_client_credentials``: ``{"grant_type": "client_credentials",
-          "client_id": <username>, "client_secret": <password>}``
+        - ``password`` (default): JSON ``{"username": ..., "password": ...}`` —
+          Triton's documented user-login flow.
+        - ``oauth_client_credentials``: form-encoded
+          ``grant_type=client_credentials&client_id=...&client_secret=...`` per
+          RFC 6749 §4.4. Standard OAuth2 token endpoints reject JSON bodies for
+          this grant.
         """
         if self.auth_type == "oauth_client_credentials":
-            payload = {
-                "grant_type": "client_credentials",
-                "client_id": self.username,
-                "client_secret": self.password,
-            }
+            response = requests.post(
+                f"{self.login_url}/oauth2/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self.username,
+                    "client_secret": self.password,
+                },
+                timeout=self.timeout,
+            )
         else:
-            payload = {"username": self.username, "password": self.password}
-
-        response = requests.post(
-            f"{self.login_url}/oauth2/token",
-            json=payload,
-            timeout=self.timeout,
-        )
+            response = requests.post(
+                f"{self.login_url}/oauth2/token",
+                json={"username": self.username, "password": self.password},
+                timeout=self.timeout,
+            )
         if response.status_code != 200:
             raise TritonAPIError(
                 f"Triton login failed: {response.status_code}",
@@ -81,7 +85,11 @@ class TritonClient:
             )
         token = response.json().get("access_token") or response.json().get("token")
         if not token:
-            raise TritonAPIError("Triton login response missing access_token")
+            raise TritonAPIError(
+                "Triton login response missing access_token",
+                status_code=response.status_code,
+                body=response.text,
+            )
         self._jwt = token
         return token
 

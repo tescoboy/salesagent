@@ -146,21 +146,44 @@ def get_adapter(
                     else True
                 )
             elif adapter_type in {"triton", "triton_digital"}:
-                # Triton credentials live in config_json (publisher username/password,
-                # base_url, default_advertiser_id). Password decryption happens in the
-                # TritonConnectionConfig field validator when the schema rehydrates.
+                # Triton credentials live in config_json. Rehydrate via the
+                # connection schema so the field validator decrypts password,
+                # then pull each field through attribute access — model_dump()
+                # would re-run the field_serializer and re-encrypt, which would
+                # ship ciphertext to the upstream login endpoint instead of
+                # plaintext.
                 stored = config_row.config_json or {}
                 if stored:
                     triton_validated = TritonAdapter.connection_config_class(**stored)
-                    adapter_config.update(triton_validated.model_dump(exclude_none=True))
+                    adapter_config.update(
+                        {
+                            "auth_type": triton_validated.auth_type,
+                            "username": triton_validated.username,
+                            "password": triton_validated.password,
+                            "base_url": triton_validated.base_url,
+                            "login_url": triton_validated.login_url,
+                            "default_advertiser_id": triton_validated.default_advertiser_id,
+                            "manual_approval_required": triton_validated.manual_approval_required,
+                        }
+                    )
             elif adapter_type == "freewheel":
-                # FreeWheel credentials live in config_json (OAuth client_id/client_secret,
-                # network_id, environment). client_secret is decrypted by the
-                # FreeWheelConnectionConfig field validator on rehydration.
+                # FreeWheel credentials live in config_json. Same plaintext-via-
+                # attribute-access requirement as Triton above — model_dump()
+                # would re-encrypt client_secret before it reaches the OAuth
+                # token endpoint.
                 stored = config_row.config_json or {}
                 if stored:
                     fw_validated = FreeWheelAdapter.connection_config_class(**stored)
-                    adapter_config.update(fw_validated.model_dump(exclude_none=True))
+                    adapter_config.update(
+                        {
+                            "client_id": fw_validated.client_id,
+                            "client_secret": fw_validated.client_secret,
+                            "network_id": fw_validated.network_id,
+                            "environment": fw_validated.environment,
+                            "default_advertiser_id": fw_validated.default_advertiser_id,
+                            "manual_approval_required": fw_validated.manual_approval_required,
+                        }
+                    )
 
     if not selected_adapter:
         # Default to mock if no adapter specified

@@ -1,15 +1,24 @@
-"""End-to-end config round-trip for Triton + FreeWheel.
+"""Schema-level config round-trip for Triton + FreeWheel against the real DB.
 
-Verifies the full lifecycle that breaks if any of the wiring layers (schema
-validation, encryption, persistence, rehydration, tenant_status reporting)
-drifts:
+Covers the persistence path *below* the Flask wrapper:
 
-  payload → save_adapter_config → AdapterConfig.config_json → ciphertext at rest
-  ciphertext at rest → tenant_status check → is_configured=True
-  ciphertext at rest → connection_config_class.model_validate → plaintext in memory
+  TritonConnectionConfig / FreeWheelConnectionConfig (validate + encrypt)
+    → AdapterConfig.config_json in PostgreSQL
+    → on-disk: ciphertext for secret fields
+    → tenant_status: is_configured / missing_config reporting
+    → rehydrate: connection_config_class.model_validate decrypts to plaintext
 
-This catches wiring bugs (broken templates, missing fields, schema drift)
-without requiring real adapter credentials.
+This catches schema-drift bugs (e.g. a tenant_status check that reads a
+field name the schema no longer exposes) and encryption-pipeline bugs (e.g.
+a value that round-trips through model_dump → model_validate but doesn't
+persist as ciphertext).
+
+What's intentionally NOT covered here:
+- The save_adapter_config Flask blueprint at /api/tenant/<id>/adapter-config
+  (template parsing, secret-field preservation, ciphertext-replay rejection).
+  That belongs at the admin/blueprint test layer with a Flask test client and
+  is tracked as follow-up work — see docs/adapters/{triton,freewheel}/README.md
+  for the credential-validation gates that need real OAuth endpoints anyway.
 """
 
 from __future__ import annotations

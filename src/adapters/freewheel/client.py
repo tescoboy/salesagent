@@ -74,9 +74,13 @@ class FreeWheelClient:
         if not token:
             raise FreeWheelAPIError("FreeWheel auth response missing access_token")
         # FreeWheel returns expires_in in seconds; default to 7 days if absent.
-        expires_in = body.get("expires_in", 7 * 24 * 60 * 60)
+        # Clamp the refresh leeway to half the TTL so shorter-lived tokens
+        # (probes, error responses, future TTL changes) don't make us refresh
+        # on every call.
+        expires_in = float(body.get("expires_in", 7 * 24 * 60 * 60))
+        leeway = min(self._REFRESH_LEEWAY_SECONDS, expires_in / 2)
         self._token = token
-        self._token_expires_at = time.time() + float(expires_in) - self._REFRESH_LEEWAY_SECONDS
+        self._token_expires_at = time.time() + expires_in - leeway
         return token
 
     def _headers(self) -> dict[str, str]:

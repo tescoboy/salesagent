@@ -64,9 +64,12 @@ def build_targeting(
 def validate_targeting(targeting_overlay: Any) -> list[str]:
     """Return a list of unsupported-targeting messages for FreeWheel.
 
-    FreeWheel handles all standard AdCP overlay dimensions (geo, device,
-    custom). The only hard reject today is ``geo_postal_areas`` — the
-    Publisher API doesn't expose postal-area targeting in the same shape.
+    Buyers see a clear ``unsupported_targeting`` error rather than have a
+    dimension silently dropped at translation time. Frequency cap, audience,
+    and dayparting overlays are rejected pending sandbox-validated translation
+    to FreeWheel's native shapes — until the Publisher API JSON contract is
+    locked in (see docs/adapters/freewheel/README.md), passing them through
+    would risk shipping the wrong wire format.
     """
     unsupported: list[str] = []
     if targeting_overlay is None:
@@ -76,5 +79,20 @@ def validate_targeting(targeting_overlay: Any) -> list[str]:
         targeting_overlay, "geo_postal_areas_exclude", None
     ):
         unsupported.append("Postal-area targeting not supported — use geo_metros (DMA) or geo_regions instead")
+
+    if getattr(targeting_overlay, "frequency_cap", None):
+        unsupported.append(
+            "Frequency cap targeting pending FreeWheel sandbox validation — "
+            "set frequency caps directly via FreeWheelProductConfig for now"
+        )
+
+    if getattr(targeting_overlay, "audiences_any_of", None):
+        unsupported.append("Audience/segment targeting pending FreeWheel sandbox validation")
+
+    if getattr(targeting_overlay, "dayparting", None):
+        unsupported.append(
+            "Free-form dayparting pending FreeWheel sandbox validation — "
+            "use a pre-built FreeWheel targeting profile via FreeWheelProductConfig.targeting_profile_id"
+        )
 
     return unsupported
