@@ -305,7 +305,7 @@ def ensure_env() -> StepResult:
 
 def ensure_pre_commit() -> StepResult:
     """Install pre-commit hooks if not already installed."""
-    # Check both default hooks dir and custom hooksPath (e.g. beads uses .beads/hooks)
+    # Check both default hooks dir and custom hooksPath
     hook_file = ROOT_DIR / ".git" / "hooks" / "pre-commit"
     try:
         hooks_path = subprocess.run(

@@ -1,5 +1,6 @@
 """SQLAlchemy models for database schema."""
 
+import json
 import logging
 from datetime import datetime
 from decimal import Decimal
@@ -37,6 +38,20 @@ from sqlalchemy.sql import func
 
 from src.core.database.json_type import JSONType
 from src.core.json_validators import JSONValidatorMixin
+
+# Minimal-but-spec-valid baseline for ``Product.reporting_capabilities`` per
+# adcp 4.4. The same value is used as both the SQL ``server_default`` (for
+# raw INSERTs) and the Python-side ``default`` (for in-memory ORM
+# construction); deriving the SQL default from this dict via ``json.dumps``
+# guarantees the two paths cannot drift.
+PRODUCT_REPORTING_CAPABILITIES_DEFAULT: dict = {
+    "available_reporting_frequencies": ["daily"],
+    "expected_delay_minutes": 0,
+    "timezone": "UTC",
+    "supports_webhooks": False,
+    "available_metrics": ["impressions"],
+    "date_range_support": "date_range",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -167,19 +182,14 @@ class Tenant(Base, JSONValidatorMixin):
         nullable=False,
         server_default=text("false"),
     )
-    # AAO model (sprint 1.7 — see docs/design/replace-authorized-properties-with-aao-lookup.md):
-    # house_domain is where the publisher's brand.json lives; properties are
-    # looked up live from https://{house_domain}/.well-known/brand.json. Replaces
-    # the manually-maintained AuthorizedProperty table for new tenants.
-    house_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # public_agent_url is what publishers list in their adagents.json to
     # authorize this tenant's agent. Embedded-mode tenants share one
     # (https://interchange.io); self-hosted publishers use their own salesagent.
     public_agent_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # Where THIS salesagent operator publishes its own brand.json (under
-    # ``house_domain``, typically ``/.well-known/brand.json``). Surfaced on
+    # Absolute URL of the operator's brand.json (typically
+    # ``https://{operator_domain}/.well-known/brand.json``). Surfaced on
     # ``get_adcp_capabilities → identity.brand_json_url`` so receivers verifying
-    # our outbound signatures resolve through our house_domain.
+    # our outbound signatures can fetch our operator-side keys.
     # See docs/design/signing-non-embedded.md.
     brand_json_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     # Sprint 1.8 buyer-advertiser routing — see
@@ -364,8 +374,17 @@ class Product(Base, JSONValidatorMixin):
     product_card_detailed: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     # Type hint: list of placement dicts (each with placement_id, name, description, format_ids)
     placements: Mapped[list[dict] | None] = mapped_column(JSONType, nullable=True)
-    # Type hint: reporting capabilities dict
-    reporting_capabilities: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: reporting capabilities dict (AdCP 4.4: required on wire)
+    # ``default`` populates the attribute on Python-side construction (in-memory
+    # models, factory helpers); ``server_default`` covers DB INSERTs that bypass
+    # the ORM (raw SQL, legacy clients). Both derive from the same dict
+    # constant so they cannot drift.
+    reporting_capabilities: Mapped[dict] = mapped_column(
+        JSONType,
+        nullable=False,
+        default=lambda: dict(PRODUCT_REPORTING_CAPABILITIES_DEFAULT),
+        server_default=text(f"'{json.dumps(PRODUCT_REPORTING_CAPABILITIES_DEFAULT)}'::jsonb"),
+    )
 
     # AdCP 3.6.0 product fields
     property_targeting_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -2239,6 +2258,13 @@ class PublisherPartner(Base, JSONValidatorMixin):
         String(20), nullable=False, default="pending", comment="pending, success, error"
     )
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # AAO status counts — populated by sync_publisher_partners + the per-row
+    # refresh endpoint. Drive the "47 / 200 authorized" UI without re-hitting
+    # AAO on every page render.
+    total_properties: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    authorized_properties: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_fetch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
