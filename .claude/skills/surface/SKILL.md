@@ -52,35 +52,15 @@ Open `test_creative.py` → see 89 test names → 30 real, 59 stubs → know exa
 
 ## Protocol
 
-### Step 1: Cook the molecule
-
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/entity-test-surface.yaml \
-  --var "ENTITY_NAMES={all_args}" \
-  --epic-title "Surface: {all_args}"
-```
-
-**Dry run first** (recommended):
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/entity-test-surface.yaml \
-  --var "ENTITY_NAMES={all_args}" \
-  --epic-title "Surface: {all_args}" \
-  --dry-run
-```
-
-### Step 2: Walk the molecule
+For each entity, walk these steps in conversation:
 
 ```
-bd ready → bd show <atom-id> → execute → bd close <atom-id> → repeat
+gather-obligations → audit-existing → review → triage → generate-suite → verify → commit
 ```
 
-Each entity goes through: gather-obligations → audit-existing → review → triage → generate-suite → verify → commit.
+### Done when all entity suites committed
 
-### Step 3: Done when all atoms closed
-
-All entity suites committed. Coverage summary generated.
+Coverage summary generated.
 
 ## Naming Rules
 
@@ -92,4 +72,3 @@ Test names describe **behavior**, not bugs:
 
 - `/remediate` — Fill the stubs this skill creates
 - `/guard` — Structural guards that prevent new violations
-- `/mol-execute` — Execute individual beads tasks (now entity-suite-aware)

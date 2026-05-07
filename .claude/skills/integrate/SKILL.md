@@ -43,44 +43,17 @@ The catalog atom checks if `tests/unit/test_{entity}.py` exists. If not:
 
 ## Protocol
 
-### Step 1: Cook the molecule
-
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/integration-from-stub.yaml \
-  --var "ENTITY_NAMES={all_args}" \
-  --epic-title "Integrate: {all_args}"
-```
-
-**Dry run first** (recommended):
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/integration-from-stub.yaml \
-  --var "ENTITY_NAMES={all_args}" \
-  --epic-title "Integrate: {all_args}" \
-  --dry-run
-```
-
-### Step 2: Walk the molecule
-
-```
-bd ready → bd show <atom-id> → read description → execute → bd close <atom-id> → repeat
-```
-
-Each entity goes through 9 atoms:
+For each entity, walk these 9 steps in conversation:
 
 ```
 catalog → review → triage → architect → write-integration → fix-green → reconcile-xfail → verify → commit
 ```
 
-**Barrier serialization**: Entities execute in parallel within each atom phase,
-but `write-integration` waits for ALL entities' `commit` from the previous
-barrier (if any) to complete. This prevents merge conflicts.
+When running multiple entities, complete one entity end-to-end before starting the next to avoid merge conflicts in the test files.
 
-### Step 3: Done when all atoms closed
+### Done when all entities committed
 
-All entities committed. Finalize atom runs `./run_all_tests.sh` and reports
-remaining xfails.
+After the last commit, run `./run_all_tests.sh` and report remaining xfails.
 
 ## Atom Details
 
@@ -149,5 +122,4 @@ production code is wrong — not the stub.
 - `/surface` — Create entity test suites (prerequisite)
 - `/verify-spec` — Verify test expectations against AdCP spec (run after surface)
 - `/remediate` — Fill unit test stubs (different from integration derivation)
-- `/mol-execute` — Execute individual beads tasks
 - `/guard` — Structural guards that protect the architecture

@@ -99,37 +99,15 @@ For each entity, the test file is updated with:
 
 ## Protocol
 
-### Step 1: Cook the molecule
-
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/verify-spec.yaml \
-  --var "ENTITY_NAMES={all_args}" \
-  --epic-title "Verify spec: {all_args}"
-```
-
-**Dry run first** (recommended):
-```bash
-python3 .claude/scripts/cook_formula.py \
-  --formula .claude/formulas/verify-spec.yaml \
-  --var "ENTITY_NAMES={all_args}" \
-  --epic-title "Verify spec: {all_args}" \
-  --dry-run
-```
-
-### Step 2: Walk the molecule
+For each entity, walk these steps in conversation:
 
 ```
-bd ready -> bd show <atom-id> -> execute -> bd close <atom-id> -> repeat
+pre-check -> pin-commits -> extract-expectations -> verify-against-spec -> annotate -> review -> commit
 ```
 
-Each entity goes through: pre-check -> pin-commits -> extract-expectations ->
-verify-against-spec -> annotate -> review -> commit.
+### Done when all entity suites annotated
 
-### Step 3: Done when all atoms closed
-
-All entity suites annotated with spec links and verified. Discrepancy
-report generated.
+Spec links added; discrepancy report generated.
 
 ## Verification Strategy
 
