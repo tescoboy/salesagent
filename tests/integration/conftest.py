@@ -585,6 +585,39 @@ from core.main import main
 main()
 """
 
+    # Seed a "default" tenant so the bare-localhost route resolves. The MCP
+    # subprocess connects to ``localhost:port``, which ``_resolve_tenant``
+    # in ``core/main.py`` maps to ``tenant_id='default'``. ``integration_db``
+    # creates schema via ``Base.metadata.create_all`` but never runs the
+    # production seed, so without this every MCP call lands on the
+    # bare-host fallback and gets 404.
+    from datetime import UTC
+    from datetime import datetime as _datetime
+
+    from src.core.database.database_session import get_db_session
+    from src.core.database.models import Tenant as _Tenant
+
+    with get_db_session() as _session:
+        _existing = _session.scalars(select(_Tenant).filter_by(tenant_id="default")).first()
+        if _existing is None:
+            _now = _datetime.now(UTC)
+            _session.add(
+                _Tenant(
+                    tenant_id="default",
+                    name="Default Tenant",
+                    subdomain="default",
+                    is_active=True,
+                    ad_server="mock",
+                    authorized_emails=[],
+                    authorized_domains=[],
+                    house_domain="default.example.com",
+                    public_agent_url="https://default.example.com/agent",
+                    created_at=_now,
+                    updated_at=_now,
+                )
+            )
+            _session.commit()
+
     process = subprocess.Popen(
         [sys.executable, "-c", server_script],
         env=env,
@@ -593,28 +626,41 @@ main()
         bufsize=1,  # Line buffered
     )
 
-    # Wait for server to be ready
-    max_wait = 20  # seconds (increased for server initialization)
+    # Wait for server to be ready.
+    #
+    # TCP `connect()` succeeds once uvicorn binds the socket — but the ASGI
+    # app's startup hooks (StreamableHTTP session manager, route mounts) run
+    # AFTER the bind. A TCP-only probe lets the test issue requests during
+    # the startup gap, where /mcp/ returns 404 because the MCP transport
+    # isn't mounted yet. Probe HTTP and wait until /mcp/ stops returning 404
+    # (any other status — 401 unauthenticated, 405 GET-not-allowed, etc. —
+    # means the route is mounted and the test can proceed).
+    import http.client as _http_client
+
+    max_wait = 30
     start_time = time.time()
     server_ready = False
 
     while time.time() - start_time < max_wait:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise RuntimeError(
+                f"MCP server process died unexpectedly.\n"
+                f"STDOUT: {stdout.decode() if stdout else 'N/A'}\n"
+                f"STDERR: {stderr.decode() if stderr else 'N/A'}"
+            )
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1)
-                s.connect(("localhost", port))
+            conn = _http_client.HTTPConnection("localhost", port, timeout=1)
+            conn.request("GET", "/mcp/")
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            if resp.status != 404:
                 server_ready = True
                 break
-        except (ConnectionRefusedError, OSError):
-            # Check if process has died
-            if process.poll() is not None:
-                stdout, stderr = process.communicate()
-                raise RuntimeError(
-                    f"MCP server process died unexpectedly.\n"
-                    f"STDOUT: {stdout.decode() if stdout else 'N/A'}\n"
-                    f"STDERR: {stderr.decode() if stderr else 'N/A'}"
-                )
-            time.sleep(0.3)
+        except (ConnectionRefusedError, OSError, _http_client.HTTPException):
+            pass
+        time.sleep(0.3)
 
     if not server_ready:
         # Capture output for debugging
