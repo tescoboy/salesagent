@@ -39,21 +39,38 @@ class TritonClient:
         base_url: str = "https://mbapi.tritondigital.com",
         login_url: str = "https://login.tritondigital.com",
         timeout: float = 30.0,
+        auth_type: str = "password",
     ):
         self.username = username
         self.password = password
         self.base_url = base_url.rstrip("/")
         self.login_url = login_url.rstrip("/")
         self.timeout = timeout
+        self.auth_type = auth_type
         self._jwt: str | None = None
 
     # ----- auth -----
 
     def login(self) -> str:
-        """Exchange username/password for a JWT and cache it."""
+        """Exchange credentials for a JWT and cache it.
+
+        Posts the body shape that matches ``auth_type``:
+        - ``password`` (default): ``{"username": ..., "password": ...}``
+        - ``oauth_client_credentials``: ``{"grant_type": "client_credentials",
+          "client_id": <username>, "client_secret": <password>}``
+        """
+        if self.auth_type == "oauth_client_credentials":
+            payload = {
+                "grant_type": "client_credentials",
+                "client_id": self.username,
+                "client_secret": self.password,
+            }
+        else:
+            payload = {"username": self.username, "password": self.password}
+
         response = requests.post(
             f"{self.login_url}/oauth2/token",
-            json={"username": self.username, "password": self.password},
+            json=payload,
             timeout=self.timeout,
         )
         if response.status_code != 200:

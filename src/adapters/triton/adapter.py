@@ -89,6 +89,7 @@ class TritonAdapter(AdServerAdapter):
         self.password = self.config.get("password")
         self.base_url = self.config.get("base_url", "https://mbapi.tritondigital.com")
         self.login_url = self.config.get("login_url", "https://login.tritondigital.com")
+        self.auth_type = self.config.get("auth_type", "password")
 
         if self.dry_run:
             self.log("Running in dry-run mode — Triton TAP API calls will be simulated", dry_run_prefix=False)
@@ -101,6 +102,7 @@ class TritonAdapter(AdServerAdapter):
                 password=self.password,
                 base_url=self.base_url,
                 login_url=self.login_url,
+                auth_type=self.auth_type,
             )
 
     # ----- capabilities -----

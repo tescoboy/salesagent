@@ -19,13 +19,29 @@ Expected context:
         </p>
 
         <div class="form-group">
-            <label for="triton_username">Publisher Email *</label>
-            <input type="email" id="triton_username" name="triton_username"
+            <label for="triton_auth_type">Authentication Method</label>
+            <select id="triton_auth_type" name="triton_auth_type" class="form-control">
+                <option value="password" {% if not adapter_config or adapter_config.get('auth_type', 'password') == 'password' %}selected{% endif %}>
+                    User login (publisher email + password)
+                </option>
+                <option value="oauth_client_credentials" {% if adapter_config and adapter_config.get('auth_type') == 'oauth_client_credentials' %}selected{% endif %}>
+                    OAuth client credentials (service account)
+                </option>
+            </select>
+            <small class="form-text text-muted">
+                Use OAuth client credentials when Triton's Account Team has issued
+                a service-account client_id/client_secret pair for server-to-server use.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="triton_username">Publisher Email / Client ID *</label>
+            <input type="text" id="triton_username" name="triton_username"
                    value="{{ adapter_config.get('username', '') if adapter_config else '' }}"
-                   placeholder="publisher@example.com"
+                   placeholder="publisher@example.com or client_id"
                    required>
             <small class="form-text text-muted">
-                The publisher login email registered with Triton Digital.
+                Publisher login email (default) or OAuth client_id when using service-account auth.
             </small>
         </div>
 
@@ -92,6 +108,7 @@ Expected context:
 function _tritonPayload() {
     const passwordEl = document.getElementById('triton_password');
     const config = {
+        auth_type: document.getElementById('triton_auth_type').value,
         username: document.getElementById('triton_username').value,
         base_url: document.getElementById('triton_base_url').value,
         login_url: document.getElementById('triton_login_url').value,

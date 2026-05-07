@@ -8,7 +8,15 @@ Connection-level ``password`` is encrypted at rest with the same Fernet key
 the rest of the codebase uses for sensitive credentials. Encryption happens
 transparently via Pydantic field serializer/validator: callers see plaintext
 in memory, persisted JSON contains ciphertext.
+
+``auth_type`` lets us swap between Triton's user-login flow (the documented
+default) and an OAuth2 ``client_credentials`` machine flow if Triton's Account
+Team issues service-account credentials. The same ``username``/``password``
+slots carry either credential pair — the client posts the right body shape
+based on ``auth_type``.
 """
+
+from typing import Literal
 
 from pydantic import Field, field_serializer, field_validator
 
@@ -24,14 +32,24 @@ class TritonConnectionConfig(BaseConnectionConfig):
     lives in :class:`TritonProductConfig`.
     """
 
+    auth_type: Literal["password", "oauth_client_credentials"] = Field(
+        default="password",
+        description=(
+            "Authentication flow. 'password' posts username+password to the Login API "
+            "(documented default). 'oauth_client_credentials' posts grant_type/client_id/"
+            "client_secret — used when Triton issues service-account credentials. The same "
+            "username/password slots hold the credential pair for either flow."
+        ),
+        json_schema_extra={"ui_order": 0, "enum": ["password", "oauth_client_credentials"]},
+    )
     username: str = Field(
         ...,
-        description="Triton publisher login email",
+        description="Triton publisher login email (or OAuth client_id when auth_type=oauth_client_credentials)",
         json_schema_extra={"ui_order": 1},
     )
     password: str = Field(
         ...,
-        description="Triton publisher login password",
+        description="Triton publisher password (or OAuth client_secret when auth_type=oauth_client_credentials)",
         json_schema_extra={"secret": True, "ui_order": 2},
     )
     base_url: str = Field(

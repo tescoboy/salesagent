@@ -418,7 +418,14 @@ def create_tenant():
 
                 triton_payload = {
                     k: data[k]
-                    for k in ("username", "password", "base_url", "login_url", "default_advertiser_id")
+                    for k in (
+                        "auth_type",
+                        "username",
+                        "password",
+                        "base_url",
+                        "login_url",
+                        "default_advertiser_id",
+                    )
                     if k in data
                 }
                 validated = TritonConnectionConfig(**triton_payload)
@@ -622,7 +629,14 @@ def update_tenant(tenant_id):
                         from src.adapters.triton import TritonConnectionConfig
 
                         merged = dict(adapter.config_json or {})
-                        for field_name in ("username", "password", "base_url", "login_url", "default_advertiser_id"):
+                        for field_name in (
+                            "auth_type",
+                            "username",
+                            "password",
+                            "base_url",
+                            "login_url",
+                            "default_advertiser_id",
+                        ):
                             if field_name in adapter_data:
                                 merged[field_name] = adapter_data[field_name]
                         validated = TritonConnectionConfig(**merged)

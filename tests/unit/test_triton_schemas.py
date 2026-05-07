@@ -49,6 +49,22 @@ class TestTritonConnectionConfig:
         schema = TritonConnectionConfig.model_json_schema()
         assert schema["properties"]["password"].get("secret") is True
 
+    def test_auth_type_default_is_password(self):
+        cfg = TritonConnectionConfig(username="alice@example.com", password="hunter2")
+        assert cfg.auth_type == "password"
+
+    def test_oauth_client_credentials_auth_type_accepted(self):
+        cfg = TritonConnectionConfig(
+            username="client-id-abc", password="client-secret-xyz", auth_type="oauth_client_credentials"
+        )
+        assert cfg.auth_type == "oauth_client_credentials"
+
+    def test_invalid_auth_type_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            TritonConnectionConfig(username="alice", password="hunter2", auth_type="basic")
+
 
 class TestTritonProductConfig:
     def test_defaults_are_empty_lists(self):

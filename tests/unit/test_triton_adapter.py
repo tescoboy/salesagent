@@ -128,3 +128,29 @@ class TestClientJWTRefresh:
         client = TritonClient(username="bad", password="bad")
         with pytest.raises(TritonAPIError, match="login failed"):
             client.login()
+
+    @patch("src.adapters.triton.client.requests.post")
+    def test_password_auth_posts_username_password_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200, json=lambda: {"access_token": "jwt"}, content=b'{"access_token":"jwt"}'
+        )
+        client = TritonClient(username="alice@example.com", password="hunter2", auth_type="password")
+        client.login()
+        body = mock_post.call_args.kwargs["json"]
+        assert body == {"username": "alice@example.com", "password": "hunter2"}
+
+    @patch("src.adapters.triton.client.requests.post")
+    def test_oauth_client_credentials_auth_posts_grant_type_body(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200, json=lambda: {"access_token": "jwt"}, content=b'{"access_token":"jwt"}'
+        )
+        client = TritonClient(
+            username="client-id-abc", password="client-secret-xyz", auth_type="oauth_client_credentials"
+        )
+        client.login()
+        body = mock_post.call_args.kwargs["json"]
+        assert body == {
+            "grant_type": "client_credentials",
+            "client_id": "client-id-abc",
+            "client_secret": "client-secret-xyz",
+        }

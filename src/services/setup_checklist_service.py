@@ -423,8 +423,8 @@ class SetupChecklistService:
                 else:
                     ad_server_fully_configured = False
                     config_details = "Mock adapter - Configure a real ad server for production"
-            elif tenant.ad_server == "kevel":
-                # Kevel adapter - assume configured once selected
+            elif tenant.ad_server in {"kevel", "triton", "triton_digital", "freewheel"}:
+                # Schema-driven adapters — configured once credentials are saved.
                 ad_server_fully_configured = True
                 config_details = f"{tenant.ad_server} adapter configured"
             else:
@@ -565,8 +565,8 @@ class SetupChecklistService:
                         details=inventory_details,
                     )
                 )
-            elif tenant.ad_server == "kevel":
-                # Kevel adapter - mark as complete (inventory configured per product)
+            elif tenant.ad_server in {"kevel", "triton", "triton_digital", "freewheel"}:
+                # Schema-driven adapters configure inventory per-product (not via sync).
                 tasks.append(
                     SetupTask(
                         key="inventory_synced",
@@ -880,7 +880,7 @@ class SetupChecklistService:
                 else:
                     ad_server_fully_configured = False
                     config_details = "Mock adapter - Configure a real ad server for production"
-            elif tenant.ad_server == "kevel":
+            elif tenant.ad_server in {"kevel", "triton", "triton_digital", "freewheel"}:
                 ad_server_fully_configured = True
                 config_details = f"{tenant.ad_server} adapter configured"
             else:
@@ -976,7 +976,7 @@ class SetupChecklistService:
                         ),
                     )
                 )
-            elif tenant.ad_server == "kevel":
+            elif tenant.ad_server in {"kevel", "triton", "triton_digital", "freewheel"}:
                 tasks.append(
                     SetupTask(
                         key="inventory_synced",
