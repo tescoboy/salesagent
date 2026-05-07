@@ -204,38 +204,17 @@ class Kevel(AdServerAdapter):
             dry_run_prefix=False,
         )
 
-        # Validate targeting from MediaPackage objects (targeting_overlay is populated from request)
-        unsupported_features = []
-        for package in packages:
-            if package.targeting_overlay:
-                features = self._validate_targeting(package.targeting_overlay)
-                if features:
-                    unsupported_features.extend(features)
-
-        if unsupported_features:
-            from src.core.schemas import Error
-
-            error_msg = f"Unsupported targeting features for Kevel: {'; '.join(unsupported_features)}"
-            self.log(f"[red]Error: {error_msg}[/red]")
-            return CreateMediaBuyError(
-                errors=[Error(code="unsupported_targeting", message=error_msg, details={error_msg: error_msg})],
-            )
+        targeting_error = self._validate_targeting_or_error(packages, self._validate_targeting, adapter_name="Kevel")
+        if targeting_error is not None:
+            return targeting_error
 
         # Generate a media buy ID
         media_buy_id = f"kevel_{request.po_number}" if request.po_number else f"kevel_{uuid.uuid4().hex[:8]}"
 
-        # Calculate total budget using pricing_info if available
-        total_budget = 0
+        # Calculate total budget from validated pricing info or package.cpm fallback
+        total_budget = 0.0
         for package in packages:
-            # Use pricing_info if available (pricing_option_id flow), else fallback to package.cpm
-            pricing_info = package_pricing_info.get(package.package_id) if package_pricing_info else None
-            if pricing_info:
-                # Use rate from pricing option (fixed) or bid_price (auction)
-                rate = pricing_info["rate"] if pricing_info["is_fixed"] else pricing_info.get("bid_price", package.cpm)
-            else:
-                # Fallback to legacy package.cpm
-                rate = package.cpm
-
+            rate, _ = self._resolve_pricing_rate(package, package_pricing_info)
             total_budget += rate * package.impressions / 1000
 
         if self.dry_run:
@@ -251,16 +230,9 @@ class Kevel(AdServerAdapter):
 
             # Log flight creation for each package
             for package in packages:
-                # Get pricing for this package
+                rate, _ = self._resolve_pricing_rate(package, package_pricing_info)
                 pricing_info = package_pricing_info.get(package.package_id) if package_pricing_info else None
-                if pricing_info:
-                    rate = (
-                        pricing_info["rate"] if pricing_info["is_fixed"] else pricing_info.get("bid_price", package.cpm)
-                    )
-                    pricing_model = pricing_info.get("pricing_model", "cpm")
-                else:
-                    rate = package.cpm
-                    pricing_model = "cpm"
+                pricing_model = pricing_info.get("pricing_model", "cpm") if pricing_info else "cpm"
 
                 self.log(f"Would call: POST {self.base_url}/flight")
                 self.log("  Flight Payload: {")
@@ -309,14 +281,7 @@ class Kevel(AdServerAdapter):
 
             # Create flights for each package
             for package in packages:
-                # Get pricing for this package
-                pricing_info = package_pricing_info.get(package.package_id) if package_pricing_info else None
-                if pricing_info:
-                    rate = (
-                        pricing_info["rate"] if pricing_info["is_fixed"] else pricing_info.get("bid_price", package.cpm)
-                    )
-                else:
-                    rate = package.cpm
+                rate, _ = self._resolve_pricing_rate(package, package_pricing_info)
 
                 flight_payload = {
                     "Name": package.name,
