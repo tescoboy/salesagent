@@ -1125,10 +1125,17 @@ class GoogleAdManager(AdServerAdapter):
             requested_timezone="America/New_York",
         )
 
-        # Validate data freshness
-        # The adapter decides whether to return data or raise error if data is stale
-        # Target date is the end of the reporting period
-        target_date = date_range.end
+        # Validate data freshness.
+        # Clamp target_date to "now" — a buyer querying a window that
+        # extends into the future (e.g. start_date=today, end_date=tomorrow)
+        # legitimately cannot expect GAM to have data through that future
+        # boundary. The freshness validator's "report_end < target_date"
+        # check would otherwise reject every same-day-or-future query as
+        # stale. The webhook delivery path uses a fixed yesterday default
+        # and is unaffected.
+        from datetime import UTC as _UTC, datetime as _dt
+
+        target_date = min(date_range.end, _dt.now(_UTC).replace(tzinfo=date_range.end.tzinfo))
 
         is_fresh = validate_and_log_freshness(reporting_data, media_buy_id, target_date=target_date)
 
