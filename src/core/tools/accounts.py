@@ -355,7 +355,7 @@ def _check_billing_policy(
     billing_val: str | None,
     identity: ResolvedIdentity,
     *,
-    principal_billing_enabled: bool = True,
+    principal_billing_enabled: bool,
 ) -> list[Any] | None:
     """Check if the billing model is supported by the seller AND the calling
     principal is allowed to be billed under that model.
@@ -372,10 +372,11 @@ def _check_billing_policy(
       buyer can retry with ``billing="operator"``).
 
     ``principal_billing_enabled`` is read once at the top of
-    ``_sync_accounts_impl`` and passed in; we don't re-read per entry to
-    avoid (a) write race against operator flip mid-batch and (b) N+1
-    sessions on a large batch. Defaults to True so unit tests / direct
-    callers don't need to provide it when only exercising the tenant gate.
+    ``_sync_accounts_impl`` and passed in explicitly; we don't re-read per
+    entry to avoid (a) write race against operator flip mid-batch and (b)
+    N+1 sessions on a large batch. No default — every caller must reason
+    about which value to pass so a future call site can't silently get the
+    permissive path.
 
     Returns a list of Error objects if rejected, None if accepted.
     """
@@ -403,6 +404,7 @@ def _check_billing_policy(
                 message="This buyer agent is not permitted to be the billing party on this seller.",
                 suggestion="Use billing='operator'.",
                 recovery="correctable",
+                field="billing",
             )
         ]
 
@@ -467,12 +469,9 @@ async def _sync_accounts_impl(
     # Read the principal's billing_enabled flag once for the whole batch
     # (BR-RULE-061). Holding the value constant for the duration of the
     # sync prevents an operator flip mid-batch from producing a partial
-    # result where some entries land billable and others reject.
-    principal_billing_enabled = (
-        _read_principal_billing_enabled_sync(tenant_id, principal_id)
-        if tenant_id and principal_id
-        else False
-    )
+    # result where some entries land billable and others reject. Auth
+    # guard above already proved tenant_id + principal_id are non-None.
+    principal_billing_enabled = _read_principal_billing_enabled_sync(tenant_id, principal_id)
 
     results: list[SyncResponseAccount] = []
     # Track natural keys in the payload for delete_missing
