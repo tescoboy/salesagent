@@ -139,7 +139,6 @@ test-results/
 .test-stack.env
 
 # Agentic coding — local-only files
-.beads
 .claude/research/
 .claude/code-review/
 .claude/settings.local.json
