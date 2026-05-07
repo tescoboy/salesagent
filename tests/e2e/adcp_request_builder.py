@@ -287,9 +287,11 @@ def build_creative(
 def build_update_media_buy_request(
     media_buy_id: str,
     active: bool | None = None,
-    budget: dict[str, Any] | None = None,
+    budget: float | dict[str, Any] | None = None,
     packages: list[dict[str, Any]] | None = None,
     webhook_url: str | None = None,
+    brand: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build a valid AdCP update_media_buy request.
@@ -297,16 +299,32 @@ def build_update_media_buy_request(
     Args:
         media_buy_id: Media buy ID to update (required)
         active: Optional active status update
-        budget: Optional budget update
+        budget: Optional budget update (float per AdCP spec, dict accepted for legacy callers)
         packages: Optional package updates
         webhook_url: Optional webhook for async notifications
+        brand: BrandReference dict — used to synthesise the ``account`` natural
+            key (defaults to ``{"domain": "testbrand.com"}``).
+        context: Optional buyer-supplied context echoed on the response.
 
     Returns:
-        Valid AdCP UpdateMediaBuyRequest dict
+        Valid AdCP UpdateMediaBuyRequest dict.
     """
-    request: dict[str, Any] = {"media_buy_id": media_buy_id}
+    if brand is None:
+        brand = {"domain": "testbrand.com"}
 
-    # Add optional fields
+    request: dict[str, Any] = {
+        "media_buy_id": media_buy_id,
+        # adcp 4.4 made these required at the wire boundary on
+        # update_media_buy too. Real buyers must supply them; the
+        # builder generates a fresh UUID and a brand-derived account
+        # natural key so test e2e flows behave like real callers.
+        "idempotency_key": f"e2e-update-{uuid.uuid4()}",
+        "account": {
+            "brand": brand,
+            "operator": brand.get("domain", "testbrand.com") if isinstance(brand, dict) else "testbrand.com",
+        },
+    }
+
     if active is not None:
         request["active"] = active
     if budget is not None:
@@ -318,6 +336,8 @@ def build_update_media_buy_request(
             "url": webhook_url,
             "authentication": {"type": "none"},
         }
+    if context is not None:
+        request["context"] = context
 
     return request
 
