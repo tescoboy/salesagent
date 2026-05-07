@@ -37,6 +37,7 @@ from src.admin.tenant_management_api import (
     _validate_gam_advertiser_id,
 )
 from src.admin.utils import require_tenant_access
+from src.admin.utils.embedded_mode_auth import is_embedded_view
 from src.core.database.database_session import get_db_session
 from src.core.database.embedded_tenant_guard import EmbeddedTenantWriteError
 from src.core.database.models import (
@@ -115,8 +116,7 @@ def buyer_routing_page(tenant_id: str):
             abort(404, description=f"Tenant {tenant_id!r} not found")
 
         rules = session.scalars(
-            select(AdvertiserRoutingRule)
-            .filter_by(tenant_id=tenant_id)
+            select(AdvertiserRoutingRule).filter_by(tenant_id=tenant_id)
             # Most-specific first matches the resolution chain ordering
             # in src/services/buyer_advertiser_routing.py — exact wins
             # over house wildcard wins over operator wildcard.
@@ -143,7 +143,7 @@ def buyer_routing_page(tenant_id: str):
         ]
 
         default_gam_advertiser_id = tenant.default_gam_advertiser_id
-        is_embedded = bool(tenant.is_embedded)
+        is_embedded = is_embedded_view(tenant)
         tenant_name = tenant.name
 
         recent_rows = compute_recent_buyers(tenant_id, days=30, limit=100)

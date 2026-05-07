@@ -1,20 +1,32 @@
 """Embedded-mode auth bypass for per-tenant admin UI routes.
 
-When ``MANAGED_INSTANCE=true`` and a tenant is flagged
-``is_embedded=True``, requests to ``/tenant/<id>/*`` are
+When ``MANAGED_INSTANCE=true``, requests to ``/tenant/<id>/*`` may be
 authenticated via the ``X-Identity-*`` headers forwarded by the upstream
-proxy (Scope3 Storefront, etc.) — NOT via the salesagent's own Google
-OAuth flow. This module owns that decision.
+proxy (Scope3 Storefront, etc.) instead of the salesagent's Google
+OAuth flow. Two tenant fields drive the decision:
+
+- ``external_org_id`` — when set, embedded auth is *available* for the
+  tenant. The header ``X-Identity-Org-Id`` must match this value.
+- ``is_embedded`` — when ``True``, embedded auth is *required* (OAuth
+  fallback is rejected). When ``False``, embedded auth is offered when
+  headers are present but OAuth still works for header-less requests.
+
+This lets a tenant migrate from OAuth to embedded gradually: set
+``external_org_id`` first to enable preview via the storefront iframe
+while production OAuth users keep working unchanged, then flip
+``is_embedded=True`` once cut over.
 
 Failure modes match the published contract at
 ``docs/integration/managed-mode-identity-contract.md``:
 
-- Embedded tenant + missing/incomplete headers → 403 ``identity_required``
-- Embedded tenant + ``X-Identity-Org-Id`` doesn't match the tenant's
-  ``external_org_id`` → 403 ``identity_org_mismatch``
-- Open-instance tenant (is_embedded=False) on a managed instance
-  → falls through to Google OAuth (managed instances still host
-  open-instance tenants for legacy / staff use)
+- ``is_embedded=True`` + missing/incomplete headers → 403 ``identity_required``
+- Headers present but malformed (invalid role, etc.) → 403 ``identity_required``
+  (always — never falls through to OAuth, which would mask the malformed
+  header set as anonymous)
+- ``X-Identity-Org-Id`` doesn't match the tenant's ``external_org_id``
+  → 403 ``identity_org_mismatch``
+- ``is_embedded=False`` + no headers → falls through to Google OAuth
+- ``external_org_id`` unset → embedded mode unavailable, always OAuth
 
 The role enum (``admin | member | viewer``) is parsed but not yet
 enforced for fine-grained authorization — sprint 4 hardening will scope
@@ -105,24 +117,45 @@ def authorize_embedded_request(request, tenant_id: str) -> EmbeddedAuthResult:
         # Not our concern — let the route handler 404 / 403 as it sees fit.
         return EmbeddedAuthPassthrough()
 
-    if not bool(getattr(tenant, "is_embedded", False)):
-        # Open-instance tenant living on a managed deployment. Falls
-        # through to the salesagent's Google OAuth flow.
+    # Stash on Flask ``g`` so ``_maybe_block_embedded_write`` and any other
+    # request-scoped consumer can reuse the load. The instance is detached
+    # from its session by the time it lands here; callers reading scalar
+    # columns are fine, but they must not lazy-load relationships.
+    try:
+        from flask import g, has_request_context
+
+        if has_request_context():
+            g.tenant = tenant
+    except RuntimeError:  # pragma: no cover — has_request_context guards this
+        pass
+
+    if tenant.external_org_id is None:
+        # Tenant has no upstream org binding, so X-Identity-Org-Id can't
+        # be matched. Embedded mode is unavailable; fall through to OAuth.
         return EmbeddedAuthPassthrough()
+
+    is_embedded_required = bool(getattr(tenant, "is_embedded", False))
 
     try:
         identity = read_identity_from_request(request)
     except InvalidPropagatedIdentity as exc:
+        # Malformed headers reach this branch only when the caller
+        # *attempted* to use embedded auth — never silently fall through
+        # to OAuth, that would mask the bad header set.
         return EmbeddedAuthDeny(error="identity_required", message=str(exc))
 
     if identity is None:
-        return EmbeddedAuthDeny(
-            error="identity_required",
-            message=(
-                f"Tenant {tenant_id!r} is is_embedded — request must include "
-                "X-Identity-Email, X-Identity-Org-Id, X-Identity-Role, X-Identity-Source headers."
-            ),
-        )
+        if is_embedded_required:
+            return EmbeddedAuthDeny(
+                error="identity_required",
+                message=(
+                    f"Tenant {tenant_id!r} is is_embedded — request must include "
+                    "X-Identity-Email, X-Identity-Org-Id, X-Identity-Role, X-Identity-Source headers."
+                ),
+            )
+        # Embedded-optional tenant + no headers → caller didn't ask for
+        # embedded auth. Hand off to the OAuth path.
+        return EmbeddedAuthPassthrough()
 
     if identity.org_id != tenant.external_org_id:
         return EmbeddedAuthDeny(
@@ -134,6 +167,57 @@ def authorize_embedded_request(request, tenant_id: str) -> EmbeddedAuthResult:
         )
 
     return EmbeddedAuthOk(identity=identity, tenant_id=tenant_id)
+
+
+def is_embedded_view(tenant: Tenant | None = None) -> bool:
+    """Whether the current request is operating in an embedded view.
+
+    Two independent signals — either is sufficient:
+
+    1. ``g.user["embedded_mode"]`` — set by ``synthetic_user_dict`` when
+       the request was authorized via ``X-Identity-*`` headers. This is
+       the per-request signal that powers *preview mode*: an
+       ``is_embedded=False`` tenant accessed through the storefront
+       iframe should be treated as embedded for that request without
+       flipping the tenant flag.
+    2. ``tenant.is_embedded`` — the persistent tenant flag. Covers test
+       harnesses that bypass ``require_tenant_access`` (no synthetic
+       user) and any other path where the per-request signal is missing
+       but the tenant is permanently embedded.
+
+    In production, condition 2 is a strict subset of condition 1 because
+    ``is_embedded=True`` requires header auth (see
+    ``authorize_embedded_request``), so a request reaching a view function
+    on such a tenant always has ``embedded_mode`` set. The fallback exists
+    for test-mode and defense-in-depth.
+
+    Used for two kinds of decisions where the per-request signal is the
+    correct policy input:
+
+    - **Rendering**: chrome stripping, hiding edit affordances, lock-banner
+      pages. The page should look embedded for the duration of this
+      request.
+    - **Mutation gating**: ``require_tenant_access`` blocks
+      POST/PUT/DELETE/PATCH on embedded views because the upstream platform
+      owns the tenant's state. Preview requests must be blocked too — if
+      we used only ``tenant.is_embedded``, a header-auth caller could POST
+      against a non-embedded tenant whose preview the storefront is
+      serving.
+
+    Do NOT use this for purely *static* tenant properties (e.g., the API
+    output that describes the tenant's persisted configuration): those
+    should continue to read ``tenant.is_embedded`` directly.
+    """
+    from flask import g, has_request_context
+
+    if has_request_context():
+        user = getattr(g, "user", None)
+        if isinstance(user, dict) and bool(user.get("embedded_mode")):
+            return True
+
+    if tenant is not None and bool(getattr(tenant, "is_embedded", False)):
+        return True
+    return False
 
 
 def synthetic_user_dict(identity: PropagatedIdentity) -> dict[str, object]:

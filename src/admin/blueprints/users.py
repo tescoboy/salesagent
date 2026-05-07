@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
+from src.admin.utils.embedded_mode_auth import is_embedded_view
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantAuthConfig, User
 
@@ -23,12 +24,14 @@ users_bp = Blueprint("users", __name__, url_prefix="/tenant/<tenant_id>/users")
 def list_users(tenant_id):
     """List users for a tenant.
 
-    On embedded tenants the page is replaced with the platform-managed
+    On embedded views the page is replaced with the platform-managed
     lock banner — identity flows through ``X-Identity-*`` headers per the
     embedded-mode identity contract, so there are no salesagent-side User
     records to manage. Returns 200 (not 404) so deep-links from the
     setup-task panel land on a "managed by your platform" explanation
-    rather than a dead end.
+    rather than a dead end. Also fires for *preview* requests on a
+    non-embedded tenant authenticated via headers, so the iframe view
+    matches what production-embedded looks like.
     """
     with get_db_session() as db_session:
         tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -36,7 +39,7 @@ def list_users(tenant_id):
             flash("Tenant not found", "error")
             return redirect(url_for("core.index"))
 
-        if tenant.is_embedded:
+        if is_embedded_view(tenant):
             return render_template("_embedded_locked_page.html", tenant=tenant), 200
 
         stmt = select(User).filter_by(tenant_id=tenant_id).order_by(User.email)
@@ -328,7 +331,23 @@ def enable_setup_mode(tenant_id):
     """Re-enable auth setup mode for the tenant.
 
     This allows test credentials to work again, useful for troubleshooting.
+    Requires an authenticated SSO session: re-enabling the test-credentials
+    backdoor must not be reachable via header-auth (preview / embedded) or
+    via the test-credentials password backdoor itself, otherwise an attacker
+    who reaches this endpoint can flip the tenant back into setup mode and
+    chain into full OAuth-equivalent access.
     """
+    auth_method = session.get("auth_method")
+    if auth_method != "oidc":
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "You must be logged in via SSO to re-enable setup mode.",
+                }
+            ),
+            403,
+        )
     try:
         with get_db_session() as db_session:
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()

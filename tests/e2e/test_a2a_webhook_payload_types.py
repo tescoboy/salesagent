@@ -184,7 +184,7 @@ class TestA2AWebhookPayloadTypes:
         # Enable auto-approval so create_media_buy completes immediately
         self.setup_auto_approval(live_server)
 
-        a2a_url = f"{live_server['a2a']}/a2a"
+        a2a_url = f"{live_server['a2a']}/"
         context_id = str(uuid.uuid4())
 
         # Send A2A create_media_buy message with push notification config
@@ -293,7 +293,7 @@ class TestA2AWebhookPayloadTypes:
         # Enable manual approval so create_media_buy returns submitted state
         self.setup_manual_approval(live_server)
 
-        a2a_url = f"{live_server['a2a']}/a2a"
+        a2a_url = f"{live_server['a2a']}/"
         context_id = str(uuid.uuid4())
 
         # Send A2A create_media_buy message that triggers approval workflow
@@ -392,7 +392,7 @@ class TestA2AWebhookPayloadTypes:
         # Enable auto-approval
         self.setup_auto_approval(live_server)
 
-        a2a_url = f"{live_server['a2a']}/a2a"
+        a2a_url = f"{live_server['a2a']}/"
         context_id = str(uuid.uuid4())
 
         # Send create_media_buy request
@@ -505,7 +505,7 @@ class TestWebhookPayloadStructure:
         """Test that Task payload has all required A2A fields."""
         self.setup_auto_approval(live_server)
 
-        a2a_url = f"{live_server['a2a']}/a2a"
+        a2a_url = f"{live_server['a2a']}/"
 
         message = {
             "jsonrpc": "2.0",
@@ -603,7 +603,7 @@ class TestWebhookPayloadStructure:
         except Exception as e:
             print(f"Failed to update adapter config: {e}")
 
-        a2a_url = f"{live_server['a2a']}/a2a"
+        a2a_url = f"{live_server['a2a']}/"
 
         # Trigger an async operation that sends intermediate status
         message = {

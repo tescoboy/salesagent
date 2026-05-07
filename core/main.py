@@ -61,6 +61,7 @@ from adcp.server import (
 from sqlalchemy import select
 
 from core.middleware.admin_mount import AdminWSGIMount
+from core.middleware.bearer_to_adcp_auth import BearerToAdcpAuthMiddleware
 from core.middleware.scheduler_lifespan import SchedulerLifespanMiddleware
 from core.middleware.spec_defaults import SpecDefaultsMiddleware
 from core.platforms.gam import GamPlatform
@@ -404,6 +405,21 @@ def _serve_kwargs(
 
     asgi_middleware: list = [
         (AdminWSGIMount, {"wsgi_app": admin_wsgi}),
+        # BearerToAdcpAuthMiddleware maps ``Authorization: Bearer <token>``
+        # (RFC 6750, what a2a-sdk's official client emits) to the
+        # ``x-adcp-auth`` header that ``BearerTokenAuth`` is configured to
+        # read. Sits before the auth middlewares so they see the canonical
+        # header on inbound A2A traffic from real buyers. No-op when
+        # ``x-adcp-auth`` is already present, so MCP traffic is untouched.
+        #
+        # ORDERING — MUST run before the SDK's BearerTokenAuth /
+        # A2ABearerAuth wrap-around (which serve() applies INSIDE this
+        # asgi_middleware list). MUST run after AdminWSGIMount so admin
+        # paths short-circuit before the bearer translation. Do not
+        # reorder without updating
+        # tests/unit/test_bearer_to_adcp_auth_middleware.py and
+        # tests/integration/test_serve_kwargs_middleware_order.py.
+        (BearerToAdcpAuthMiddleware, {}),
         # SpecDefaultsMiddleware backfills wire fields the spec marks as
         # required but instructs sellers to default for pre-v3 clients
         # (e.g. GetProductsRequest.buying_mode → 'brief'). Sits *outside*
