@@ -322,6 +322,87 @@ _MUTATION_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 # OPTIONS is CORS preflight — Flask handles it before the view runs, and
 # preflight is not a write.
 
+# Canonical role enum, matched between the embedded-mode contract
+# (``X-Identity-Role``) and the OAuth-side ``User.role`` column.
+# - ``admin``  — full read+write incl. config that changes trust/identity
+#   boundaries (users, SSO, adapter config, currency, danger zone)
+# - ``member`` — operational write authority (creatives, workflows,
+#   routing, partners, principals, products, sync triggers). The "ad ops"
+#   persona — full day-to-day work, no config-level boundaries
+# - ``viewer`` — read-only
+ROLES = ("admin", "member", "viewer")
+_ROLES_SET = frozenset(ROLES)
+# Legacy ``manager`` rows in ``User.role`` map to the new ``member`` enum
+# until the migration completes. Read-time mapping at the boundary keeps
+# the rest of the codebase on the canonical names.
+_LEGACY_ROLE_MAP = {"manager": "member"}
+
+
+def _normalize_role(raw: str | None) -> str:
+    """Map a stored or header-supplied role to the canonical enum.
+
+    Unknown values clamp to ``viewer`` (least privilege) per the
+    embedded-mode identity contract:
+
+        Future roles may be added without a v2 bump; consumers of
+        X-Identity-Role should treat unknown values as 'viewer' (least
+        privilege) and log a warning.
+
+    Used at every place a role enters the request: OAuth User row,
+    test-mode session, super-admin override (always returns ``admin``).
+    """
+    if not raw:
+        return "viewer"
+    mapped = _LEGACY_ROLE_MAP.get(raw, raw)
+    if mapped not in _ROLES_SET:
+        logger.warning("Unknown role %r — clamping to 'viewer' (least privilege)", raw)
+        return "viewer"
+    return mapped
+
+
+def _role_permits(actual: str, allowed: tuple[str, ...] | None) -> bool:
+    """Return True if ``actual`` (already normalized) is in ``allowed``.
+
+    ``allowed=None`` means no role gate is applied (read-only or
+    legacy route). Closed-by-default for mutations is enforced by
+    ``_maybe_block_role_gate`` which substitutes a default of
+    ``("admin",)`` when the route doesn't declare a policy.
+    """
+    if allowed is None:
+        return True
+    return actual in allowed
+
+
+def _maybe_block_role_gate(api_mode: bool, role: tuple[str, ...] | None):
+    """Enforce role policy after auth resolves but before the handler.
+
+    Closed-by-default: a mutation route without an explicit ``role``
+    parameter requires ``admin``. GETs and friends pass through unless
+    a route opts in to gating reads (rare).
+
+    Returns ``None`` to allow the request, or a 403 response tuple
+    (``api_mode=True``) / raises ``abort(403)`` (``api_mode=False``).
+    """
+    from flask import request
+
+    is_mutation = request.method in _MUTATION_METHODS
+    if role is None and not is_mutation:
+        return None
+    # Closed-by-default for writes: if the route didn't declare a policy,
+    # require admin. Routes that allow ``member`` writes must opt in.
+    effective = role if role is not None else ("admin",) if is_mutation else None
+    if effective is None:
+        return None
+
+    user = getattr(g, "user", None)
+    actual = _normalize_role(user.get("role") if isinstance(user, dict) else None)
+    if _role_permits(actual, effective):
+        return None
+    msg = f"Role {actual!r} not authorized for this action; required one of {', '.join(effective)}."
+    if api_mode:
+        return jsonify({"error": "role_not_authorized", "message": msg, "required_roles": list(effective)}), 403
+    abort(403, description=msg)
+
 
 def _maybe_block_embedded_write(tenant_id: str, api_mode: bool):
     """Block writes to platform-managed tenants at the decorator boundary.
@@ -401,13 +482,34 @@ def _embedded_write_blocked(api_mode: bool):
     abort(403, description=msg)
 
 
-def require_tenant_access(api_mode=False):
+def _set_user_role(role: str | None) -> None:
+    """Populate ``g.user["role"]`` with the canonical normalized value.
+
+    Called from every auth path so downstream RBAC decisions
+    (``_maybe_block_role_gate``) can read a single source of truth.
+    """
+    user = getattr(g, "user", None)
+    if isinstance(user, dict):
+        user["role"] = _normalize_role(role)
+
+
+def require_tenant_access(api_mode=False, role: tuple[str, ...] | None = None):
     """Decorator to require tenant access for routes.
 
     On embedded views (permanent ``is_embedded=True`` OR header-auth
     preview), mutation methods (POST/PUT/DELETE/PATCH) are rejected with
     403 — the upstream platform owns the tenant's state. GETs render
     normally so deep-links land on the platform-managed lock banner.
+
+    ``role`` declares the RBAC policy for this route. Mutation routes
+    that don't set ``role`` default to ``("admin",)`` (closed-by-default
+    — config-grade authority required). Operational routes that the
+    "ad ops" persona (``member``) should be able to use must declare
+    ``role=("admin", "member")``. Read routes don't need a role gate
+    unless they expose data that should be admin-only.
+
+    The full enum is ``ROLES = ("admin", "member", "viewer")``. Unknown
+    values from headers or DB rows clamp to ``viewer`` (least privilege).
     """
 
     def decorator(f):
@@ -423,8 +525,12 @@ def require_tenant_access(api_mode=False):
             )
 
             def _call_handler():
-                """After auth resolves, gate writes on embedded views, then dispatch."""
+                """After auth resolves, gate writes on embedded views,
+                then check role, then dispatch."""
                 blocked = _maybe_block_embedded_write(tenant_id, api_mode)
+                if blocked is not None:
+                    return blocked
+                blocked = _maybe_block_role_gate(api_mode, role)
                 if blocked is not None:
                     return blocked
                 return f(tenant_id, *args, **kwargs)
@@ -447,6 +553,11 @@ def require_tenant_access(api_mode=False):
                 abort(403, description=f"{embedded_result.error}: {embedded_result.message}")
             if isinstance(embedded_result, EmbeddedAuthOk):
                 g.user = synthetic_user_dict(embedded_result.identity)
+                # ``synthetic_user_dict`` already sets a role; normalize it
+                # so legacy ``manager`` rolls in (defensive — header values
+                # are admin/member/viewer per the contract, but the
+                # normalizer is the authority for unknown/clamped values).
+                _set_user_role(g.user.get("role"))
                 return _call_handler()
             # EmbeddedAuthPassthrough → fall through to existing OAuth path
 
@@ -466,11 +577,17 @@ def require_tenant_access(api_mode=False):
 
             if test_mode and "test_user" in session:
                 g.user = session["test_user"]
+                test_role = session.get("test_user_role")
+                # ``super_admin`` is a Salesagent staff override — full
+                # access regardless of tenant role. Anything else is
+                # treated as the user's tenant-scoped role; unknown
+                # values clamp to viewer.
+                _set_user_role("admin" if test_role == "super_admin" else test_role)
                 # Test users can access their assigned tenant
                 if "test_tenant_id" in session and session["test_tenant_id"] == tenant_id:
                     return _call_handler()
                 # Super admins can access all tenants
-                if session.get("test_user_role") == "super_admin":
+                if test_role == "super_admin":
                     return _call_handler()
 
             if "user" not in session:
@@ -492,6 +609,13 @@ def require_tenant_access(api_mode=False):
 
             # Check super admin status (is_super_admin handles env + db + session caching internally)
             if is_super_admin(email):
+                # Salesagent-staff override: always admin, regardless of
+                # any tenant-scoped User row. ``g.user`` here is the
+                # session dict from OAuth; stamp the role onto it so
+                # downstream RBAC sees a consistent shape.
+                if not isinstance(getattr(g, "user", None), dict):
+                    g.user = {"email": email}
+                _set_user_role("admin")
                 return _call_handler()
 
             # Check if user has access to this specific tenant
@@ -505,6 +629,12 @@ def require_tenant_access(api_mode=False):
                             return jsonify({"error": "Access denied"}), 403
                         abort(403)
 
+                    # Stamp the user's tenant-scoped role onto g.user so
+                    # downstream RBAC reads a single canonical field.
+                    # Stash a dict if the session held a string email.
+                    if not isinstance(getattr(g, "user", None), dict):
+                        g.user = {"email": email}
+                    _set_user_role(user.role)
                     return _call_handler()
 
             except Exception as e:
