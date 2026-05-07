@@ -33,19 +33,24 @@ def app(integration_db, monkeypatch):
     return application
 
 
-def _client_with_role(app, role: str):
+def _client_with_role(app, role: str, tenant_id: str = "any"):
     """Test client with a session populated for the given tenant role.
 
     ``role`` may be ``admin``, ``member``, ``viewer``, or ``super_admin``.
     The decorator's role gate reads the normalized canonical enum, so
     ``super_admin`` is the staff-bypass marker (becomes ``admin`` for
     role-check purposes).
+
+    For non-``super_admin`` roles, ``test_tenant_id`` MUST match the
+    ``tenant_id`` in the URL — otherwise the test-mode bypass in
+    ``require_tenant_access`` falls through to the OAuth branch and we
+    never reach the role gate.
     """
     c = app.test_client()
     with c.session_transaction() as sess:
         sess["test_user"] = {"email": f"{role}@example.com", "name": role.title()}
         sess["test_user_role"] = role
-        sess["test_tenant_id"] = "*"
+        sess["test_tenant_id"] = "*" if role == "super_admin" else tenant_id
     return c
 
 

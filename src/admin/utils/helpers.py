@@ -280,8 +280,11 @@ def require_auth(admin_only=False):
                     return f(*args, **kwargs)
                 # EmbeddedAuthPassthrough → fall through to existing OAuth path
 
-            # Check for test mode
-            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+            # Check for test mode. Production never honors
+            # ``ADCP_AUTH_TEST_MODE`` — defense in depth so a misconfigured
+            # prod env can't activate the test-user bypass. Mirrors the
+            # equivalent guard on ``require_tenant_access``.
+            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true" and not is_admin_production()
             if test_mode and "test_user" in session:
                 g.user = session["test_user"]
                 return f(*args, **kwargs)
@@ -487,10 +490,33 @@ def _set_user_role(role: str | None) -> None:
 
     Called from every auth path so downstream RBAC decisions
     (``_maybe_block_role_gate``) can read a single source of truth.
+
+    Some legacy test fixtures pre-populate ``g.user`` as a bare string
+    (the email). Lift those into a dict so the role lands somewhere
+    the gate can read.
     """
     user = getattr(g, "user", None)
-    if isinstance(user, dict):
-        user["role"] = _normalize_role(role)
+    if user is None:
+        g.user = {}
+    elif isinstance(user, str):
+        # Legacy test fixtures pre-populate ``session["test_user"]`` as a
+        # bare string (the email). Lift to dict so the rest of the
+        # codebase sees one canonical shape.
+        g.user = {"email": user}
+    elif isinstance(user, dict):
+        pass  # already in canonical shape
+    else:
+        # Fail loud rather than silently erase identity. Today the only
+        # writers of ``g.user`` produce string, dict, or None; a different
+        # type means the auth path has drifted and the role/auth
+        # invariants downstream cannot be trusted.
+        raise TypeError(
+            f"g.user has unexpected type {type(user).__name__}; auth path produced "
+            f"a value the role gate cannot interpret. Expected str, dict, or None."
+        )
+    # Re-read after the lifting above (g.user may have been replaced),
+    # then stamp the canonical role onto the dict.
+    g.user["role"] = _normalize_role(role)
 
 
 def require_tenant_access(api_mode=False, role: tuple[str, ...] | None = None):
@@ -561,8 +587,12 @@ def require_tenant_access(api_mode=False, role: tuple[str, ...] | None = None):
                 return _call_handler()
             # EmbeddedAuthPassthrough → fall through to existing OAuth path
 
-            # Check for test mode (global env var OR per-tenant auth_setup_mode)
-            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true"
+            # Check for test mode (global env var OR per-tenant auth_setup_mode).
+            # Production never honors ``ADCP_AUTH_TEST_MODE`` — defense in
+            # depth so a misconfigured prod env can't accidentally activate
+            # the test-user bypass and grant the new "no role → admin"
+            # default to anyone with a session.
+            test_mode = os.environ.get("ADCP_AUTH_TEST_MODE", "").lower() == "true" and not is_admin_production()
 
             # Also check per-tenant auth_setup_mode if test_user is in session
             if not test_mode and "test_user" in session:
@@ -579,10 +609,23 @@ def require_tenant_access(api_mode=False, role: tuple[str, ...] | None = None):
                 g.user = session["test_user"]
                 test_role = session.get("test_user_role")
                 # ``super_admin`` is a Salesagent staff override — full
-                # access regardless of tenant role. Anything else is
-                # treated as the user's tenant-scoped role; unknown
-                # values clamp to viewer.
-                _set_user_role("admin" if test_role == "super_admin" else test_role)
+                # access regardless of tenant role. An unset role is
+                # treated as ``admin`` for test-mode backward-compat:
+                # existing tests use the bypass without thinking about
+                # RBAC, and they expect full write access. Tests that
+                # exercise role enforcement set ``test_user_role``
+                # explicitly. Any other value (member/viewer/etc.) is
+                # taken as a real tenant role; unknown clamps to viewer.
+                if test_role in ("super_admin", None):
+                    if test_role is None:
+                        # Help future bisects spot a CI test that leaked
+                        # into a production-shaped environment.
+                        logger.debug(
+                            "test-mode bypass with no test_user_role — defaulting to 'admin' (legacy backward-compat)"
+                        )
+                    _set_user_role("admin")
+                else:
+                    _set_user_role(test_role)
                 # Test users can access their assigned tenant
                 if "test_tenant_id" in session and session["test_tenant_id"] == tenant_id:
                     return _call_handler()
