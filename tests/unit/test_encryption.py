@@ -48,6 +48,23 @@ class TestIsEncryptedHardening:
             with pytest.raises(ValueError, match="ENCRYPTION_KEY"):
                 is_encrypted("gAAAAAfake-token-but-prefix-matches")
 
+    def test_missing_encryption_key_raises_typed_exception(self):
+        """is_encrypted re-raises EncryptionKeyMissingError, not generic ValueError.
+
+        Callers can branch on the typed exception to distinguish "deployment
+        misconfigured" from "value isn't a valid Fernet token under the current
+        key". Replaces the previous brittle substring-match logic.
+        """
+        from src.core.utils.encryption import EncryptionKeyMissingError
+
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(EncryptionKeyMissingError):
+                is_encrypted("gAAAAAfake-token-but-prefix-matches")
+
+        # And the typed exception is a ValueError subclass so existing
+        # broad ValueError catches keep working.
+        assert issubclass(EncryptionKeyMissingError, ValueError)
+
     def test_none_returns_false(self, set_encryption_key):
         assert is_encrypted(None) is False
         assert is_encrypted("") is False

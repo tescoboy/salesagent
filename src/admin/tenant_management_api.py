@@ -413,9 +413,15 @@ def create_tenant():
                     updated_at=datetime.now(UTC),
                 )
             elif adapter_type in {"triton", "triton_digital"}:
-                # Validate Triton credentials through TritonConnectionConfig (encrypts password)
+                # Validate Triton credentials through TritonConnectionConfig (encrypts password).
+                # Reject submitted ciphertext to close the cross-tenant smuggling
+                # vector — same defence as the admin/blueprints/adapters.py
+                # save_adapter_config endpoint. See M1/S7 in security review.
                 from src.adapters.triton import TritonConnectionConfig
+                from src.core.utils.encryption import is_encrypted
 
+                if data.get("password") and is_encrypted(data["password"]):
+                    return jsonify({"error": "password must be plaintext (encrypted-token replay rejected)"}), 400
                 triton_payload = {
                     k: data[k]
                     for k in (
@@ -437,9 +443,16 @@ def create_tenant():
                     updated_at=datetime.now(UTC),
                 )
             elif adapter_type == "freewheel":
-                # Validate FreeWheel credentials through FreeWheelConnectionConfig (encrypts client_secret)
+                # Validate FreeWheel credentials through FreeWheelConnectionConfig.
+                # Reject submitted ciphertext (cross-tenant smuggling defence).
                 from src.adapters.freewheel import FreeWheelConnectionConfig
+                from src.core.utils.encryption import is_encrypted
 
+                if data.get("client_secret") and is_encrypted(data["client_secret"]):
+                    return (
+                        jsonify({"error": "client_secret must be plaintext (encrypted-token replay rejected)"}),
+                        400,
+                    )
                 fw_payload = {
                     k: data[k]
                     for k in ("client_id", "client_secret", "network_id", "environment", "default_advertiser_id")
@@ -626,8 +639,15 @@ def update_tenant(tenant_id):
                             adapter.kevel_manual_approval_required = adapter_data["kevel_manual_approval_required"]
 
                     elif adapter.adapter_type in {"triton", "triton_digital"}:
+                        # Reject submitted ciphertext (M1/S7: cross-tenant smuggling).
                         from src.adapters.triton import TritonConnectionConfig
+                        from src.core.utils.encryption import is_encrypted
 
+                        if adapter_data.get("password") and is_encrypted(adapter_data["password"]):
+                            return (
+                                jsonify({"error": "password must be plaintext (encrypted-token replay rejected)"}),
+                                400,
+                            )
                         merged = dict(adapter.config_json or {})
                         for field_name in (
                             "auth_type",
@@ -644,8 +664,15 @@ def update_tenant(tenant_id):
                         attributes.flag_modified(adapter, "config_json")
 
                     elif adapter.adapter_type == "freewheel":
+                        # Reject submitted ciphertext (M1/S7: cross-tenant smuggling).
                         from src.adapters.freewheel import FreeWheelConnectionConfig
+                        from src.core.utils.encryption import is_encrypted
 
+                        if adapter_data.get("client_secret") and is_encrypted(adapter_data["client_secret"]):
+                            return (
+                                jsonify({"error": "client_secret must be plaintext (encrypted-token replay rejected)"}),
+                                400,
+                            )
                         merged = dict(adapter.config_json or {})
                         for field_name in (
                             "client_id",
