@@ -398,6 +398,7 @@ def _update_media_buy_impl(
                 success_response = UpdateMediaBuySuccess(
                     media_buy_id=media_buy_id,
                     affected_packages=affected_pkgs,
+                    context=req.context,
                 )
                 # Log successful update_media_buy (pause/resume)
                 audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
