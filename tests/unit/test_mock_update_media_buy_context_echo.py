@@ -82,5 +82,10 @@ async def test_update_media_buy_response_omits_stored_context_so_sdk_can_inject(
             f"SDK's inject_context can fill from the request). Got: "
             f"context={result.get('context')!r}. See #95."
         )
+        # Defend against silent regressions where update_media_buy becomes
+        # a no-op (would still pass the context check above).
+        assert result["status"] == "paused", (
+            "Patch was not applied: paused=True should transition the buy to paused state"
+        )
     finally:
         _MEDIA_BUYS.pop(media_buy_id, None)
