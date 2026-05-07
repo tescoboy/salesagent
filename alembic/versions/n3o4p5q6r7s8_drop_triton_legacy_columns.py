@@ -1,7 +1,7 @@
 """drop legacy triton columns from adapter_config
 
 Revision ID: n3o4p5q6r7s8
-Revises: e77030648663
+Revises: e9a1c2d3f4b5
 Create Date: 2026-05-06 00:00:00.000000
 
 The Triton adapter is being rebuilt against the real TAP Media Buying API
@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "n3o4p5q6r7s8"
-down_revision: str | Sequence[str] | None = "e77030648663"
+down_revision: str | Sequence[str] | None = "e9a1c2d3f4b5"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

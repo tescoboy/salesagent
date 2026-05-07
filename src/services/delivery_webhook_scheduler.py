@@ -83,9 +83,20 @@ class DeliveryWebhookScheduler:
                 # Wait before next batch
                 await asyncio.sleep(SLEEP_INTERVAL_SECONDS)
 
-    async def _send_reports(self) -> None:
-        """Send reports for all active media buys with configured webhooks."""
+    async def _send_reports(self, *, now: datetime | None = None) -> None:
+        """Send reports for all active media buys with configured webhooks.
+
+        Takes a single wall-clock snapshot at entry and threads it through
+        every downstream call. Without this, the function read
+        ``datetime.now(UTC)`` four separate times — a buy whose start_date
+        equals "tomorrow" at the first read could equal "today" at the
+        last (UTC midnight rollover), flipping its dynamic status from
+        ``ready`` → ``active`` mid-batch and producing flaky behaviour.
+
+        Tests can pin time via ``now=`` to make assertions deterministic.
+        """
         logger.info("Starting scheduled delivery report webhook batch")
+        now_snapshot = now if now is not None else datetime.now(UTC)
 
         try:
             with get_db_session() as session:
@@ -105,7 +116,7 @@ class DeliveryWebhookScheduler:
                             continue
 
                         # Send delivery report
-                        await self._send_report_for_media_buy(media_buy, reporting_webhook, session)
+                        await self._send_report_for_media_buy(media_buy, reporting_webhook, session, now=now_snapshot)
                         reports_sent += 1
 
                     except Exception as e:
@@ -145,7 +156,9 @@ class DeliveryWebhookScheduler:
                     logger.warning(f"Cannot trigger report: No reporting_webhook configured for {media_buy_id}")
                     return False
 
-                # Force sending even if already sent today (for testing)
+                # Force sending even if already sent today (for testing).
+                # _send_report_for_media_buy snapshots ``now`` itself when
+                # not given one, which is fine for this single-buy path.
                 await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
                 return True
         except Exception as e:
@@ -153,7 +166,13 @@ class DeliveryWebhookScheduler:
             return False
 
     async def _send_report_for_media_buy(
-        self, media_buy: Any, reporting_webhook: dict, session: Any, force: bool = False
+        self,
+        media_buy: Any,
+        reporting_webhook: dict,
+        session: Any,
+        force: bool = False,
+        *,
+        now: datetime | None = None,
     ) -> None:
         """Send a delivery report for a single media buy.
 
@@ -162,6 +181,10 @@ class DeliveryWebhookScheduler:
             reporting_webhook: Webhook configuration dict
             session: Database session
             force: If True, bypass frequency checks and duplicate checks
+            now: Optional wall-clock snapshot. Defaults to ``datetime.now(UTC)``.
+                Passing the same snapshot for an entire batch keeps every
+                date computation internally consistent across the UTC midnight
+                boundary.
         """
         try:
             # Determine reporting frequency from AdCP config (hourly, daily, monthly)
@@ -176,15 +199,17 @@ class DeliveryWebhookScheduler:
                 )
                 return
 
+            now_snapshot = now if now is not None else datetime.now(UTC)
+
             # Calculate reporting period for daily frequency: yesterday (full day)
-            start_date_obj = datetime.now(UTC).date() - timedelta(days=1)
-            end_date_obj = datetime.now(UTC)
+            start_date_obj = now_snapshot.date() - timedelta(days=1)
+            end_date_obj = now_snapshot
 
             # Check if we've already sent a scheduled delivery_report webhook for this media buy
             # and reporting date. We use created_at::date as the period key.
             if not force:
                 # Look back 24 hours to find recent successful webhooks
-                one_day_ago = datetime.now(UTC) - timedelta(hours=24)
+                one_day_ago = now_snapshot - timedelta(hours=24)
                 existing_stmt = select(WebhookDeliveryLog).where(
                     WebhookDeliveryLog.media_buy_id == media_buy.media_buy_id,
                     WebhookDeliveryLog.task_type == "media_buy_delivery",
@@ -213,17 +238,25 @@ class DeliveryWebhookScheduler:
                 protocol="rest",
             )
 
-            # Include active + completed statuses: the scheduler already filters
-            # by DB status (active/approved) at query time, so the delivery impl
-            # should include ended campaigns (dynamic status=completed) rather
-            # than filtering them out and reporting "not found" errors.
-            # We exclude "pending_activation" (ready) to avoid returning delivery
-            # data for future-dated campaigns that haven't started yet.
+            # Per #48 the default reporting window now spans the warm-up
+            # (pending_start) and paused states too. Buyers who configure
+            # reporting_webhook want to stop polling — silently skipping
+            # warm-up days forces them back to polling. The tenant-level
+            # ``report_pre_start_buys`` flag (default True) lets publishers
+            # who don't want heartbeat noise opt out.
             from adcp.types import MediaBuyStatus
+
+            statuses: list[MediaBuyStatus] = [
+                MediaBuyStatus.active,
+                MediaBuyStatus.completed,
+            ]
+            tenant = media_buy.tenant
+            if getattr(tenant, "report_pre_start_buys", True):
+                statuses.extend([MediaBuyStatus.pending_start, MediaBuyStatus.paused])
 
             req = GetMediaBuyDeliveryRequest(
                 media_buy_ids=[media_buy.media_buy_id],
-                status_filter=[MediaBuyStatus.active, MediaBuyStatus.completed],
+                status_filter=statuses,
                 start_date=start_date_obj.strftime("%Y-%m-%d"),
                 end_date=end_date_obj.strftime("%Y-%m-%d"),
                 context=None,
@@ -272,14 +305,23 @@ class DeliveryWebhookScheduler:
                 logger.warning(f"Could not get sequence number for media buy {media_buy.media_buy_id}: {e}")
 
             # Calculate next_expected_at for daily frequency: start of next day (UTC)
-            next_day = datetime.now(UTC).date() + timedelta(days=1)
+            next_day = now_snapshot.date() + timedelta(days=1)
             next_expected_at = datetime.combine(next_day, datetime.min.time(), tzinfo=UTC)
 
             # Set webhook-specific metadata directly on the response model
             # These fields are defined on the library's GetMediaBuyDeliveryResponse
             delivery_response.notification_type = NotificationType.scheduled  # type: ignore[assignment]
             delivery_response.next_expected_at = next_expected_at
-            delivery_response.partial_data = False  # TODO: Check for reporting_delayed status
+            # Heartbeat reports for pending_start/paused buys carry no real
+            # delivery yet; flag partial_data so receivers can route on it.
+            # Determined per-delivery: a buy in any non-active state should
+            # mark the response as partial.
+            non_active_status_strs = {"pending_start", "paused", "ready"}
+            partial = any(
+                str(getattr(d, "status", "") or "").lower() in non_active_status_strs
+                for d in (delivery_response.media_buy_deliveries or [])
+            )
+            delivery_response.partial_data = partial
             delivery_response.unavailable_count = 0  # TODO: Count reporting_delayed/failed deliveries
 
             # Extract webhook URL and authentication

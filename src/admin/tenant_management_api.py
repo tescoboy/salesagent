@@ -80,12 +80,10 @@ from src.core.database.embedded_tenant_guard import EmbeddedTenantWriteError
 from src.core.database.models import (
     Account,
     AdapterConfig,
-    AdmittedOperator,
     AdvertiserRoutingRule,
     CurrencyLimit,
     GamAdvertiser,
     MediaBuy,
-    OperatorAdvertiserLink,
     Principal,
     PropertyTag,
     SyncJob,
@@ -208,15 +206,24 @@ def _persist_adapter_config(session, tenant_id: str, adapter: AdapterConfigSchem
         session.flush()
 
     if isinstance(adapter, GAMAdapterConfig):
+        # Service-account JSON is required by the schema; refresh_token is optional.
+        # Set gam_auth_method to match the credential that's actually present so
+        # background sync paths that branch on it (inventory, custom_targeting) don't
+        # fall through to the OAuth code path with no refresh token.
+        sa_json = adapter.service_account_key_json.get_secret_value() if adapter.service_account_key_json else None
+        refresh_token = adapter.refresh_token.get_secret_value() if adapter.refresh_token else None
+        auth_method = "service_account" if sa_json else "oauth"
         ac = AdapterConfig(
             tenant_id=tenant_id,
             adapter_type="google_ad_manager",
             gam_network_code=adapter.network_code,
             gam_service_account_email=adapter.service_account_email,
-            gam_refresh_token=adapter.refresh_token.get_secret_value() if adapter.refresh_token else None,
+            gam_refresh_token=refresh_token,
+            gam_auth_method=auth_method,
         )
         # Encryption is wired via the property setter (see models.py:AdapterConfig).
-        ac.gam_service_account_json = adapter.service_account_key_json.get_secret_value()
+        if sa_json is not None:
+            ac.gam_service_account_json = sa_json
     else:  # MockAdapterConfig
         ac = AdapterConfig(
             tenant_id=tenant_id,
@@ -402,16 +409,6 @@ def create_tenant():
                     updated_at=datetime.now(UTC),
                 )
                 # NOTE: gam_company_id removed - advertiser_id is per-principal in platform_mappings
-            elif adapter_type == "kevel":
-                new_adapter = AdapterConfig(
-                    tenant_id=tenant_id,
-                    adapter_type=adapter_type,
-                    kevel_network_id=data.get("kevel_network_id"),
-                    kevel_api_key=data.get("kevel_api_key"),
-                    kevel_manual_approval_required=data.get("kevel_manual_approval_required", False),
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
-                )
             elif adapter_type in {"triton", "triton_digital"}:
                 # Validate Triton credentials through TritonConnectionConfig (encrypts password).
                 # Reject submitted ciphertext to close the cross-tenant smuggling
@@ -488,8 +485,6 @@ def create_tenant():
                 if adapter_type == "google_ad_manager":
                     # For GAM, add a placeholder advertiser ID
                     default_mappings = {"google_ad_manager": {"advertiser_id": "placeholder"}}
-                elif adapter_type == "kevel":
-                    default_mappings = {"kevel": {"advertiser_id": "placeholder"}}
                 elif adapter_type in {"triton", "triton_digital"}:
                     default_mappings = {"triton": {"advertiser_id": "placeholder"}}
                 elif adapter_type == "freewheel":
@@ -629,14 +624,6 @@ def update_tenant(tenant_id):
                             adapter.gam_trafficker_id = adapter_data["gam_trafficker_id"]
                         if "gam_manual_approval_required" in adapter_data:
                             adapter.gam_manual_approval_required = adapter_data["gam_manual_approval_required"]
-
-                    elif adapter.adapter_type == "kevel":
-                        if "kevel_network_id" in adapter_data:
-                            adapter.kevel_network_id = adapter_data["kevel_network_id"]
-                        if "kevel_api_key" in adapter_data:
-                            adapter.kevel_api_key = adapter_data["kevel_api_key"]
-                        if "kevel_manual_approval_required" in adapter_data:
-                            adapter.kevel_manual_approval_required = adapter_data["kevel_manual_approval_required"]
 
                     elif adapter.adapter_type in {"triton", "triton_digital"}:
                         # Reject submitted ciphertext (M1/S7: cross-tenant smuggling).
@@ -898,44 +885,6 @@ def provision_tenant():
                     name=initial_principal_name,
                     platform_mappings=platform_mappings,
                     access_token=f"embedded-mode-no-token:{secrets.token_urlsafe(8)}",
-                    bound_operator_id="embedded_host",
-                )
-            )
-            # Flush so the principal row exists in the DB before the
-            # OperatorAdvertiserLink FK reference below. SQLAlchemy 2.0 doesn't
-            # always order inserts by FK dependency when the linking table
-            # references a composite key — without this flush, the
-            # ``operator_advertiser_link_tenant_id_principal_id_fkey`` insert
-            # races the principal insert.
-            session.flush()
-
-        # Auto-install the host product as a single trusted operator. The
-        # cryptographic verifier bypasses these rows entirely (network/header
-        # trust is the embedded-mode boundary); the row exists for audit-trail
-        # consistency with non-embedded tenants. See
-        # docs/design/signing-non-embedded.md "Conceptual model".
-        host_display = req.external_source or "embedded host"
-        embedded_host_brand_json = f"embedded://{tenant_id}/embedded_host"
-        session.add(
-            AdmittedOperator(
-                tenant_id=tenant_id,
-                operator_id="embedded_host",
-                brand_json_url=embedded_host_brand_json,
-                aao_member_slug=req.external_source,
-                house_domain=req.house_domain,
-                display_name=host_display,
-                is_trusted=True,
-                is_active=True,
-            )
-        )
-        if initial_principal_id is not None:
-            session.add(
-                OperatorAdvertiserLink(
-                    tenant_id=tenant_id,
-                    operator_id="embedded_host",
-                    principal_id=initial_principal_id,
-                    billing_mode="operator_bills",
-                    is_active=True,
                 )
             )
 
@@ -1257,7 +1206,7 @@ def _set_account_advertiser(
 ) -> None:
     """Set GAM advertiser id/name on ``Account.platform_mappings``.
 
-    Preserves any other adapter blocks (kevel) and other GAM fields
+    Preserves any other adapter blocks (triton, freewheel) and other GAM fields
     we don't manage from this endpoint. Re-assigns the dict so SQLAlchemy
     sees the JSONType column as dirty even with mutation-tracking off.
     """
@@ -1911,7 +1860,14 @@ def _spawn_refresh_workers(tenant_id: str, sync_run_ids: dict[str, str]) -> None
         try:
             from src.services.gam_advertisers_sync import sync_advertisers
 
-            def _run_advertisers_in_thread(tenant_id: str = tenant_id, sync_id: str = advertisers_id) -> None:  # type: ignore[assignment]
+            # ``advertisers_id`` is narrowed to ``str`` by the
+            # ``if advertisers_id`` guard above, but mypy doesn't propagate the
+            # narrow into the closure default. ``str`` here matches the
+            # narrowed-truthy type at the call site.
+            def _run_advertisers_in_thread(
+                tenant_id: str = tenant_id,
+                sync_id: str = advertisers_id,  # type: ignore[assignment]
+            ) -> None:
                 """Wrap sync_advertisers so its re-raise (intentional for
                 direct callers + cron pickup) doesn't escape the daemon
                 thread. The worker has already marked the SyncJob row as
@@ -2991,7 +2947,12 @@ def test_webhook(tenant_id: str, webhook_id: str):
             tenant_id=tenant_id,
             data={"test": True, "subject_type": "tenant", "subject_id": tenant_id},
         )
-        status_code, latency_ms, error = asyncio.run(deliver_event_sync(_SubProxy, secret, envelope))  # type: ignore[arg-type]
+        # _SubProxy is a duck-typed stand-in for WebhookSubscription that
+        # carries just the fields deliver_event_sync reads. Real subscription
+        # row would be overkill for a connectivity test.
+        status_code, latency_ms, error = asyncio.run(
+            deliver_event_sync(_SubProxy, secret, envelope)  # type: ignore[arg-type]
+        )
         delivered = status_code is not None and 200 <= status_code < 300
         if not delivered:
             overall_ok = False

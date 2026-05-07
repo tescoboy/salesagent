@@ -35,7 +35,11 @@ from tests.integration.media_buy_helpers import (
     _get_tenant_dict as _tenant_dict,
 )
 from tests.integration.media_buy_helpers import (
+    admin_mark_creative_approved,
+    force_media_buy_status,
     make_lifecycle_identity,
+    set_tenant_approval_mode,
+    set_tenant_human_review_required,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db, pytest.mark.asyncio]
@@ -61,9 +65,7 @@ class TestBasicMediaBuyLifecycle:
         from src.core.tools.products import _get_products_impl
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
-        identity = make_lifecycle_identity(
-            tenant_dict, sample_principal["principal_id"], test_session_id="basic-lifecycle-test"
-        )
+        identity = make_lifecycle_identity(tenant_dict, sample_principal["principal_id"])
 
         # ───────── Phase 1: get_products ─────────
         products_req = GetProductsRequest(
@@ -78,9 +80,9 @@ class TestBasicMediaBuyLifecycle:
             (p for p in products_resp.products if p.product_id == "guaranteed_display"),
             None,
         )
-        assert chosen is not None, (
-            f"Expected 'guaranteed_display' in product list, got {[p.product_id for p in products_resp.products]}"
-        )
+        assert (
+            chosen is not None
+        ), f"Expected 'guaranteed_display' in product list, got {[p.product_id for p in products_resp.products]}"
         # Synthesized pricing_option_id format: "{model}_{currency}_{fixed|auction}"
         # See src/core/tools/media_buy_create.py:1654-1661
         pricing_option_id = "cpm_usd_fixed"
@@ -135,9 +137,9 @@ class TestBasicMediaBuyLifecycle:
         )
 
         assert sync_resp.creatives, f"sync_creatives returned no creatives: {sync_resp}"
-        assert any(c.creative_id == creative_id for c in sync_resp.creatives), (
-            f"Synced creative {creative_id} missing from response: {[c.creative_id for c in sync_resp.creatives]}"
-        )
+        assert any(
+            c.creative_id == creative_id for c in sync_resp.creatives
+        ), f"Synced creative {creative_id} missing from response: {[c.creative_id for c in sync_resp.creatives]}"
 
         with get_db_session() as session:
             db_creative = session.scalars(
@@ -156,16 +158,16 @@ class TestBasicMediaBuyLifecycle:
         )
         delivery_resp = _get_media_buy_delivery_impl(delivery_req, identity)
 
-        assert delivery_resp.errors is None or len(delivery_resp.errors) == 0, (
-            f"get_media_buy_delivery returned errors: {delivery_resp.errors}"
-        )
+        assert (
+            delivery_resp.errors is None or len(delivery_resp.errors) == 0
+        ), f"get_media_buy_delivery returned errors: {delivery_resp.errors}"
         # Mock adapter may return zero metrics for a fresh future-dated buy.
         # Validate shape, not values: the response must include our media buy.
         deliveries = delivery_resp.media_buy_deliveries or []
         delivery_ids = [d.media_buy_id for d in deliveries]
-        assert media_buy_id in delivery_ids, (
-            f"Expected {media_buy_id} in delivery response, got {delivery_ids}. Full response: {delivery_resp}"
-        )
+        assert (
+            media_buy_id in delivery_ids
+        ), f"Expected {media_buy_id} in delivery response, got {delivery_ids}. Full response: {delivery_resp}"
 
 
 class TestCreativeApprovalAsync:
@@ -175,23 +177,16 @@ class TestCreativeApprovalAsync:
         """Default approval_mode='require-human' → creative status=pending_review on
         sync; admin approval transitions to status=approved."""
         from src.core.database.models import Creative as DBCreative
-        from src.core.database.models import Tenant as TenantModel
         from src.core.tools.creatives._sync import _sync_creatives_impl
 
         # Force the tenant to require human approval (default in DB but
         # be explicit so this test is independent of fixture defaults).
-        with get_db_session() as session:
-            t = session.scalars(select(TenantModel).where(TenantModel.tenant_id == sample_tenant["tenant_id"])).first()
-            assert t is not None
-            t.approval_mode = "require-human"
-            session.commit()
+        set_tenant_approval_mode(sample_tenant["tenant_id"], "require-human")
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
         # _sync_creatives_impl reads approval_mode straight from the dict.
         tenant_dict["approval_mode"] = "require-human"
-        identity = make_lifecycle_identity(
-            tenant_dict, sample_principal["principal_id"], test_session_id="creative-approval-test"
-        )
+        identity = make_lifecycle_identity(tenant_dict, sample_principal["principal_id"])
 
         creative_id = f"cr_{uuid.uuid4().hex[:8]}"
         sync_resp = _sync_creatives_impl(
@@ -223,29 +218,13 @@ class TestCreativeApprovalAsync:
                 )
             ).first()
             assert row is not None, f"creative {creative_id} not persisted"
-            assert row.status == "pending_review", (
-                f"Expected pending_review, got {row.status}. sync response status={synced.status}"
-            )
+            assert (
+                row.status == "pending_review"
+            ), f"Expected pending_review, got {row.status}. sync response status={synced.status}"
 
-        # Simulate admin approval (the Flask route writes status='approved' +
-        # approved_at/approved_by; we test the same end state by writing
-        # via the production CreativeRepository.update_status_to_approved
-        # path used by the human-review record creation.)
-        from datetime import UTC
-        from datetime import datetime as _dt
-
-        with get_db_session() as session:
-            row = session.scalars(
-                select(DBCreative).where(
-                    DBCreative.creative_id == creative_id,
-                    DBCreative.tenant_id == tenant_dict["tenant_id"],
-                )
-            ).first()
-            assert row is not None
-            row.status = "approved"
-            row.approved_at = _dt.now(UTC)
-            row.approved_by = "test_admin"
-            session.commit()
+        # Simulate admin approval through the same repository method the
+        # admin Flask route uses (CreativeRepository.admin_mark_approved).
+        admin_mark_creative_approved(tenant_dict["tenant_id"], creative_id, approved_by="test_admin")
 
         with get_db_session() as session:
             row = session.scalars(
@@ -268,7 +247,6 @@ class TestMediaBuyApprovalAsync:
         """tenant.human_review_required=True → create_media_buy returns
         status='submitted'; execute_approved_media_buy transitions to active."""
         from src.core.database.models import MediaBuy as DBMediaBuy
-        from src.core.database.models import Tenant as TenantModel
         from src.core.database.models import WorkflowStep
         from src.core.schemas import CreateMediaBuyRequest
         from src.core.tools.media_buy_create import (
@@ -276,16 +254,10 @@ class TestMediaBuyApprovalAsync:
             execute_approved_media_buy,
         )
 
-        with get_db_session() as session:
-            t = session.scalars(select(TenantModel).where(TenantModel.tenant_id == sample_tenant["tenant_id"])).first()
-            assert t is not None
-            t.human_review_required = True
-            session.commit()
+        set_tenant_human_review_required(sample_tenant["tenant_id"], True)
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
-        identity = make_lifecycle_identity(
-            tenant_dict, sample_principal["principal_id"], test_session_id="mb-approval-test"
-        )
+        identity = make_lifecycle_identity(tenant_dict, sample_principal["principal_id"])
 
         req = CreateMediaBuyRequest(
             brand={"domain": "testbrand.com"},
@@ -301,9 +273,9 @@ class TestMediaBuyApprovalAsync:
         )
         result = await _create_media_buy_impl(req=req, identity=identity)
 
-        assert result.status == "submitted", (
-            f"Expected submitted, got status={result.status}, errors={getattr(result.response, 'errors', None)}"
-        )
+        assert (
+            result.status == "submitted"
+        ), f"Expected submitted, got status={result.status}, errors={getattr(result.response, 'errors', None)}"
         media_buy_id = result.response.media_buy_id
         assert media_buy_id
 
@@ -311,9 +283,9 @@ class TestMediaBuyApprovalAsync:
         with get_db_session() as session:
             steps = session.scalars(select(WorkflowStep).where(WorkflowStep.step_type == "media_buy_creation")).all()
             approval_steps = [s for s in steps if s.status == "requires_approval"]
-            assert approval_steps, (
-                f"Expected requires_approval workflow_step, got {[(s.step_id, s.status) for s in steps]}"
-            )
+            assert (
+                approval_steps
+            ), f"Expected requires_approval workflow_step, got {[(s.step_id, s.status) for s in steps]}"
 
         # Execute approval.
         success, error = execute_approved_media_buy(
@@ -346,9 +318,7 @@ class TestDeliveryStatusExcludedError:
         from src.core.tools.media_buy_delivery import _get_media_buy_delivery_impl
 
         tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
-        identity = make_lifecycle_identity(
-            tenant_dict, sample_principal["principal_id"], test_session_id="status-excluded-test"
-        )
+        identity = make_lifecycle_identity(tenant_dict, sample_principal["principal_id"])
 
         # Buy starts in the future → date-derived dynamic status = "ready".
         create_result = await _create_media_buy_impl(
@@ -432,9 +402,7 @@ class TestDeliveryWebhookFires:
         Thread(target=server.serve_forever, daemon=True).start()
         try:
             tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
-            identity = make_lifecycle_identity(
-                tenant_dict, sample_principal["principal_id"], test_session_id="webhook-test"
-            )
+            identity = make_lifecycle_identity(tenant_dict, sample_principal["principal_id"])
 
             create_req = CreateMediaBuyRequest(
                 brand={"domain": "testbrand.com"},
@@ -463,22 +431,16 @@ class TestDeliveryWebhookFires:
                 },
             )
             create_result = await _create_media_buy_impl(req=create_req, identity=identity)
-            assert create_result.status not in ("failed",), (
-                f"create failed: errors={getattr(create_result.response, 'errors', None)}"
-            )
+            assert create_result.status not in (
+                "failed",
+            ), f"create failed: errors={getattr(create_result.response, 'errors', None)}"
             media_buy_id = create_result.response.media_buy_id
             assert media_buy_id
 
             # The scheduler's delivery query filters status_filter=[active, completed].
             # A freshly-created mock buy lands in pending_activation/pending_creatives;
             # force-promote so the delivery lookup includes it.
-            from src.core.database.models import MediaBuy as DBMediaBuy
-
-            with get_db_session() as session:
-                mb = session.scalars(select(DBMediaBuy).where(DBMediaBuy.media_buy_id == media_buy_id)).first()
-                assert mb is not None
-                mb.status = "active"
-                session.commit()
+            force_media_buy_status(tenant_dict["tenant_id"], media_buy_id, "active")
 
             # Force-trigger the scheduler (bypasses 24h dedupe + frequency check).
             scheduler = DeliveryWebhookScheduler()
@@ -506,6 +468,212 @@ class TestDeliveryWebhookFires:
             assert deliveries, f"missing media_buy_deliveries: {result}"
             assert deliveries[0]["media_buy_id"] == media_buy_id
             assert result.get("notification_type") == "scheduled", result
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestDeliveryWebhookHeartbeatForPendingStart:
+    """Issue #48: future-dated buys (pending_start) should get heartbeat reports.
+
+    Default ``tenant.report_pre_start_buys=True`` means a buy with
+    ``start_time`` in the future and a configured reporting_webhook still
+    receives a daily heartbeat — flagged ``partial_data=true`` and carrying
+    impressions=0. Lets buyers stop polling for "did my flight land?" once
+    they configure the webhook.
+    """
+
+    async def test_pending_start_buy_gets_heartbeat_with_partial_data(
+        self, sample_tenant, sample_principal, sample_products
+    ):
+        import json
+        import socket
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from threading import Thread
+        from time import sleep
+
+        from src.core.schemas import CreateMediaBuyRequest
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+
+        received: list[dict] = []
+
+        class _Receiver(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                received.append(json.loads(self.rfile.read(length).decode()))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+            def log_message(self, *_a, **_k):
+                pass
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        server = HTTPServer(("127.0.0.1", port), _Receiver)
+        Thread(target=server.serve_forever, daemon=True).start()
+
+        try:
+            tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
+            identity = make_lifecycle_identity(tenant_dict, sample_principal["principal_id"])
+
+            create_result = await _create_media_buy_impl(
+                req=CreateMediaBuyRequest(
+                    brand={"domain": "testbrand.com"},
+                    # Future start so the date-derived dynamic status is
+                    # 'pending_start'. Pre-#48 the scheduler skipped these.
+                    start_time=_future(2),
+                    end_time=_future(8),
+                    packages=[
+                        {
+                            "product_id": "guaranteed_display",
+                            "budget": 5000.0,
+                            "pricing_option_id": "cpm_usd_fixed",
+                        }
+                    ],
+                    reporting_webhook={
+                        "url": f"http://127.0.0.1:{port}/webhook",
+                        "reporting_frequency": "daily",
+                        "authentication": {
+                            "schemes": ["Bearer"],
+                            "credentials": "test_credential_minimum_32_chars_xxx",
+                        },
+                    },
+                ),
+                identity=identity,
+            )
+            assert create_result.status not in (
+                "failed",
+            ), f"create failed: {getattr(create_result.response, 'errors', None)}"
+            media_buy_id = create_result.response.media_buy_id
+            assert media_buy_id
+
+            scheduler = DeliveryWebhookScheduler()
+            triggered = await scheduler.trigger_report_for_media_buy_by_id(
+                media_buy_id=media_buy_id,
+                tenant_id=tenant_dict["tenant_id"],
+            )
+            assert triggered
+
+            deadline = 10.0
+            elapsed = 0.0
+            while not received and elapsed < deadline:
+                sleep(0.5)
+                elapsed += 0.5
+            assert received, (
+                f"No webhook received within {deadline}s — pre-#48 the "
+                f"scheduler silently skipped pending_start buys; this test "
+                f"guards the new heartbeat behaviour."
+            )
+
+            payload = received[0]
+            result = payload.get("result") or {}
+            assert (
+                result.get("partial_data") is True
+            ), f"Heartbeat for pending_start should set partial_data=True, got result={result}"
+            deliveries = result.get("media_buy_deliveries") or []
+            assert deliveries, f"missing media_buy_deliveries: {result}"
+            assert deliveries[0]["media_buy_id"] == media_buy_id
+            # Buy is pre-start so no impressions yet.
+            assert (deliveries[0].get("totals") or {}).get("impressions", 0) == 0
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestDeliveryWebhookOptOutPreStart:
+    """Issue #48: tenant can opt out of pre-start heartbeats.
+
+    With ``tenant.report_pre_start_buys=False`` the scheduler reverts to
+    the legacy ``[active, completed]`` filter — pending_start buys get
+    silently skipped (status_excluded INFO log, no webhook).
+    """
+
+    async def test_opt_out_silences_pending_start_heartbeat(self, sample_tenant, sample_principal, sample_products):
+        import json
+        import socket
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from threading import Thread
+        from time import sleep
+
+        from src.core.database.repositories.uow import TenantConfigUoW
+        from src.core.schemas import CreateMediaBuyRequest
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+
+        # Opt the tenant out of pre-start heartbeats.
+        with TenantConfigUoW(sample_tenant["tenant_id"]) as uow:
+            assert uow.tenant_config is not None
+            t = uow.tenant_config.get_tenant()
+            assert t is not None
+            t.report_pre_start_buys = False
+
+        received: list[dict] = []
+
+        class _Receiver(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                received.append(json.loads(self.rfile.read(length).decode()))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+            def log_message(self, *_a, **_k):
+                pass
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        server = HTTPServer(("127.0.0.1", port), _Receiver)
+        Thread(target=server.serve_forever, daemon=True).start()
+
+        try:
+            tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
+            identity = make_lifecycle_identity(tenant_dict, sample_principal["principal_id"])
+
+            create_result = await _create_media_buy_impl(
+                req=CreateMediaBuyRequest(
+                    brand={"domain": "testbrand.com"},
+                    start_time=_future(2),
+                    end_time=_future(8),
+                    packages=[
+                        {
+                            "product_id": "guaranteed_display",
+                            "budget": 5000.0,
+                            "pricing_option_id": "cpm_usd_fixed",
+                        }
+                    ],
+                    reporting_webhook={
+                        "url": f"http://127.0.0.1:{port}/webhook",
+                        "reporting_frequency": "daily",
+                        "authentication": {
+                            "schemes": ["Bearer"],
+                            "credentials": "test_credential_minimum_32_chars_xxx",
+                        },
+                    },
+                ),
+                identity=identity,
+            )
+            assert create_result.status not in ("failed",)
+            media_buy_id = create_result.response.media_buy_id
+
+            scheduler = DeliveryWebhookScheduler()
+            await scheduler.trigger_report_for_media_buy_by_id(
+                media_buy_id=media_buy_id,
+                tenant_id=tenant_dict["tenant_id"],
+            )
+
+            # Give the receiver thread a chance to pick up any inbound POST.
+            sleep(2.0)
+            assert (
+                not received
+            ), f"Expected no webhook (tenant opted out of pre-start heartbeats) but receiver got: {received}"
         finally:
             server.shutdown()
             server.server_close()

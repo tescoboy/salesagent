@@ -423,7 +423,7 @@ class SetupChecklistService:
                 else:
                     ad_server_fully_configured = False
                     config_details = "Mock adapter - Configure a real ad server for production"
-            elif tenant.ad_server in {"kevel", "triton", "triton_digital", "freewheel"}:
+            elif tenant.ad_server in {"triton", "triton_digital", "freewheel"}:
                 # Schema-driven adapters — configured once credentials are saved.
                 ad_server_fully_configured = True
                 config_details = f"{tenant.ad_server} adapter configured"
@@ -565,7 +565,7 @@ class SetupChecklistService:
                         details=inventory_details,
                     )
                 )
-            elif tenant.ad_server in {"kevel", "triton", "triton_digital", "freewheel"}:
+            elif tenant.ad_server in {"triton", "triton_digital", "freewheel"}:
                 # Schema-driven adapters configure inventory per-product (not via sync).
                 tasks.append(
                     SetupTask(
@@ -880,7 +880,7 @@ class SetupChecklistService:
                 else:
                     ad_server_fully_configured = False
                     config_details = "Mock adapter - Configure a real ad server for production"
-            elif tenant.ad_server in {"kevel", "triton", "triton_digital", "freewheel"}:
+            elif tenant.ad_server in {"triton", "triton_digital", "freewheel"}:
                 ad_server_fully_configured = True
                 config_details = f"{tenant.ad_server} adapter configured"
             else:
@@ -976,7 +976,7 @@ class SetupChecklistService:
                         ),
                     )
                 )
-            elif tenant.ad_server in {"kevel", "triton", "triton_digital", "freewheel"}:
+            elif tenant.ad_server in {"triton", "triton_digital", "freewheel"}:
                 tasks.append(
                     SetupTask(
                         key="inventory_synced",

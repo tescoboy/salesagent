@@ -233,7 +233,8 @@ def save_adapter_config(tenant_id, **kwargs):
                 adapter_config.mock_manual_approval_required = getattr(
                     validated_config, "manual_approval_required", False
                 )
-            # Note: GAM and Kevel will be added as their schemas are created
+            # Note: GAM will be added as its schema is created. Triton + FreeWheel
+            # already use config_json via their connection schemas.
 
             session.commit()
             logger.info(f"Saved adapter config for tenant {tenant_id}: {adapter_type}")

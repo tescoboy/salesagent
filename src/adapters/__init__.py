@@ -1,4 +1,3 @@
-# from .xandr import XandrAdapter  # Temporarily disabled - needs schema updates
 from dataclasses import dataclass
 
 from .base import AdapterCapabilities as AdapterCapabilities
@@ -10,7 +9,6 @@ from .broadstreet import BroadstreetAdapter
 from .creative_engine import CreativeEngineAdapter
 from .freewheel import FreeWheelAdapter
 from .google_ad_manager import GoogleAdManager as GAMAdapter
-from .kevel import Kevel as KevelAdapter
 from .mock_ad_server import MockAdServer as MockAdapter
 from .triton import TritonAdapter
 
@@ -20,13 +18,10 @@ ADAPTER_REGISTRY = {
     "google_ad_manager": GAMAdapter,
     "broadstreet": BroadstreetAdapter,
     "freewheel": FreeWheelAdapter,
-    "kevel": KevelAdapter,
     "mock": MockAdapter,
     "triton": TritonAdapter,
     "triton_digital": TritonAdapter,
     "creative_engine": CreativeEngineAdapter,
-    # 'xandr': XandrAdapter,
-    # 'microsoft_monetize': XandrAdapter
 }
 
 
@@ -82,7 +77,7 @@ def get_adapter_default_channels(adapter_type: str) -> list[str]:
     Default channels are defined on each adapter class's default_channels attribute.
 
     Args:
-        adapter_type: Adapter type name (e.g., "google_ad_manager", "mock", "kevel", "triton")
+        adapter_type: Adapter type name (e.g., "google_ad_manager", "mock", "triton")
 
     Returns:
         List of default channel names for the adapter
