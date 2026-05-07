@@ -381,7 +381,7 @@ def _update_media_buy_impl(
             # Manual approval case - convert adapter result to appropriate Success/Error
             # adcp v1.2.1 oneOf pattern: Check if result is Error variant (has errors field)
             if isinstance(result, UpdateMediaBuyError) and result.errors:
-                error_response = UpdateMediaBuyError(errors=result.errors)
+                error_response = UpdateMediaBuyError(errors=result.errors, context=req.context)
                 ctx_manager.update_workflow_step(
                     step.step_id,
                     status="failed",
@@ -440,7 +440,7 @@ def _update_media_buy_impl(
                         error_message = (
                             result.errors[0].message if (result.errors and len(result.errors) > 0) else "Update failed"
                         )
-                        response_data = UpdateMediaBuyError(errors=result.errors)
+                        response_data = UpdateMediaBuyError(errors=result.errors, context=req.context)
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
@@ -511,7 +511,7 @@ def _update_media_buy_impl(
                         error_message = (
                             result.errors[0].message if (result.errors and len(result.errors) > 0) else "Update failed"
                         )
-                        response_data = UpdateMediaBuyError(errors=result.errors)
+                        response_data = UpdateMediaBuyError(errors=result.errors, context=req.context)
                         ctx_manager.update_workflow_step(
                             step.step_id,
                             status="failed",
@@ -999,6 +999,7 @@ def _update_media_buy_impl(
                         error_msg = "package_id is required when updating targeting_overlay"
                         response_data = UpdateMediaBuyError(
                             errors=[Error(code="missing_package_id", message=error_msg)],
+                            context=req.context,
                         )
                         ctx_manager.update_workflow_step(
                             step.step_id,
@@ -1017,6 +1018,7 @@ def _update_media_buy_impl(
                         error_msg = f"Package {pkg_update.package_id} not found for media buy {req.media_buy_id}"
                         response_data = UpdateMediaBuyError(
                             errors=[Error(code="package_not_found", message=error_msg)],
+                            context=req.context,
                         )
                         ctx_manager.update_workflow_step(
                             step.step_id,
@@ -1160,6 +1162,7 @@ def _update_media_buy_impl(
                     error_msg = f"Media buy {req.media_buy_id} not found"
                     response_data = UpdateMediaBuyError(
                         errors=[Error(code="media_buy_not_found", message=error_msg)],
+                        context=req.context,
                     )
                     ctx_manager.update_workflow_step(
                         step.step_id,
@@ -1192,6 +1195,7 @@ def _update_media_buy_impl(
                     )
                     response_data = UpdateMediaBuyError(
                         errors=[Error(code="invalid_date_range", message=error_msg)],
+                        context=req.context,
                     )
                     ctx_manager.update_workflow_step(
                         step.step_id,
