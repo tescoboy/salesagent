@@ -12,7 +12,11 @@ breakages get caught before the slow e2e suite even starts.
 
 from __future__ import annotations
 
-from tests.e2e.adcp_request_builder import build_update_media_buy_request
+from tests.e2e.adcp_request_builder import (
+    _inject_wire_required_fields,
+    build_adcp_media_buy_request,
+    build_update_media_buy_request,
+)
 
 
 def test_request_has_required_account_field():
@@ -79,3 +83,44 @@ def test_passes_webhook_with_correct_authentication_shape():
     assert pnc["url"] == "https://example.com/cb"
     # AdCP 4.4 ReportingWebhook authentication: type=none is the simplest valid form.
     assert pnc["authentication"] == {"type": "none"}
+
+
+# ---------------------------------------------------------------------------
+# _inject_wire_required_fields helper — shared by create + update + (future) sync
+# ---------------------------------------------------------------------------
+
+
+def test_helper_injects_account_and_idempotency_key_with_prefix():
+    """The shared helper must add both required fields with the
+    requested prefix on the idempotency_key."""
+    request: dict = {}
+    _inject_wire_required_fields(request, brand={"domain": "acme.com"}, idempotency_prefix="e2e-test")
+    assert request["account"] == {"brand": {"domain": "acme.com"}, "operator": "acme.com"}
+    assert request["idempotency_key"].startswith("e2e-test-")
+
+
+def test_helper_falls_back_to_default_brand_when_brand_is_none():
+    """``brand=None`` triggers the default ``{"domain": "testbrand.com"}`` —
+    keeps callers that don't care about brand from having to construct one."""
+    request: dict = {}
+    _inject_wire_required_fields(request, brand=None, idempotency_prefix="x")
+    assert request["account"]["brand"] == {"domain": "testbrand.com"}
+    assert request["account"]["operator"] == "testbrand.com"
+
+
+def test_create_and_update_builders_use_consistent_account_shape():
+    """Regression: a future drift between the create and update builders'
+    account-synthesis would break tenant lookups during e2e flows where
+    the same brand is used to create then update a media buy."""
+    create_req = build_adcp_media_buy_request(
+        product_ids=["p1"],
+        total_budget=1000.0,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-31T00:00:00Z",
+        brand={"domain": "shared-brand.com"},
+    )
+    update_req = build_update_media_buy_request(
+        media_buy_id="mb_test",
+        brand={"domain": "shared-brand.com"},
+    )
+    assert create_req["account"] == update_req["account"]

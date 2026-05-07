@@ -11,9 +11,43 @@ from datetime import UTC, datetime
 from typing import Any
 
 
+_DEFAULT_BRAND: dict[str, Any] = {"domain": "testbrand.com"}
+
+
 def generate_buyer_ref(prefix: str = "test") -> str:
     """Generate a unique buyer reference."""
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def _inject_wire_required_fields(
+    request: dict[str, Any],
+    *,
+    brand: dict[str, Any] | None,
+    idempotency_prefix: str,
+) -> None:
+    """Inject the adcp 4.4 wire-required ``account`` + ``idempotency_key``.
+
+    AdCP 4.4 made both fields required at the wire boundary on the
+    create_media_buy / update_media_buy / sync_creatives requests.
+    Real buyers must supply them; the test builders synthesise valid
+    values from the caller-supplied brand so e2e flows behave like real
+    callers without bypassing SDK validation.
+
+    * ``account`` is a natural-key reference (``{brand, operator}``)
+      where the operator defaults to the brand's domain — buyers using
+      a seller-assigned ``account_id`` instead can pass it through
+      manually after the builder returns.
+    * ``idempotency_key`` is a fresh UUID per call (no memoisation),
+      satisfying the spec pattern ``^[A-Za-z0-9_.:-]{16,255}$``. The
+      ``idempotency_prefix`` is a short tool-name marker (e.g.
+      ``"e2e"``, ``"e2e-update"``, ``"e2e-sync"``) for log-grepping.
+    """
+    actual_brand = brand if brand is not None else _DEFAULT_BRAND
+    operator = (
+        actual_brand.get("domain", "testbrand.com") if isinstance(actual_brand, dict) else "testbrand.com"
+    )
+    request["idempotency_key"] = f"{idempotency_prefix}-{uuid.uuid4()}"
+    request["account"] = {"brand": actual_brand, "operator": operator}
 
 
 def parse_tool_result(result: Any) -> dict[str, Any]:
@@ -101,16 +135,6 @@ def build_adcp_media_buy_request(
     # Per AdCP spec: Package requires product_id (singular) and pricing_option_id
     request: dict[str, Any] = {
         "brand": brand,  # AdCP 3.6.0: BrandReference with domain
-        # adcp 4.4 made these required at the wire boundary. The buyer is
-        # responsible for both — idempotency_key for retry-safe dedupe and
-        # account for billing routing. Real buyers must supply them; the
-        # builder generates a fresh UUID and an account natural-key derived
-        # from the brand so test e2e flows behave like real callers.
-        "idempotency_key": f"e2e-{uuid.uuid4()}",
-        "account": {
-            "brand": brand,
-            "operator": brand.get("domain", "testbrand.com") if isinstance(brand, dict) else "testbrand.com",
-        },
         "packages": [
             {
                 "product_id": (
@@ -145,6 +169,7 @@ def build_adcp_media_buy_request(
     if context:
         request["context"] = context
 
+    _inject_wire_required_fields(request, brand=brand, idempotency_prefix="e2e")
     return request
 
 
@@ -287,7 +312,7 @@ def build_creative(
 def build_update_media_buy_request(
     media_buy_id: str,
     active: bool | None = None,
-    budget: float | dict[str, Any] | None = None,
+    budget: float | None = None,
     packages: list[dict[str, Any]] | None = None,
     webhook_url: str | None = None,
     brand: dict[str, Any] | None = None,
@@ -299,7 +324,7 @@ def build_update_media_buy_request(
     Args:
         media_buy_id: Media buy ID to update (required)
         active: Optional active status update
-        budget: Optional budget update (float per AdCP spec, dict accepted for legacy callers)
+        budget: Optional budget update (number per AdCP spec)
         packages: Optional package updates
         webhook_url: Optional webhook for async notifications
         brand: BrandReference dict — used to synthesise the ``account`` natural
@@ -309,21 +334,7 @@ def build_update_media_buy_request(
     Returns:
         Valid AdCP UpdateMediaBuyRequest dict.
     """
-    if brand is None:
-        brand = {"domain": "testbrand.com"}
-
-    request: dict[str, Any] = {
-        "media_buy_id": media_buy_id,
-        # adcp 4.4 made these required at the wire boundary on
-        # update_media_buy too. Real buyers must supply them; the
-        # builder generates a fresh UUID and a brand-derived account
-        # natural key so test e2e flows behave like real callers.
-        "idempotency_key": f"e2e-update-{uuid.uuid4()}",
-        "account": {
-            "brand": brand,
-            "operator": brand.get("domain", "testbrand.com") if isinstance(brand, dict) else "testbrand.com",
-        },
-    }
+    request: dict[str, Any] = {"media_buy_id": media_buy_id}
 
     if active is not None:
         request["active"] = active
@@ -339,6 +350,7 @@ def build_update_media_buy_request(
     if context is not None:
         request["context"] = context
 
+    _inject_wire_required_fields(request, brand=brand, idempotency_prefix="e2e-update")
     return request
 
 
