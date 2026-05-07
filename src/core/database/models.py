@@ -202,9 +202,7 @@ class Tenant(Base, JSONValidatorMixin):
     # notifications on AJAX actions, fetch wrapper that shows in-flight
     # state and success/error feedback so saves are never silent.
     # Default off; flag-off equals today's UI byte-for-byte.
-    modern_ux_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    modern_ux_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
     # Embed-mode breadcrumb root override. Shape: ``{"label": str, "url": str}``.
     # Only meaningful when ``is_embedded`` is True — open-instance tenants ignore

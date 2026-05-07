@@ -347,11 +347,7 @@ def _update_media_buy_impl(
         manual_approval_required = adapter.manual_approval_required
         manual_approval_operations = adapter.manual_approval_operations
 
-        if (
-            manual_approval_required
-            and "update_media_buy" in manual_approval_operations
-            and not bypass_manual_approval
-        ):
+        if manual_approval_required and "update_media_buy" in manual_approval_operations and not bypass_manual_approval:
             # Store the original request alongside the response so the approval
             # execution path can re-execute the update after human approval.
             # This mirrors create_media_buy's raw_request pattern.
@@ -1325,14 +1321,10 @@ def _update_media_buy_impl(
                             get_adapter as _get_adapter_helper,
                         )
 
-                        principal_obj = get_principal_object(
-                            existing_mb.principal_id, tenant_id=identity.tenant_id
-                        )
+                        principal_obj = get_principal_object(existing_mb.principal_id, tenant_id=identity.tenant_id)
                         tenant_obj = identity.tenant
                         if principal_obj and tenant_obj:
-                            adapter = _get_adapter_helper(
-                                principal_obj, dry_run=False, tenant=tenant_obj
-                            )
+                            adapter = _get_adapter_helper(principal_obj, dry_run=False, tenant=tenant_obj)
                             if hasattr(adapter, "orders_manager") and adapter.orders_manager:
                                 ok = adapter.orders_manager.update_order_dates(
                                     order_id=existing_mb.gam_order_id,
@@ -1340,9 +1332,7 @@ def _update_media_buy_impl(
                                     end_time=final_end_time,
                                 )
                                 if ok:
-                                    logger.info(
-                                        f"Synced flight dates to GAM Order {existing_mb.gam_order_id}"
-                                    )
+                                    logger.info(f"Synced flight dates to GAM Order {existing_mb.gam_order_id}")
                                 else:
                                     logger.error(
                                         f"GAM sync FAILED for Order {existing_mb.gam_order_id} — DB and GAM now disagree"

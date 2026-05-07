@@ -202,9 +202,7 @@ def _replay_update_media_buy(step, tenant_id, db):
         context_id=step.context_id,
         bypass_manual_approval=True,
     )
-    logger.info(
-        f"[APPROVAL] Replayed update_media_buy step {step.step_id} → result type {type(result).__name__}"
-    )
+    logger.info(f"[APPROVAL] Replayed update_media_buy step {step.step_id} → result type {type(result).__name__}")
     return result
 
 

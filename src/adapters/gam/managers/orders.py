@@ -1210,9 +1210,7 @@ class GAMOrdersManager:
         if start_time is not None:
             now_aware = datetime.now(UTC)
             start_aware = (
-                start_time.astimezone(UTC)
-                if getattr(start_time, "tzinfo", None)
-                else start_time.replace(tzinfo=UTC)
+                start_time.astimezone(UTC) if getattr(start_time, "tzinfo", None) else start_time.replace(tzinfo=UTC)
             )
             start_is_immediate = start_aware <= now_aware + timedelta(seconds=60)
 
@@ -1296,9 +1294,7 @@ class GAMOrdersManager:
                     break  # success
                 except Exception as li_exc:
                     error_str = str(li_exc)
-                    is_forecast_warmup = (
-                        "NO_FORECAST_YET" in error_str or "ForecastingError" in error_str
-                    )
+                    is_forecast_warmup = "NO_FORECAST_YET" in error_str or "ForecastingError" in error_str
                     if is_forecast_warmup and attempt < max_retries - 1:
                         wait_time = min(5 * (2**attempt), 30)
                         logger.warning(
