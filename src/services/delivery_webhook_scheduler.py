@@ -157,12 +157,9 @@ class DeliveryWebhookScheduler:
                     return False
 
                 # Force sending even if already sent today (for testing).
-                # Snapshot wall-clock once so all internal date arithmetic
-                # (reporting period, dedup window, next_expected_at) sees
-                # the same instant — same rationale as ``_send_reports``.
-                await self._send_report_for_media_buy(
-                    media_buy, reporting_webhook, session, force=True, now=datetime.now(UTC)
-                )
+                # _send_report_for_media_buy snapshots ``now`` itself when
+                # not given one, which is fine for this single-buy path.
+                await self._send_report_for_media_buy(media_buy, reporting_webhook, session, force=True)
                 return True
         except Exception as e:
             logger.error(f"Error manually triggering report for {media_buy_id}: {e}", exc_info=True)
