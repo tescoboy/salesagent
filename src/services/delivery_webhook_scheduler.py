@@ -213,17 +213,25 @@ class DeliveryWebhookScheduler:
                 protocol="rest",
             )
 
-            # Include active + completed statuses: the scheduler already filters
-            # by DB status (active/approved) at query time, so the delivery impl
-            # should include ended campaigns (dynamic status=completed) rather
-            # than filtering them out and reporting "not found" errors.
-            # We exclude "pending_activation" (ready) to avoid returning delivery
-            # data for future-dated campaigns that haven't started yet.
+            # Per #48 the default reporting window now spans the warm-up
+            # (pending_start) and paused states too. Buyers who configure
+            # reporting_webhook want to stop polling — silently skipping
+            # warm-up days forces them back to polling. The tenant-level
+            # ``report_pre_start_buys`` flag (default True) lets publishers
+            # who don't want heartbeat noise opt out.
             from adcp.types import MediaBuyStatus
+
+            statuses: list[MediaBuyStatus] = [
+                MediaBuyStatus.active,
+                MediaBuyStatus.completed,
+            ]
+            tenant = media_buy.tenant
+            if getattr(tenant, "report_pre_start_buys", True):
+                statuses.extend([MediaBuyStatus.pending_start, MediaBuyStatus.paused])
 
             req = GetMediaBuyDeliveryRequest(
                 media_buy_ids=[media_buy.media_buy_id],
-                status_filter=[MediaBuyStatus.active, MediaBuyStatus.completed],
+                status_filter=statuses,
                 start_date=start_date_obj.strftime("%Y-%m-%d"),
                 end_date=end_date_obj.strftime("%Y-%m-%d"),
                 context=None,
@@ -279,7 +287,16 @@ class DeliveryWebhookScheduler:
             # These fields are defined on the library's GetMediaBuyDeliveryResponse
             delivery_response.notification_type = NotificationType.scheduled  # type: ignore[assignment]
             delivery_response.next_expected_at = next_expected_at
-            delivery_response.partial_data = False  # TODO: Check for reporting_delayed status
+            # Heartbeat reports for pending_start/paused buys carry no real
+            # delivery yet; flag partial_data so receivers can route on it.
+            # Determined per-delivery: a buy in any non-active state should
+            # mark the response as partial.
+            non_active_status_strs = {"pending_start", "paused", "ready"}
+            partial = any(
+                str(getattr(d, "status", "") or "").lower() in non_active_status_strs
+                for d in (delivery_response.media_buy_deliveries or [])
+            )
+            delivery_response.partial_data = partial
             delivery_response.unavailable_count = 0  # TODO: Count reporting_delayed/failed deliveries
 
             # Extract webhook URL and authentication

@@ -116,6 +116,14 @@ class Tenant(Base, JSONValidatorMixin):
     # Gemini key opt out without rewriting templates.
     auto_naming_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
+    # When True, the delivery webhook scheduler also sends heartbeat reports
+    # for buys in pending_start (warm-up window) and paused — not just active
+    # and completed. Lets buyers stop polling for "did my flight start yet?"
+    # and "is the pause still in effect?". Default True. See issue #48.
+    report_pre_start_buys: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+
     # Measurement providers configuration
     # Structure: {"providers": ["Provider 1", "Provider 2"], "default": "Provider 1"}
     measurement_providers: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
