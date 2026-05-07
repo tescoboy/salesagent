@@ -300,9 +300,10 @@ def test_freewheel_connection(tenant_id, **kwargs):
             )
 
         if not client_secret:
+            from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
             with get_db_session() as session:
-                stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
-                existing = session.scalars(stmt).first()
+                existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
                 if existing and existing.config_json:
                     from src.adapters.freewheel import FreeWheelConnectionConfig
 
@@ -387,9 +388,10 @@ def test_triton_connection(tenant_id, **kwargs):
             )
 
         if not password:
+            from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
             with get_db_session() as session:
-                stmt = select(AdapterConfig).filter_by(tenant_id=tenant_id)
-                existing = session.scalars(stmt).first()
+                existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
                 if existing and existing.config_json:
                     from src.adapters.triton import TritonConnectionConfig
 

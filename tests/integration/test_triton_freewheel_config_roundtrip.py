@@ -28,15 +28,14 @@ from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import delete, select
 
 from src.adapters.freewheel import FreeWheelConnectionConfig
 from src.adapters.triton import TritonConnectionConfig
-from src.core.database.database_session import get_db_session
-from src.core.database.models import AdapterConfig
-from src.core.database.models import Tenant as ModelTenant
+from src.core.database.repositories.adapter_config import AdapterConfigRepository
 from src.core.tenant_status import get_tenant_status, is_tenant_ad_server_configured
 from src.core.utils.encryption import is_encrypted
+from tests.factories.core import AdapterConfigFactory, TenantFactory
+from tests.helpers.managed_tenant_api import bind_factories_to_session
 
 _TEST_ENCRYPTION_KEY = Fernet.generate_key().decode()
 
@@ -47,45 +46,52 @@ def _encryption_key():
         yield
 
 
-@pytest.fixture
-def _tenant(integration_db, _encryption_key):
-    from tests.utils.database_helpers import create_tenant_with_timestamps
-
-    tenant_id = "tenant_cfg_roundtrip"
-    with get_db_session() as session:
-        tenant = create_tenant_with_timestamps(
-            tenant_id=tenant_id,
-            name="Config Roundtrip",
-            subdomain="cfg-roundtrip",
-            ad_server="mock",
-            is_active=True,
-        )
-        session.add(tenant)
-        session.commit()
-
-    yield tenant_id
-
-    with get_db_session() as session:
-        session.execute(delete(AdapterConfig).where(AdapterConfig.tenant_id == tenant_id))
-        session.execute(delete(ModelTenant).where(ModelTenant.tenant_id == tenant_id))
-        session.commit()
-
-
 def _persist_adapter_config(tenant_id: str, adapter_type: str, config_json: dict) -> None:
-    """Persist a validated config_json for the tenant's adapter."""
-    with get_db_session() as session:
-        existing = session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
-        if existing:
+    """Persist a validated config_json for the tenant's adapter via the factory.
+
+    Updates ``tenant.ad_server`` so ``tenant_status`` checks the new adapter
+    type rather than whatever ``TenantFactory`` defaulted to.
+    """
+    from src.core.database.models import Tenant
+
+    with bind_factories_to_session() as session:
+        tenant = session.get(Tenant, tenant_id)
+        tenant.ad_server = adapter_type
+        existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+        if existing is not None:
             existing.adapter_type = adapter_type
             existing.config_json = config_json
         else:
-            session.add(AdapterConfig(tenant_id=tenant_id, adapter_type=adapter_type, config_json=config_json))
+            # Pass the live ORM instance so AdapterConfigFactory's SubFactory
+            # doesn't try to mint a new tenant — overriding tenant_id alone
+            # is ignored because the LazyAttribute reads off the SubFactory.
+            AdapterConfigFactory(tenant=tenant, adapter_type=adapter_type, config_json=config_json)
         session.commit()
-    # Update tenant.ad_server so tenant_status checks the right adapter
-    with get_db_session() as session:
-        tenant = session.scalars(select(ModelTenant).filter_by(tenant_id=tenant_id)).first()
-        tenant.ad_server = adapter_type
-        session.commit()
+
+
+@pytest.fixture
+def _tenant(integration_db, _encryption_key):
+    """Yield a fresh tenant_id with default mock adapter config.
+
+    Note: read ``tenant_id`` inside the binding context — the ORM instance
+    gets detached when the session closes, and any attribute access after
+    that triggers a refresh on a closed session.
+    """
+    tenant_id = "tenant_cfg_roundtrip"
+    with bind_factories_to_session():
+        TenantFactory(tenant_id=tenant_id, subdomain="cfg-roundtrip", ad_server="mock")
+    yield tenant_id
+
+
+def _read_config_json(tenant_id: str) -> dict:
+    """Read AdapterConfig.config_json via the repository — the only path that
+    satisfies the no-raw-select architecture guard.
+    """
+    with bind_factories_to_session() as session:
+        row = AdapterConfigRepository(session, tenant_id).get_by_tenant()
+        # config_json is mutable; copy so the caller can use it after the
+        # session closes.
+        return dict(row.config_json or {})
 
 
 @pytest.mark.integration
@@ -101,12 +107,10 @@ class TestTritonConfigRoundtrip:
         _persist_adapter_config(_tenant, "triton", validated.model_dump())
 
         # On-disk: ciphertext
-        with get_db_session() as session:
-            row = session.scalars(select(AdapterConfig).filter_by(tenant_id=_tenant)).first()
-            assert row.adapter_type == "triton"
-            assert is_encrypted(row.config_json["password"]), "password must be ciphertext at rest"
-            assert row.config_json["username"] == "alice@publisher.example"
-            assert row.config_json["auth_type"] == "password"
+        on_disk = _read_config_json(_tenant)
+        assert is_encrypted(on_disk["password"]), "password must be ciphertext at rest"
+        assert on_disk["username"] == "alice@publisher.example"
+        assert on_disk["auth_type"] == "password"
 
         # Tenant status reports configured
         assert is_tenant_ad_server_configured(_tenant) is True
@@ -116,10 +120,8 @@ class TestTritonConfigRoundtrip:
         assert status["missing_config"] == []
 
         # Rehydration through the schema yields plaintext
-        with get_db_session() as session:
-            row = session.scalars(select(AdapterConfig).filter_by(tenant_id=_tenant)).first()
-            rehydrated = TritonConnectionConfig.model_validate(row.config_json)
-            assert rehydrated.password == "hunter2"
+        rehydrated = TritonConnectionConfig.model_validate(on_disk)
+        assert rehydrated.password == "hunter2"
 
     def test_oauth_client_credentials_auth_roundtrip(self, _tenant):
         validated = TritonConnectionConfig(
@@ -129,12 +131,11 @@ class TestTritonConfigRoundtrip:
         )
         _persist_adapter_config(_tenant, "triton", validated.model_dump())
 
-        with get_db_session() as session:
-            row = session.scalars(select(AdapterConfig).filter_by(tenant_id=_tenant)).first()
-            assert row.config_json["auth_type"] == "oauth_client_credentials"
-            assert is_encrypted(row.config_json["password"])
+        on_disk = _read_config_json(_tenant)
+        assert on_disk["auth_type"] == "oauth_client_credentials"
+        assert is_encrypted(on_disk["password"])
 
-        rehydrated = TritonConnectionConfig.model_validate(row.config_json)
+        rehydrated = TritonConnectionConfig.model_validate(on_disk)
         assert rehydrated.password == "client_secret_abc"
 
     def test_missing_password_reports_unconfigured(self, _tenant):
@@ -161,25 +162,22 @@ class TestFreeWheelConfigRoundtrip:
         )
         _persist_adapter_config(_tenant, "freewheel", validated.model_dump())
 
-        with get_db_session() as session:
-            row = session.scalars(select(AdapterConfig).filter_by(tenant_id=_tenant)).first()
-            assert row.adapter_type == "freewheel"
-            assert is_encrypted(row.config_json["client_secret"]), "client_secret must be ciphertext at rest"
-            assert row.config_json["client_id"] == "fw_client_xyz"
-            assert row.config_json["network_id"] == "9876"
-            assert row.config_json["environment"] == "staging"
+        on_disk = _read_config_json(_tenant)
+        assert is_encrypted(on_disk["client_secret"]), "client_secret must be ciphertext at rest"
+        assert on_disk["client_id"] == "fw_client_xyz"
+        assert on_disk["network_id"] == "9876"
+        assert on_disk["environment"] == "staging"
 
         assert is_tenant_ad_server_configured(_tenant) is True
         status = get_tenant_status(_tenant)
         assert status["is_configured"] is True
         assert status["adapter_type"] == "freewheel"
 
-        rehydrated = FreeWheelConnectionConfig.model_validate(row.config_json)
+        rehydrated = FreeWheelConnectionConfig.model_validate(on_disk)
         assert rehydrated.client_secret == "fw_secret_abc"
         assert rehydrated.base_url == "https://api.stg.freewheel.tv"
 
     def test_missing_network_id_reports_unconfigured(self, _tenant):
-        # Persist a partial config to simulate misconfiguration
         _persist_adapter_config(
             _tenant,
             "freewheel",
