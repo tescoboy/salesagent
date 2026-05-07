@@ -134,7 +134,10 @@ def _resolve_addresses(host: str) -> list[str]:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as exc:
         raise ResolveError(f"DNS lookup failed for {host!r}: {exc}") from exc
-    return list({info[4][0] for info in infos})
+    # info[4] is the sockaddr tuple; info[4][0] is the host string
+    # (IPv4: (host, port); IPv6: (host, port, flowinfo, scopeid)).
+    # Coerce to str so mypy accepts the deduplicating set.
+    return list({str(info[4][0]) for info in infos})
 
 
 def _is_blocked_address(addr: str) -> bool:
@@ -213,7 +216,7 @@ def _fetch_jwks(jwks_uri: str, *, domain: str) -> list[dict[str, str]]:
                     loc = resp.headers.get("location")
                     if not loc:
                         raise ResolveError(f"jwks redirect from {current!r} with no Location header")
-                    current = httpx.URL(current).join(loc).human_repr()
+                    current = str(httpx.URL(current).join(loc))
                     continue
                 if resp.status_code != 200:
                     raise ResolveError(f"GET {current!r} returned HTTP {resp.status_code}")

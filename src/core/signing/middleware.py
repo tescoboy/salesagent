@@ -32,7 +32,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Literal
 
 from adcp.signing import (
     SignatureVerificationError,
@@ -235,7 +235,7 @@ class SigningVerifyMiddleware:
         *,
         max_skew_seconds: int | None = None,
         max_window_seconds: int | None = None,
-        covers_digest: str | None = None,
+        covers_digest: Literal["required", "forbidden", "either"] | None = None,
     ) -> None:
         import os
 
@@ -250,8 +250,14 @@ class SigningVerifyMiddleware:
             if max_window_seconds is not None
             else int(os.environ.get("ADCP_SIGNING_MAX_WINDOW_SECONDS", "300"))
         )
-        # "either" | "required" | "forbidden" — see VerifierCapability docs.
-        self._covers_digest = covers_digest or os.environ.get("ADCP_SIGNING_COVERS_DIGEST", "either")
+        # Narrow the env-var read to VerifierCapability's Literal so mypy is
+        # happy at the call site. Reject anything outside the spec set.
+        env_digest = covers_digest or os.environ.get("ADCP_SIGNING_COVERS_DIGEST", "either")
+        if env_digest not in ("required", "forbidden", "either"):
+            raise ValueError(
+                f"ADCP_SIGNING_COVERS_DIGEST must be one of 'required'/'forbidden'/'either' " f"(got {env_digest!r})"
+            )
+        self._covers_digest: Literal["required", "forbidden", "either"] = env_digest  # type: ignore[assignment]
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
