@@ -36,6 +36,8 @@ The validator's prompt should include the acceptance criteria (from the user's r
 - Check if it's tested (search test files)
 - Mark as PASS or FAIL with evidence
 
+**If no criteria are in the prompt:** try `gh pr view --json title,body` for the current branch and extract the criteria from the PR description. If there's no PR yet, fall back to the latest commit message body. If neither yields criteria, report `NO CRITERIA PROVIDED — branch summary only` and produce just the Quality Gates + Git State sections of the report.
+
 ### Step 3: Run Quality Gates
 ```bash
 make quality

@@ -101,9 +101,15 @@ For each entity, the test file is updated with:
 
 For each entity, walk these steps in conversation:
 
-```
-pre-check -> pin-commits -> extract-expectations -> verify-against-spec -> annotate -> review -> commit
-```
+| # | Step | What It Does |
+|---|------|-------------|
+| 1 | pre-check | Confirm `tests/unit/test_{entity}.py` exists (output of `/surface`); STOP if not |
+| 2 | pin-commits | Record current `adcp` and `adcp-client-python` commit SHAs — every spec link uses these for stable permalinks |
+| 3 | extract-expectations | For each test in the suite, capture what it asserts (one line per test) |
+| 4 | verify-against-spec | For each expectation, classify against the spec: CONFIRMED / UNSPECIFIED / CONTRADICTS / SPEC_AMBIGUOUS |
+| 5 | annotate | Add the spec + library permalinks to each test docstring; add the verification summary block at the top of the file |
+| 6 | review | Sanity-check classifications; surface CONTRADICTS for user decision before committing |
+| 7 | commit | Commit the annotated suite + a discrepancy report listing every CONTRADICTS / UNSPECIFIED |
 
 ### Done when all entity suites annotated
 

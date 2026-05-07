@@ -11,6 +11,10 @@ arguments:
 
 Use the `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` feature to spawn parallel general-purpose agents on independent units of work. Best when the work decomposes into non-overlapping file scopes.
 
+**Prerequisite:** This command depends on the experimental teams flag and the `TeamCreate` / `SendMessage` deferred tools. If `ToolSearch: "select:TeamCreate"` returns no schema, the flag isn't enabled in this environment — fall back to spawning multiple `Agent` calls in parallel (one message, multiple tool uses) without team coordination, or stop and tell the user.
+
+**Scope:** Best for file-scoped, mostly-independent work — refactors, test rewrites, mechanical changes. For DB-touching work where teammates need their own Postgres, see `.claude/skills/agent-db/` and include setup instructions in the teammate prompt; teammates share the working directory and won't get isolated stacks automatically.
+
 ## Protocol
 
 ### Step 1: Load team tools
