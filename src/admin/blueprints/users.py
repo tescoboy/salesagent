@@ -170,7 +170,10 @@ def update_role(tenant_id, user_id):
     """Update user role."""
     try:
         new_role = request.form.get("role")
-        if not new_role or new_role not in ["admin", "manager", "viewer"]:
+        # Canonical role enum aligned with the embedded-mode contract.
+        # Legacy ``manager`` rows are migrated to ``member`` — see
+        # alembic/versions/8407a32e9b07_rename_user_role_manager_to_member.py.
+        if not new_role or new_role not in ["admin", "member", "viewer"]:
             flash("Invalid role", "error")
             return redirect(url_for("users.list_users", tenant_id=tenant_id))
 

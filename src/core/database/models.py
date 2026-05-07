@@ -724,7 +724,7 @@ class User(Base):
     tenant = relationship("Tenant", back_populates="users")
 
     __table_args__ = (
-        CheckConstraint("role IN ('admin', 'manager', 'viewer')"),
+        CheckConstraint("role IN ('admin', 'member', 'viewer')", name="ck_users_role"),
         UniqueConstraint("tenant_id", "email", name="uq_users_tenant_email"),  # Unique per tenant
         Index("idx_users_tenant", "tenant_id"),
         Index("idx_users_email", "email"),
