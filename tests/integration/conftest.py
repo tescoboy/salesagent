@@ -591,6 +591,10 @@ main()
     # creates schema via ``Base.metadata.create_all`` but never runs the
     # production seed, so without this every MCP call lands on the
     # bare-host fallback and gets 404.
+    #
+    # Stub field values: house_domain / public_agent_url / authorized_emails
+    # are placeholders, not asserted on by any test that uses this fixture.
+    # If a future test reads them, override at the test-fixture layer.
     from datetime import UTC
     from datetime import datetime as _datetime
 
