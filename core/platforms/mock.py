@@ -354,19 +354,6 @@ class MockSellerPlatform(DecisioningPlatform):
         req: Any,
         ctx: RequestContext[Any],
     ) -> dict[str, Any]:
-        """Delegate to the shared delivery impl.
-
-        The previous stub returned a partial dict missing ``reporting_period``,
-        which adcp 4.4 made a required output field. The framework's
-        output-schema validation rejected the response with
-        ``Output validation error: 'reporting_period' is a required property``.
-
-        ``_get_media_buy_delivery_impl`` produces a fully-formed
-        ``GetMediaBuyDeliveryResponse`` with ``reporting_period``,
-        ``aggregated_totals``, and the per-buy ``media_buy_deliveries``
-        list — same impl GamPlatform uses, so behavior is consistent
-        across adapters.
-        """
         return await _delegate_get_media_buy_delivery(req, ctx)
 
     # ───────────────────── v6.0-rc.1 SalesPlatform Protocol methods ────
