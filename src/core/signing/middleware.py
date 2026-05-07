@@ -360,6 +360,47 @@ class SigningVerifyMiddleware:
             return
 
         if verified is not None:
+            # Defense against in-flight brand_domain rotation: re-read the
+            # principal's brand_domain from the DB and reject if it diverged
+            # from the value we verified against. Closes a race where the
+            # operator switches trust root mid-verify (after we've already
+            # walked brand.json against the old domain). Without this, a
+            # concurrent operator edit pointing at a legit domain would let
+            # the in-flight verify complete with verified_state set against
+            # attacker-controlled keys from the OLD domain. The conditional
+            # UPDATE in _record_verified_timestamp_sync only protects the
+            # cache column; the request itself needs this gate.
+            try:
+                live_brand_domain = await asyncio.to_thread(
+                    self._read_principal_brand_domain_sync, tenant_id, principal_id
+                )
+            except Exception:
+                logger.exception("brand_domain re-read crashed; rejecting signed request")
+                await self._send_401(
+                    send,
+                    SignatureVerificationError(
+                        REQUEST_SIGNATURE_REQUIRED,
+                        step=0,
+                        message="brand_domain re-check crashed; refusing signed request",
+                    ),
+                )
+                return
+            if live_brand_domain != brand_domain:
+                logger.info(
+                    "brand_domain changed mid-verify (%s -> %s); rejecting",
+                    brand_domain,
+                    live_brand_domain,
+                )
+                await self._send_401(
+                    send,
+                    SignatureVerificationError(
+                        REQUEST_SIGNATURE_REQUIRED,
+                        step=0,
+                        message="brand_domain changed during verify; rejecting signed request",
+                    ),
+                )
+                return
+
             from src.core.signing.verified_state import (
                 VerifiedRequestState,
                 set_verified_state,
@@ -444,6 +485,27 @@ class SigningVerifyMiddleware:
                 .values(last_signed_verified_at=now)
             )
             session.commit()
+
+    def _read_principal_brand_domain_sync(self, tenant_id: str, principal_id: str) -> str | None:
+        """Re-read ``principals.brand_domain`` post-verify.
+
+        Run inside ``asyncio.to_thread`` after the verifier succeeds. Returns
+        the current value so the caller can compare against the value used
+        for verification — if it changed mid-flight, the verify is treated
+        as failed and the request is rejected. Closes the operator-rotates-
+        brand-domain-mid-verify race where attacker-controlled keys from
+        the old domain would otherwise produce a verified-state for the
+        new (legit) trust root.
+        """
+        from sqlalchemy import select
+
+        from src.core.database.database_session import get_db_session
+        from src.core.database.models import Principal
+
+        with get_db_session() as session:
+            return session.scalars(
+                select(Principal.brand_domain).filter_by(tenant_id=tenant_id, principal_id=principal_id)
+            ).first()
 
     def _resolve_principal_context_sync(self, scope: dict) -> dict[str, Any] | None:
         """Sync DB lookup of the calling principal's signing config.
