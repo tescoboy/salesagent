@@ -13,9 +13,13 @@ from werkzeug.middleware.proxy_fix import ProxyFix as WerkzeugProxyFix
 from src.admin.blueprints.accounts import accounts_bp
 from src.admin.blueprints.activity_stream import activity_stream_bp
 from src.admin.blueprints.adapters import adapters_bp
+
+# from src.admin.blueprints.tasks import tasks_bp  # Disabled - tasks eliminated in favor of workflow system
+from src.admin.blueprints.agent_media_buys import agent_media_buys_bp
 from src.admin.blueprints.api import api_bp
 from src.admin.blueprints.auth import auth_bp, init_oauth
 from src.admin.blueprints.authorized_properties import authorized_properties_bp
+from src.admin.blueprints.buyer_routing import buyer_routing_bp
 from src.admin.blueprints.core import core_bp
 from src.admin.blueprints.creative_agents import creative_agents_bp
 from src.admin.blueprints.creatives import creatives_bp
@@ -33,9 +37,6 @@ from src.admin.blueprints.publisher_partners import publisher_partners_bp
 from src.admin.blueprints.schemas import schemas_bp
 from src.admin.blueprints.settings import settings_bp, tenant_management_settings_bp
 from src.admin.blueprints.signals_agents import signals_agents_bp
-
-# from src.admin.blueprints.tasks import tasks_bp  # Disabled - tasks eliminated in favor of workflow system
-from src.admin.blueprints.buyer_routing import buyer_routing_bp
 from src.admin.blueprints.tenants import tenants_bp
 from src.admin.blueprints.users import users_bp
 from src.admin.blueprints.workflows import workflows_bp
@@ -406,6 +407,14 @@ def create_app(config=None):
         g.embed_breadcrumb_root = embed_root
         context["embed_breadcrumb_root"] = embed_root
 
+        # Modern UX flag — needed in base.html so logo / nav / toast
+        # markup conditionally renders. Pulls from the tenant injected
+        # above (if any). Falls back to False for super-admin / no-tenant
+        # contexts where there's no per-tenant flag to consult.
+        from src.core.feature_flags import is_modern_ux_enabled
+
+        context["modern_ux_enabled"] = is_modern_ux_enabled(context.get("tenant"))
+
         return context
 
     # Iframe embedding policy. ``MANAGED_MODE_FRAME_ANCESTORS`` is a CSP
@@ -439,6 +448,10 @@ def create_app(config=None):
     app.register_blueprint(users_bp)  # Already has url_prefix in blueprint
     app.register_blueprint(gam_bp)
     app.register_blueprint(operations_bp, url_prefix="/tenant/<tenant_id>")
+    # Agent Media Buys (mollybots port). Routes self-gate on
+    # tenants.agent_media_buys_enabled + SALESAGENT_FF_AGENT_CACHE — see
+    # src/admin/blueprints/agent_media_buys.py.
+    app.register_blueprint(agent_media_buys_bp, url_prefix="/tenant")
     app.register_blueprint(creatives_bp, url_prefix="/tenant/<tenant_id>/creatives")
     app.register_blueprint(policy_bp, url_prefix="/tenant/<tenant_id>/policy")
     app.register_blueprint(settings_bp, url_prefix="/tenant/<tenant_id>/settings")

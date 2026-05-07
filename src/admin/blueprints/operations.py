@@ -269,6 +269,35 @@ def media_buy_detail(tenant_id, media_buy_id):
                     logger.warning(f"Could not fetch delivery metrics for {media_buy_id}: {e}")
                     # Continue without metrics - don't fail the whole page
 
+            # Approval-progress summary for the template panel.
+            # Counts creatives by review state across all packages so the
+            # publisher sees at a glance: buy approved? creatives reviewed?
+            # ready to deliver?
+            from src.core.feature_flags import is_creative_pre_approval_gate_enabled
+
+            _all_creatives_iter = [
+                item["creative"]
+                for assignments in (creative_assignments_by_package or {}).values()
+                for item in assignments
+            ]
+            approval_progress = {
+                "buy_approved": media_buy.approved_at is not None,
+                "buy_approved_at": media_buy.approved_at,
+                "buy_approved_by": media_buy.approved_by,
+                "creative_pending_count": sum(
+                    1 for c in _all_creatives_iter if (c.status or "").lower() == "pending_review"
+                ),
+                "creative_approved_count": sum(
+                    1 for c in _all_creatives_iter if (c.status or "").lower() in ("approved", "active")
+                ),
+                "creative_rejected_count": sum(
+                    1 for c in _all_creatives_iter if (c.status or "").lower() == "rejected"
+                ),
+                "creative_total_count": len(_all_creatives_iter),
+                "creative_gate_on": is_creative_pre_approval_gate_enabled(tenant),
+                "gam_order_id": getattr(media_buy, "gam_order_id", None),
+            }
+
             return render_template(
                 "media_buy_detail.html",
                 tenant=tenant,
@@ -283,6 +312,7 @@ def media_buy_detail(tenant_id, media_buy_id):
                 computed_state=computed_state,
                 readiness=readiness,
                 delivery_metrics=delivery_metrics,
+                approval_progress=approval_progress,
             )
     except Exception as e:
         logger.error(f"Error viewing media buy: {e}", exc_info=True)

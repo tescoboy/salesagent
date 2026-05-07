@@ -140,6 +140,152 @@ def filter_products_by_property_list(
     return [p for p in products if should_include_product_for_property_list(p, allowed_properties)]
 
 
+# ── Live GAM forecast overlay (mollybots-port pattern) ──────────────────────
+
+
+# Per-product timeout. GAM ForecastService.getAvailabilityForecast typically
+# returns in 1–10 s; a 12 s ceiling protects buyer latency without truncating
+# normal responses. Returning a product without forecast is always preferred
+# to a slow get_products response.
+_LIVE_FORECAST_PER_PRODUCT_TIMEOUT_S = 12.0
+
+
+async def _overlay_live_forecasts(
+    products: list[Any],
+    forecast_inputs: list[dict[str, Any]],
+    tenant: dict[str, Any],
+) -> None:
+    """Mutate ``products`` in place, attaching a live GAM
+    ``DeliveryForecast`` to each entry's ``forecast`` field.
+
+    **Live, never cached.** Forecasting is business-critical to avoid
+    overbooking — a stale forecast in this response could lead the buyer
+    to commit budget against availability that no longer exists. This
+    function NEVER reads ``products.forecast`` from the DB; every entry
+    here is a fresh ``ForecastService.getAvailabilityForecast`` round
+    trip, capped at ``_LIVE_FORECAST_PER_PRODUCT_TIMEOUT_S`` per product.
+
+    Fail-soft contract: any exception, timeout, or non-spec-compliant
+    payload from ``GAMForecastManager`` results in the product going out
+    without a forecast field. Buyer programs treat the field as optional
+    per the AdCP ``Product.forecast`` schema (``DeliveryForecast | None``).
+
+    No-op when:
+    - Either feature-flag tier is off (``SALESAGENT_FF_PRODUCT_FORECAST``
+      env var, ``tenants.product_forecast_enabled`` column).
+    - Tenant is not on the GAM adapter.
+    - GAM service-account credentials are unset.
+    - Tenant has no advertiser_id available (forecasts are
+      advertiser-scoped per GAM's API).
+
+    Mollybots reference: ``agent/agent.ts`` —
+    "forecast overlaid below from live GAM call — never from stale DB data".
+    """
+    import asyncio
+
+    from src.core.feature_flags import is_product_forecast_enabled
+
+    tenant_id = tenant.get("tenant_id")
+    if not tenant_id:
+        return
+
+    # Reload tenant ORM row for the flag check (the dict here is a config
+    # snapshot; the flag column lives on the live ORM instance).
+    from sqlalchemy import select
+
+    from src.core.database.database_session import get_db_session
+    from src.core.database.models import AdapterConfig, Principal, Tenant
+
+    with get_db_session() as session:
+        tenant_row = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+        if not is_product_forecast_enabled(tenant_row):
+            return
+
+        cfg = session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
+        if not cfg or cfg.adapter_type != "google_ad_manager":
+            return
+        if not getattr(cfg, "gam_service_account_json", None):
+            return
+
+        sa_json = cfg.gam_service_account_json
+        network_code = cfg.gam_network_code
+
+        # Resolve advertiser_id: prefer tenant default, else first principal
+        # with a GAM mapping. Forecasts are advertiser-scoped in GAM.
+        advertiser_id = getattr(tenant_row, "default_gam_advertiser_id", None)
+        if not advertiser_id:
+            principals = session.scalars(select(Principal).filter_by(tenant_id=tenant_id)).all()
+            for p in principals:
+                pm = p.platform_mappings or {}
+                gam = pm.get("google_ad_manager") if isinstance(pm, dict) else None
+                if gam and gam.get("advertiser_id"):
+                    advertiser_id = gam["advertiser_id"]
+                    break
+        if not advertiser_id:
+            return
+
+    # Build a single shared client_manager — GAM client construction is
+    # cheap to reuse but expensive (auth + WSDL fetch) to construct from
+    # scratch per product.
+    from src.adapters.gam.client import GAMClientManager
+    from src.adapters.gam.managers.forecast import GAMForecastManager
+
+    client_manager = GAMClientManager(
+        {"service_account_json": sa_json, "network_code": network_code},
+        network_code,
+    )
+    manager = GAMForecastManager(client_manager, advertiser_id=str(advertiser_id))
+
+    # Index forecast_inputs by product_id for O(1) lookup; we may have a
+    # different ordering / count than `products` after access filtering.
+    inputs_by_id = {fi["product_id"]: fi for fi in forecast_inputs}
+
+    # asyncio.gather lets us run N parallel forecasts; asyncio.to_thread
+    # bridges the synchronous googleads SOAP client. Per-product timeout
+    # caps the worst-case latency to a fixed bound regardless of how many
+    # products we forecast.
+    async def _one(product: Any) -> tuple[Any, Any]:
+        # Convert the product (which may be a Pydantic model OR a dict
+        # depending on the conversion path) into the duck-typed object the
+        # forecast manager reads (`product_id`, `implementation_config`).
+        product_id = product.product_id if hasattr(product, "product_id") else product.get("product_id")
+        cached_input = inputs_by_id.get(product_id)
+        if not cached_input:
+            return product, None
+        # Tiny shim object; the manager only reads .product_id and
+        # .implementation_config.
+        shim = type("_P", (), cached_input)()
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(manager.get_for_product, shim, days=7),
+                timeout=_LIVE_FORECAST_PER_PRODUCT_TIMEOUT_S,
+            )
+            return product, result.forecast  # spec-compliant dict or None
+        except (TimeoutError, Exception) as exc:  # noqa: BLE001 — fail-soft contract
+            logger.info("Live forecast skipped for product %s: %s", product_id, exc)
+            return product, None
+
+    pairs = await asyncio.gather(*(_one(p) for p in products))
+    for product, forecast in pairs:
+        if forecast is None:
+            continue
+        # `product` may be a Pydantic model (with model_copy/setattr) or a
+        # plain dict — handle both. The AdCP schema marks `forecast` as
+        # optional, so setting it is always spec-valid.
+        if hasattr(product, "forecast"):
+            try:
+                product.forecast = forecast
+            except (ValueError, TypeError):
+                # Frozen/strict model — fall back to a copy with update.
+                try:
+                    pairs_idx = products.index(product)
+                    products[pairs_idx] = product.model_copy(update={"forecast": forecast})
+                except Exception:  # noqa: BLE001
+                    pass
+        elif isinstance(product, dict):
+            product["forecast"] = forecast
+
+
 async def _get_products_impl(
     req: GetProductsRequestGenerated, identity: ResolvedIdentity | None
 ) -> GetProductsResponse:
@@ -348,6 +494,18 @@ async def _get_products_impl(
         assert uow.products is not None
         db_products = uow.products.list_all()
 
+        # Snapshot the per-product fields the live forecast overlay needs
+        # while we still have the ORM instances bound to a session. After
+        # the `with` block, the rows detach and `getattr(product, "...")`
+        # would error.
+        forecast_inputs: list[dict[str, Any]] = [
+            {
+                "product_id": p.product_id,
+                "implementation_config": p.implementation_config,
+            }
+            for p in db_products
+        ]
+
         # Convert database Product models to AdCP Product schema
         products = []
         for product_obj in db_products:
@@ -362,6 +520,18 @@ async def _get_products_impl(
                 )
                 logger.error(error_msg)
                 raise ValueError(error_msg) from e
+
+    # Live GAM availability forecast overlay (mollybots-port pattern).
+    # Per the upstream design comment in agent/agent.ts: "forecast overlaid
+    # below from live GAM call — never from stale DB data". When both flag
+    # tiers are on AND the tenant is on the GAM adapter, we run a per-product
+    # ForecastService.getAvailabilityForecast in parallel (asyncio.to_thread
+    # to bridge the synchronous googleads SOAP client) with a hard per-call
+    # timeout so a slow GAM never blocks the buyer response. Failures are
+    # silent — products simply ship without a forecast field. Spec compliance
+    # is enforced by GAMForecastManager (only spec-compliant DeliveryForecast
+    # dicts ever return; everything else is None).
+    await _overlay_live_forecasts(products, forecast_inputs, tenant)
 
     logger.info(f"[GET_PRODUCTS] Got {len(products)} products from database for tenant {tenant['tenant_id']}")
 

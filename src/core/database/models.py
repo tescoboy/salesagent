@@ -179,6 +179,33 @@ class Tenant(Base, JSONValidatorMixin):
     # default 6h. sync_all_tenants.py branches on this when picking
     # tenants per run.
     sync_cadence_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # ── Mollybots-port feature flags (per-tenant) ────────────────────────────
+    # Default off. Composed with the global SALESAGENT_FF_* env vars (where
+    # applicable) via src/core/feature_flags.py. See plan in
+    # ~/.claude/plans/yes-add-to-bead-logical-corbato.md and progress journal
+    # in .context/implementation-notes-mollybots-port.md.
+    agent_media_buys_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    product_forecast_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    inventory_unified_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    media_buy_approval_page_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # When True, creatives arriving inline with create_media_buy (or via
+    # sync_creatives) are NOT uploaded to the ad server at buy-approval
+    # time. They land at status='pending_review' locally; the adapter
+    # creative upload + LICA association only fire when a publisher
+    # human flips the local status to 'approved'. Closes the
+    # execute-then-gate hole (see draft-issue-creative-pre-approval-gate.md).
+    creative_pre_approval_gate_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Modern UX layer — clickable logo, persistent tenant nav, toast
+    # notifications on AJAX actions, fetch wrapper that shows in-flight
+    # state and success/error feedback so saves are never silent.
+    # Default off; flag-off equals today's UI byte-for-byte.
+    modern_ux_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
     # Embed-mode breadcrumb root override. Shape: ``{"label": str, "url": str}``.
     # Only meaningful when ``is_embedded`` is True — open-instance tenants ignore
     # the value. Replaces the default first crumb ("Dashboard") with the
@@ -1010,6 +1037,12 @@ class MediaBuy(Base):
     delivered_impressions: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     delivered_amount: Mapped[Decimal | None] = mapped_column(DECIMAL(15, 2), nullable=True)
     delivery_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # GAM Order ID — set after a successful adapter create (manual or auto
+    # approval path) so the agent_gam_cache poller knows which orders to
+    # refresh. Nullable because non-GAM adapters or pre-approval rows have
+    # none. Indexed via alembic 5cd737097039 (partial index where NOT NULL).
+    gam_order_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     tenant = relationship("Tenant", back_populates="media_buys", overlaps="media_buys")

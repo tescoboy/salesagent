@@ -796,6 +796,26 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
         else:
             logger.info("[APPROVAL] No platform_line_item_ids found on response object")
 
+        # Persist the GAM order_id on the media_buy row so the agent_gam_cache
+        # poller knows which orders to refresh. ``response.media_buy_id`` is
+        # the GAM Order ID for the GAM adapter (other adapters may emit the
+        # adapter-native ID; the column is generic TEXT). Behind the
+        # SALESAGENT_FF_AGENT_CACHE feature flag is irrelevant — writing this
+        # column is cheap and harmless when the cache subsystem is off, and
+        # backfilling later is messy without it.
+        platform_order_id = getattr(response, "media_buy_id", None)
+        if platform_order_id:
+            with MediaBuyUoW(tenant_id) as uow_oid:
+                assert uow_oid.session is not None
+                from src.core.database.models import MediaBuy as DBMediaBuy
+
+                buy_row = uow_oid.session.scalars(
+                    select(DBMediaBuy).filter_by(tenant_id=tenant_id, media_buy_id=media_buy_id)
+                ).first()
+                if buy_row is not None:
+                    buy_row.gam_order_id = str(platform_order_id)
+                    logger.info(f"[APPROVAL] Saved gam_order_id={platform_order_id} on media_buy {media_buy_id}")
+
         # Upload and associate inline creatives if any exist
         # This handles inline creatives that were uploaded during initial media buy creation
         with MediaBuyUoW(tenant_id) as uow2:
@@ -810,7 +830,46 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
 
             # Get all creative assignments for this media buy
             stmt_assignments = select(CreativeAssignment).filter_by(media_buy_id=media_buy_id)
-            assignments = session.scalars(stmt_assignments).all()
+            all_assignments = session.scalars(stmt_assignments).all()
+
+            # Pre-approval gate: when the tenant has the flag on, only
+            # already-approved creatives get uploaded at buy approval.
+            # Pending / rejected creatives are deferred — pending ones will
+            # be uploaded by the local creative-approve endpoint when the
+            # publisher approves them; rejected ones are blocked entirely.
+            # Closes the execute-then-gate hole without penalising buyers
+            # who happened to approve creatives before the buy approval.
+            from src.core.database.models import Creative as _CreativeModel
+            from src.core.database.models import Tenant as _Tenant
+            from src.core.feature_flags import is_creative_pre_approval_gate_enabled
+
+            tenant_for_gate = session.scalars(select(_Tenant).filter_by(tenant_id=tenant_id)).first()
+            _gate_on = is_creative_pre_approval_gate_enabled(tenant_for_gate)
+
+            if _gate_on and all_assignments:
+                # Filter assignments down to those whose Creative is
+                # already approved. Ones that are still pending_review
+                # stay deferred until the local approve flow.
+                _creative_ids = list({a.creative_id for a in all_assignments})
+                _approved_ids = set(
+                    session.scalars(
+                        select(_CreativeModel.creative_id).filter(
+                            _CreativeModel.tenant_id == tenant_id,
+                            _CreativeModel.creative_id.in_(_creative_ids),
+                            _CreativeModel.status.in_(["approved", "active"]),
+                        )
+                    ).all()
+                )
+                deferred = [a for a in all_assignments if a.creative_id not in _approved_ids]
+                assignments = [a for a in all_assignments if a.creative_id in _approved_ids]
+                if deferred:
+                    logger.info(
+                        "[APPROVAL] Creative pre-approval gate ON — deferring %d creative upload(s) (still pending review). %d already-approved creative(s) will be uploaded now.",
+                        len(deferred),
+                        len(assignments),
+                    )
+            else:
+                assignments = all_assignments
 
             if assignments:
                 logger.info(f"[APPROVAL] Found {len(assignments)} creative assignments, uploading to adapter")
@@ -1395,7 +1454,8 @@ async def _create_media_buy_impl(
     from src.core.helpers.account_provisioning import resolve_account_advertiser
 
     _account_advertiser_id = resolve_account_advertiser(
-        identity, dry_run=False  # dry_run from testing_ctx is resolved later
+        identity,
+        dry_run=False,  # dry_run from testing_ctx is resolved later
     )
     if _account_advertiser_id is not None:
         mappings = dict(principal.platform_mappings or {})
@@ -2724,9 +2784,9 @@ async def _create_media_buy_impl(
                 # Merge dimensions from product's format_ids if request format_ids don't have them
                 # This handles the case where buyer specifies format_id but not dimensions
                 # Build lookup of product format dimensions by (normalized_url, id)
-                product_format_dimensions: dict[tuple[str | None, str], tuple[int | None, int | None, float | None]] = (
-                    {}
-                )
+                product_format_dimensions: dict[
+                    tuple[str | None, str], tuple[int | None, int | None, float | None]
+                ] = {}
                 if pkg_product.format_ids:
                     for fmt in pkg_product.format_ids:
                         agent_url = fmt.agent_url

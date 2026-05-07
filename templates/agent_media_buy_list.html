@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Agent Media Buys - {{ tenant.name }}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <div>
+            <h1 style="margin: 0;">Agent Media Buys</h1>
+            <p style="color: #666; margin: 0.5rem 0 0 0;">
+                Cumulative delivery totals from <code>agent_gam_cache</code>.
+                Refreshed by the GAM delivery poller (cron). Read-only — to update a buy, use Operations.
+            </p>
+        </div>
+        <a href="{{ url_for('tenants.dashboard', tenant_id=tenant_id) }}" class="btn btn-secondary">
+            ← Back to Dashboard
+        </a>
+    </div>
+
+    {% if buys %}
+    <div class="card">
+        <table style="width: 100%;">
+            <thead>
+                <tr>
+                    <th>Order Name</th>
+                    <th>Advertiser</th>
+                    <th>Status</th>
+                    <th>Flight</th>
+                    <th class="text-end" title="Total impressions delivered">Impr</th>
+                    <th class="text-end" title="Click-through rate">CTR</th>
+                    <th class="text-end" title="Video completion rate">VCR</th>
+                    <th class="text-end" title="Spend (cumulative, in buy currency)">Spend</th>
+                    <th class="text-end" title="Viewability % (Active View)">Viewability</th>
+                    <th>Last Refreshed</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for b in buys %}
+                <tr>
+                    <td>
+                        <a href="{{ url_for('agent_media_buys.agent_media_buy_detail', tenant_id=tenant_id, media_buy_id=b.media_buy_id) }}">
+                            <code>{{ b.media_buy_id }}</code>
+                        </a>
+                        <div style="color: #6b7280; font-size: 0.85em;">{{ b.order_name }}</div>
+                    </td>
+                    <td>{{ b.advertiser_name }}</td>
+                    <td><span class="status status-{{ b.status }}">{{ b.status }}</span></td>
+                    <td>{{ b.start_date }} → {{ b.end_date }}</td>
+                    <td class="text-end">{{ "{:,}".format(b.impressions) if b.impressions else "—" }}</td>
+                    <td class="text-end">{{ "{:.2f}%".format(b.ctr_pct) if b.ctr_pct is not none else "—" }}</td>
+                    <td class="text-end">{{ "{:.1f}%".format(b.vcr) if b.vcr is not none else "—" }}</td>
+                    <td class="text-end">{{ "${:,.2f}".format(b.spend) if b.spend else "—" }}</td>
+                    <td class="text-end">{{ "{:.1f}%".format(b.viewability_pct) if b.viewability_pct is not none else "—" }}</td>
+                    <td style="color: #6b7280; font-size: 0.85em;">
+                        {% if b.fetched_at %}{{ b.fetched_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}<em>never</em>{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="card">
+        <p style="text-align: center; color: #666; padding: 2rem;">
+            No media buys yet. Create one via the MCP <code>create_media_buy</code> tool or the admin UI.
+        </p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}Agent Media Buy {{ buy.media_buy_id }} - {{ tenant.name }}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div style="margin-bottom: 1rem;">
+        <a href="{{ url_for('agent_media_buys.agent_media_buys_list', tenant_id=tenant_id) }}" class="btn btn-link" style="padding-left: 0;">
+            ← Agent Media Buys
+        </a>
+    </div>
+
+    <h1>Agent Media Buy: <code>{{ buy.media_buy_id }}</code></h1>
+    <p style="color: #6b7280;">
+        Cumulative delivery totals from <code>agent_gam_cache</code>.
+        Last refreshed:
+        {% if buy.fetched_at %}
+            <strong>{{ buy.fetched_at.strftime('%Y-%m-%d %H:%M UTC') }}</strong>
+        {% else %}
+            <em>never (poller hasn't run yet, or this buy has no GAM order linked)</em>
+        {% endif %}
+    </p>
+
+    <!-- Buy metadata -->
+    <div class="card">
+        <h3 style="margin-top: 0;">Buy Information</h3>
+        <table style="width: 100%;">
+            <tr><td style="width: 30%;"><strong>Status</strong></td><td><span class="status status-{{ buy.status }}">{{ buy.status }}</span></td></tr>
+            <tr><td><strong>Advertiser</strong></td><td>{{ buy.advertiser_name }}</td></tr>
+            <tr><td><strong>Order Name</strong></td><td>{{ buy.order_name }}</td></tr>
+            <tr><td><strong>GAM Order ID</strong></td><td>{% if buy.gam_order_id %}<code>{{ buy.gam_order_id }}</code>{% else %}<em>not linked</em>{% endif %}</td></tr>
+            <tr><td><strong>Flight</strong></td><td>{{ buy.start_date }} → {{ buy.end_date }}</td></tr>
+            <tr><td><strong>Budget</strong></td><td>{% if buy.budget %}{{ "${:,.2f}".format(buy.budget) }} {{ buy.currency }}{% else %}—{% endif %}</td></tr>
+        </table>
+    </div>
+
+    <!-- Headline metrics -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1rem 0;">
+        <div class="card" style="text-align: center;">
+            <h3 style="margin: 0; color: #3498db;">{{ "{:,}".format(buy.impressions) if buy.impressions else "—" }}</h3>
+            <p style="margin: 0.5rem 0 0 0; color: #666;">Impressions</p>
+        </div>
+        <div class="card" style="text-align: center;">
+            <h3 style="margin: 0; color: #3498db;">{{ "{:,}".format(buy.clicks) if buy.clicks else "—" }}</h3>
+            <p style="margin: 0.5rem 0 0 0; color: #666;">Clicks</p>
+        </div>
+        <div class="card" style="text-align: center;">
+            <h3 style="margin: 0; color: #27ae60;">{{ "${:,.2f}".format(buy.spend) if buy.spend else "—" }}</h3>
+            <p style="margin: 0.5rem 0 0 0; color: #666;">Spend</p>
+        </div>
+        <div class="card" style="text-align: center;">
+            <h3 style="margin: 0; color: #f39c12;">{{ "{:.2f}%".format(buy.ctr_pct) if buy.ctr_pct is not none else "—" }}</h3>
+            <p style="margin: 0.5rem 0 0 0; color: #666;">CTR</p>
+        </div>
+    </div>
+
+    <!-- Video metrics -->
+    <div class="card">
+        <h3 style="margin-top: 0;">Video Engagement</h3>
+        <table style="width: 100%;">
+            <tr><td style="width: 30%;"><strong>Video Starts</strong></td><td>{{ "{:,}".format(buy.video_starts) if buy.video_starts else "—" }}</td></tr>
+            <tr><td><strong>1st Quartile (25%)</strong></td><td>{{ "{:,}".format(buy.video_first_quartile) if buy.video_first_quartile else "—" }}</td></tr>
+            <tr><td><strong>Midpoint (50%)</strong></td><td>{{ "{:,}".format(buy.video_midpoints) if buy.video_midpoints else "—" }}</td></tr>
+            <tr><td><strong>3rd Quartile (75%)</strong></td><td>{{ "{:,}".format(buy.video_third_quartile) if buy.video_third_quartile else "—" }}</td></tr>
+            <tr><td><strong>Completions (100%)</strong></td><td>{{ "{:,}".format(buy.video_completions) if buy.video_completions else "—" }}</td></tr>
+            <tr><td><strong>Video Completion Rate (VCR)</strong></td><td>{{ "{:.1f}%".format(buy.vcr) if buy.vcr is not none else "—" }}</td></tr>
+        </table>
+    </div>
+
+    <!-- Viewability metrics -->
+    <div class="card">
+        <h3 style="margin-top: 0;">Viewability (Active View)</h3>
+        <table style="width: 100%;">
+            <tr><td style="width: 30%;"><strong>Measurable Impressions</strong></td><td>{{ "{:,}".format(buy.measurable_impressions) if buy.measurable_impressions else "—" }}</td></tr>
+            <tr><td><strong>Viewable Impressions</strong></td><td>{{ "{:,}".format(buy.viewable_impressions) if buy.viewable_impressions else "—" }}</td></tr>
+            <tr><td><strong>Viewability Rate</strong></td><td>{{ "{:.1f}%".format(buy.viewability_pct) if buy.viewability_pct is not none else "—" }}</td></tr>
+        </table>
+    </div>
+
+    {% if not buy.fetched_at %}
+    <div class="alert alert-info" style="margin-top: 1rem;">
+        <strong>No cached data yet.</strong> The poller hasn't refreshed this buy yet. Run
+        <code>python scripts/cron/run_gam_delivery_poller.py --tenant {{ tenant_id }} --once</code>
+        or wait for the next scheduled cron pass.
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

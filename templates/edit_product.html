@@ -268,6 +268,55 @@
             <a href="{{ url_for('products.list_products', tenant_id=tenant_id) }}" class="btn btn-secondary">Cancel</a>
         </div>
     </form>
+
+    {% if forecast_enabled %}
+    <!-- Availability Forecast (mollybots port — gated on tenants.product_forecast_enabled
+         AND SALESAGENT_FF_PRODUCT_FORECAST env var). Fields populate
+         products.forecast which is in the AdCP Product spec and round-trips
+         through MCP get_products via product_conversion.py. -->
+    <div class="sa-card" style="margin-top: var(--sa-space-5);">
+        <h3 style="margin-top: 0;">Availability Forecast</h3>
+        <p style="color: #6b7280; font-size: 0.875rem;">
+            Fetches a 7-day forecast from GAM's <code>ForecastService</code>
+            for this product's targeting. Populates the AdCP-spec
+            <code>forecast</code> field returned by <code>get_products</code>.
+        </p>
+        <div id="forecast-display" style="background: #f9fafb; padding: 1rem; border-radius: 6px; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; min-height: 60px;">{% if product.forecast %}{{ product.forecast | tojson(indent=2) }}{% else %}<span style="color: #9ca3af;">No forecast yet — click Refresh.</span>{% endif %}</div>
+        <button type="button" id="refresh-forecast-btn" class="btn btn-secondary" style="margin-top: 0.75rem;">
+            Refresh Forecast
+        </button>
+        <span id="forecast-status" style="margin-left: 0.75rem; color: #6b7280; font-size: 0.875rem;"></span>
+    </div>
+    <script>
+    (function () {
+        const btn = document.getElementById('refresh-forecast-btn');
+        const display = document.getElementById('forecast-display');
+        const status = document.getElementById('forecast-status');
+        if (!btn) return;
+        const scriptRoot = '{{ request.script_root }}' || '';
+        const url = scriptRoot + '/tenant/{{ tenant_id }}/products/{{ product.product_id }}/forecast/refresh';
+        btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            status.textContent = 'Calling GAM ForecastService…';
+            try {
+                const res = await fetch(url, { method: 'POST', credentials: 'same-origin', headers: {'Accept': 'application/json'} });
+                const data = await res.json();
+                if (data.success) {
+                    display.textContent = JSON.stringify(data.forecast, null, 2);
+                    status.textContent = 'Updated.';
+                } else {
+                    display.textContent = JSON.stringify(data, null, 2);
+                    status.textContent = 'Error — see response.';
+                }
+            } catch (e) {
+                status.textContent = 'Network error: ' + e.message;
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    })();
+    </script>
+    {% endif %}
 </div>
 
 <script>

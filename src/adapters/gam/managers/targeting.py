@@ -948,9 +948,7 @@ class GAMTargetingManager:
             ]
 
         if targeted_placement_ids:
-            inventory_targeting["targetedPlacements"] = [
-                {"placementId": placement_id} for placement_id in targeted_placement_ids
-            ]
+            inventory_targeting["targetedPlacementIds"] = [str(pid) for pid in targeted_placement_ids]
 
         if inventory_targeting:
             targeting["inventoryTargeting"] = inventory_targeting

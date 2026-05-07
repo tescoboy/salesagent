@@ -11,8 +11,13 @@ from typing import Any
 
 from a2a.types import Task, TaskStatusUpdateEvent
 from adcp import create_a2a_webhook_payload, create_mcp_webhook_payload
-from adcp.types import CreativeAction, McpWebhookPayload, SyncCreativeResult, SyncCreativesSuccessResponse
-from adcp.types import ContextObject
+from adcp.types import (
+    ContextObject,
+    CreativeAction,
+    McpWebhookPayload,
+    SyncCreativeResult,
+    SyncCreativesSuccessResponse,
+)
 from adcp.webhooks import GeneratedTaskStatus
 
 from src.core.database.models import (
@@ -69,6 +74,147 @@ def _cleanup_completed_tasks():
         for task_id in completed_tasks:
             del _ai_review_tasks[task_id]
             logger.debug(f"Cleaned up completed AI review task: {task_id}")
+
+
+def _gate_upload_creative_to_existing_buy(tenant_id: str, creative_id: str) -> None:
+    """Pre-approval gate: upload an approved creative to the ad server
+    and associate it with the existing line item(s).
+
+    Only fires when ``tenants.creative_pre_approval_gate_enabled`` is on
+    for the tenant. No-op for any media buy that doesn't have a populated
+    ``gam_order_id`` (i.e. wasn't approved via the gated flow).
+
+    Never raises — adapter failures are logged. The local creative
+    approval succeeds regardless; if the upload fails, the operator
+    can re-trigger by re-clicking approve (idempotent path).
+
+    Mirror of the deferred block in
+    ``src/core/tools/media_buy_create.py`` — see the comment block
+    around the ``_gate_on`` check there.
+    """
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    from sqlalchemy import select as _select
+
+    from src.core.auth import get_principal_object
+    from src.core.database.database_session import get_db_session
+    from src.core.database.models import Creative as _CreativeModel
+    from src.core.database.models import CreativeAssignment as _CreativeAssignment
+    from src.core.database.models import MediaBuy as _MediaBuy
+    from src.core.database.models import MediaPackage as _MediaPackage
+    from src.core.database.models import Tenant as _Tenant
+    from src.core.feature_flags import is_creative_pre_approval_gate_enabled
+    from src.core.helpers.adapter_helpers import get_adapter
+
+    with get_db_session() as session:
+        tenant = session.scalars(_select(_Tenant).filter_by(tenant_id=tenant_id)).first()
+        if not is_creative_pre_approval_gate_enabled(tenant):
+            return
+
+        creative = session.scalars(
+            _select(_CreativeModel).filter_by(tenant_id=tenant_id, creative_id=creative_id)
+        ).first()
+        if not creative:
+            return
+
+        # Find buys this creative is attached to. Skip those without a
+        # gam_order_id (means buy didn't reach the ad server, or wasn't
+        # approved via the gated flow).
+        assignments = session.scalars(_select(_CreativeAssignment).filter_by(creative_id=creative_id)).all()
+        if not assignments:
+            return
+
+        buy_targets: list[tuple[_MediaBuy, list[_CreativeAssignment]]] = []
+        seen_buys: dict[str, list[_CreativeAssignment]] = {}
+        for a in assignments:
+            seen_buys.setdefault(a.media_buy_id, []).append(a)
+        for mbid, asn_list in seen_buys.items():
+            mb = session.scalars(_select(_MediaBuy).filter_by(media_buy_id=mbid)).first()
+            if mb and mb.gam_order_id:
+                buy_targets.append((mb, asn_list))
+
+        if not buy_targets:
+            return
+
+        # Build the asset payload once; it's the same for every target buy.
+        creative_data = creative.data or {}
+        media_url = creative_data.get("media_url") or creative_data.get("url") or creative_data.get("image_url")
+        if not media_url:
+            # Inline creatives store assets keyed by id under data.assets
+            assets_dict = creative_data.get("assets") or {}
+            for v in (assets_dict or {}).values():
+                if isinstance(v, dict) and v.get("url"):
+                    media_url = v["url"]
+                    break
+        if not media_url:
+            logger.warning(
+                "[CREATIVE GATE] Creative %s has no media_url — cannot upload to ad server",
+                creative_id,
+            )
+            return
+
+        for mb, asn_list in buy_targets:
+            principal = get_principal_object(mb.principal_id, tenant_id=tenant_id)
+            if not principal:
+                logger.warning("[CREATIVE GATE] No principal for buy %s", mb.media_buy_id)
+                continue
+
+            # Build the asset payload using the same shape the buy-approval
+            # path emits (see media_buy_create.py:899-913).
+            package_assignments = []
+            for a in asn_list:
+                # Resolve the ad-server line item id stashed on the package row.
+                pkg = session.scalars(
+                    _select(_MediaPackage).filter_by(media_buy_id=mb.media_buy_id, package_id=a.package_id)
+                ).first()
+                if not pkg:
+                    continue
+                pcfg = pkg.package_config or {}
+                if pcfg.get("platform_line_item_id"):
+                    package_assignments.append({"package_id": a.package_id, "weight": a.weight or 100})
+
+            if not package_assignments:
+                logger.info(
+                    "[CREATIVE GATE] Buy %s has no platform_line_item_ids; skipping creative upload",
+                    mb.media_buy_id,
+                )
+                continue
+
+            asset = {
+                "creative_id": creative_id,
+                "package_assignments": package_assignments,
+                "width": creative_data.get("width"),
+                "height": creative_data.get("height"),
+                "url": media_url,
+                "click_url": creative_data.get("click_url") or media_url,
+                "asset_type": creative_data.get("asset_type", "image"),
+                "name": creative.name or f"Creative {creative_id}",
+            }
+
+            adapter = get_adapter(principal, dry_run=False, tenant=tenant)
+            try:
+                if hasattr(adapter, "creatives_manager") and adapter.creatives_manager:
+                    statuses = adapter.creatives_manager.add_creative_assets(mb.gam_order_id, [asset], _dt.now(UTC))
+                    logger.info(
+                        "[CREATIVE GATE] Uploaded creative %s to ad server for buy %s (gam_order_id=%s): %d status(es)",
+                        creative_id,
+                        mb.media_buy_id,
+                        mb.gam_order_id,
+                        len(statuses),
+                    )
+                else:
+                    logger.warning(
+                        "[CREATIVE GATE] Adapter has no creatives_manager; skipping upload for buy %s",
+                        mb.media_buy_id,
+                    )
+            except Exception as exc:  # noqa: BLE001 — fail-soft contract
+                logger.exception(
+                    "[CREATIVE GATE] Adapter creative upload failed for creative %s on buy %s: %s",
+                    creative_id,
+                    mb.media_buy_id,
+                    exc,
+                )
 
 
 def _compute_media_buy_status_from_flight_dates(media_buy) -> str:
@@ -614,6 +760,20 @@ def approve_creative(tenant_id, creative_id, **kwargs):
             operation="approve_creative",
             tenant_id=tenant_id,
             actor=approved_by,
+        )
+
+        # PRE-APPROVAL GATE: when this tenant has
+        # `creative_pre_approval_gate_enabled` on, the buy was approved
+        # without uploading creatives to the ad server (see the gate
+        # block in src/core/tools/media_buy_create.py). The buy is
+        # already `active` in our DB AND in GAM; the line item exists
+        # but has no creative attached. So now that the human approved
+        # the creative, we need to push it to the ad server and
+        # associate it with the existing line item — the upload that
+        # the buy-approval flow deferred.
+        _gate_upload_creative_to_existing_buy(
+            tenant_id=tenant_id,
+            creative_id=creative_id,
         )
 
         # Execute adapter creation for unblocked media buys

@@ -2084,6 +2084,14 @@ def edit_product(tenant_id, product_id):
                 stmt_profiles = select(InventoryProfile).filter_by(tenant_id=tenant_id).order_by(InventoryProfile.name)
                 inventory_profiles = db_session.scalars(stmt_profiles).all()
 
+                # Forecast button visibility: GAM adapter + both flag tiers on.
+                from src.core.feature_flags import is_product_forecast_enabled
+
+                tenant_for_flags = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+                forecast_enabled = is_product_forecast_enabled(tenant_for_flags)
+                # Surface raw product.forecast (JSONB) for template rendering.
+                product_dict["forecast"] = getattr(product, "forecast", None)
+
                 return render_template(
                     "add_product_gam.html",
                     tenant_id=tenant_id,
@@ -2097,11 +2105,13 @@ def edit_product(tenant_id, product_id):
                     principals=principals_list,
                     authorized_properties=authorized_properties_list,
                     selected_publisher_properties=selected_publisher_properties,
+                    forecast_enabled=forecast_enabled,
                 )
             else:
                 # For non-GAM adapters - use unified edit template
                 # Reload tenant for template context (measurement_providers, etc.)
                 tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+                # Forecast UI is GAM-only; non-GAM products never show it.
                 return render_template(
                     "edit_product.html",
                     tenant_id=tenant_id,
@@ -2112,6 +2122,7 @@ def edit_product(tenant_id, product_id):
                     principals=principals_list,
                     authorized_properties=authorized_properties_list,
                     selected_publisher_properties=selected_publisher_properties,
+                    forecast_enabled=False,
                 )
 
     except Exception as e:
@@ -2460,3 +2471,86 @@ def unassign_inventory_from_product(tenant_id, product_id, mapping_id):
     except Exception as e:
         logger.error(f"Error removing inventory assignment: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ── Product availability forecast (mollybots port) ──────────────────────────
+# Behind two-tier feature flag: SALESAGENT_FF_PRODUCT_FORECAST env var (global)
+# AND tenants.product_forecast_enabled (per-tenant). Both must be on.
+# AdCP-spec compliance: products.forecast is already in our schema and round-
+# trips through MCP get_products via src/core/product_conversion.py:386-387.
+# This endpoint populates that field; no schema change.
+
+
+@products_bp.route("/<product_id>/forecast/refresh", methods=["POST"])
+@require_tenant_access()
+@log_admin_action("refresh_product_forecast")
+def refresh_product_forecast(tenant_id, product_id):
+    """Fetch a fresh GAM availability forecast and write it to
+    ``products.forecast``.
+
+    Returns JSON ``{success, forecast}`` on success or
+    ``{success: False, error}`` on any failure. Never raises.
+    """
+    from src.adapters.gam.client import GAMClientManager
+    from src.adapters.gam.managers.forecast import GAMForecastManager
+    from src.core.database.models import AdapterConfig, Principal
+    from src.core.feature_flags import is_product_forecast_enabled
+
+    try:
+        with get_db_session() as db_session:
+            tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            if not tenant:
+                return jsonify({"success": False, "error": "Tenant not found"}), 404
+
+            if not is_product_forecast_enabled(tenant):
+                # Flag off (either global env var or tenant column) → 404 so the
+                # endpoint is invisible to clients that don't have it enabled.
+                return jsonify({"success": False, "error": "Feature not enabled"}), 404
+
+            product = db_session.scalars(select(Product).filter_by(tenant_id=tenant_id, product_id=product_id)).first()
+            if not product:
+                return jsonify({"success": False, "error": "Product not found"}), 404
+
+            cfg = db_session.scalars(select(AdapterConfig).filter_by(tenant_id=tenant_id)).first()
+            if not cfg or cfg.adapter_type != "google_ad_manager":
+                return jsonify({"success": False, "error": "Forecasting requires the GAM adapter"}), 400
+            if not getattr(cfg, "gam_service_account_json", None):
+                return jsonify({"success": False, "error": "GAM service account not configured"}), 400
+
+            # Resolve an advertiser_id for the prospective line item. Prefer the
+            # tenant default; otherwise fall back to the first principal that has
+            # one mapped (we just need *some* advertiser context — the forecast
+            # is informational, not bound to a specific buyer).
+            advertiser_id = getattr(tenant, "default_gam_advertiser_id", None)
+            if not advertiser_id:
+                principals = db_session.scalars(select(Principal).filter_by(tenant_id=tenant_id)).all()
+                for p in principals:
+                    pm = p.platform_mappings or {}
+                    gam = pm.get("google_ad_manager") if isinstance(pm, dict) else None
+                    if gam and gam.get("advertiser_id"):
+                        advertiser_id = gam["advertiser_id"]
+                        break
+
+            client_manager = GAMClientManager(
+                {
+                    "service_account_json": cfg.gam_service_account_json,
+                    "network_code": cfg.gam_network_code,
+                },
+                cfg.gam_network_code,
+            )
+            manager = GAMForecastManager(client_manager, advertiser_id=advertiser_id)
+            result = manager.get_for_product(product, days=7)
+
+            # LIVE PREVIEW ONLY — do NOT persist. Forecasting is
+            # business-critical for overbooking prevention, so any cached
+            # value is stale by definition. Buyer-facing get_products runs
+            # its own live overlay via _overlay_live_forecasts in
+            # src/core/tools/products.py. This publisher-side button just
+            # echoes the same live call so the operator can sanity-check
+            # the forecast for a specific product without going through
+            # the buyer protocol.
+            return jsonify({"success": True, **result.to_dict()})
+
+    except Exception as e:
+        logger.error(f"Error refreshing forecast for {product_id}: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500

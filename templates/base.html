@@ -42,7 +42,18 @@
        the breadcrumb root; nav is a quiet inline list at the right. #}
     <div class="header{% if session.role == 'super_admin' %} header--admin{% endif %}">
         <div class="container">
-            <h1>{% if session.role == 'super_admin' %}Sales Agent{% else %}Sales Agent{% endif %}</h1>
+            {# Modern UX (flag-gated): logo + workspace name are clickable
+               links to the appropriate home page. Falls back to the older
+               non-interactive H1 + workspace span when the flag is off so
+               disabled-state == today's UI byte-for-byte. #}
+            {% if modern_ux_enabled and session.authenticated %}
+                {% set _home_href = (script_name + '/tenant/' + tenant.tenant_id) if tenant else (script_name + '/') %}
+                <a href="{{ _home_href }}" class="sa-home-link" style="text-decoration: none; color: inherit; display: flex; align-items: center; gap: 0.5rem;" title="Home">
+                    <h1 style="margin: 0;">Sales Agent</h1>
+                </a>
+            {% else %}
+                <h1>{% if session.role == 'super_admin' %}Sales Agent{% else %}Sales Agent{% endif %}</h1>
+            {% endif %}
             <nav>
                 {% if session.authenticated %}
                     {# Identity lockup. The "ADMIN" mode pill is super-admin-only
@@ -52,6 +63,8 @@
                         {% if session.role == 'super_admin' %}
                             <span class="workspace-name">{{ session.email or session.username }}</span>
                             <span class="status">Admin</span>
+                        {% elif tenant and modern_ux_enabled %}
+                            <a href="{{ script_name }}/tenant/{{ tenant.tenant_id }}" class="workspace-name" style="color: inherit; text-decoration: none;" title="{{ tenant.name }} — Dashboard">{{ tenant.name }}</a>
                         {% elif tenant %}
                             <span class="workspace-name">{{ tenant.name }}</span>
                         {% else %}
@@ -68,6 +81,37 @@
             </nav>
         </div>
     </div>
+
+    {# Modern UX (flag-gated): persistent secondary tenant nav on every
+       tenant-scoped page. Active page is highlighted via current path
+       prefix. Hidden in super-admin context (no tenant) and when the
+       page is rendered embedded (parent chrome owns nav). #}
+    {% if modern_ux_enabled and tenant and session.authenticated and not embedded %}
+    {% set _path = request.path or '' %}
+    {% set _tprefix = script_name + '/tenant/' + tenant.tenant_id %}
+    <nav class="sa-tenant-nav" aria-label="Tenant navigation" style="background: #f9fafb; border-bottom: 1px solid #e5e7eb; padding: 0.5rem 0;">
+        <div class="container" style="display: flex; gap: 0.25rem; flex-wrap: wrap; font-size: 0.95em;">
+            {% set _navlinks = [
+                ('Dashboard',     '',                  ''),
+                ('Media Buys',    '/media-buys',       '/media-buy'),
+                ('Creatives',     '/creatives',        ''),
+                ('Products',      '/products',         ''),
+                ('Workflows',     '/workflows',        ''),
+                ('Settings',      '/settings',         ''),
+            ] %}
+            {% for label, primary_path, alt_path in _navlinks %}
+                {% set _href = _tprefix + primary_path %}
+                {% set _is_active = (_path == _href) or (primary_path and _path.startswith(_tprefix + primary_path + '/')) or (alt_path and _path.startswith(_tprefix + alt_path)) %}
+                <a href="{{ _href }}" class="sa-tenant-nav-link{% if _is_active %} is-active{% endif %}" style="padding: 0.4rem 0.75rem; border-radius: 4px; text-decoration: none; color: {% if _is_active %}#fff{% else %}#374151{% endif %}; background: {% if _is_active %}#2563eb{% else %}transparent{% endif %};">{{ label }}</a>
+            {% endfor %}
+            {% if tenant.agent_media_buys_enabled %}
+                {% set _agent_href = _tprefix + '/agent-media-buys/' %}
+                {% set _agent_active = _path.startswith(_agent_href) %}
+                <a href="{{ _agent_href }}" class="sa-tenant-nav-link{% if _agent_active %} is-active{% endif %}" style="padding: 0.4rem 0.75rem; border-radius: 4px; text-decoration: none; color: {% if _agent_active %}#fff{% else %}#374151{% endif %}; background: {% if _agent_active %}#2563eb{% else %}transparent{% endif %};">Agent Buys</a>
+            {% endif %}
+        </div>
+    </nav>
+    {% endif %}
     {% endif %}
     <div class="container">
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -185,6 +229,130 @@
                 console.debug('psa:navigate postMessage failed:', err);
             }
         });
+    </script>
+    {% endif %}
+    {# Modern UX (flag-gated): toast container + global saToast() helper +
+       fetch-action wrapper. Provides three things every other template can
+       use without ceremony:
+
+       1. saToast(message, type) — shows a dismissible toast.
+          type ∈ {'success','error','info','warning'}. Auto-hides at 4 s.
+
+       2. saFetchAction(button, fetchFn, opts) — wraps a click handler:
+          - disables the button + appends "…" while in flight
+          - on success: restores button, fires success toast (if msg given),
+            optionally reloads the page
+          - on error: restores button, fires error toast with the message
+
+       3. Auto-mirror server-rendered Flash messages into toasts at page
+          load so the SAME UX surface covers form-POST round trips and
+          AJAX actions. Server flash messages already render at the top
+          of the page; this just also pops a toast for the same content
+          so the user gets a consistent corner-of-screen confirmation.
+    #}
+    {% if modern_ux_enabled %}
+    <div id="sa-toast-root" aria-live="polite" aria-atomic="true" style="position: fixed; top: 1rem; right: 1rem; z-index: 10000; display: flex; flex-direction: column; gap: 0.5rem; max-width: 380px;"></div>
+    <style>
+        .sa-toast {
+            background: #1f2937;
+            color: #fff;
+            border-radius: 6px;
+            padding: 0.75rem 1rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            font-size: 0.95em;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            animation: sa-toast-in 0.18s ease-out;
+        }
+        .sa-toast.is-leaving { animation: sa-toast-out 0.25s ease-in forwards; }
+        .sa-toast.sa-toast-success { background: #047857; }
+        .sa-toast.sa-toast-error   { background: #b91c1c; }
+        .sa-toast.sa-toast-warning { background: #b45309; }
+        .sa-toast .sa-toast-close {
+            background: transparent; border: 0; color: inherit;
+            font-size: 1.1em; line-height: 1; cursor: pointer; opacity: 0.7;
+        }
+        .sa-toast .sa-toast-close:hover { opacity: 1; }
+        @keyframes sa-toast-in  { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+        @keyframes sa-toast-out { to   { transform: translateX(20px); opacity: 0; } }
+
+        .sa-tenant-nav-link:hover { background: #e5e7eb !important; }
+        .sa-tenant-nav-link.is-active:hover { background: #1d4ed8 !important; }
+    </style>
+    <script>
+    (function () {
+        const root = document.getElementById('sa-toast-root');
+        if (!root) return;
+
+        function dismiss(el) {
+            el.classList.add('is-leaving');
+            setTimeout(() => el.remove(), 240);
+        }
+
+        window.saToast = function (message, type) {
+            type = type || 'info';
+            const el = document.createElement('div');
+            el.className = 'sa-toast sa-toast-' + type;
+            el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+            const icons = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+            el.innerHTML =
+                '<span aria-hidden="true">' + (icons[type] || '') + '</span>' +
+                '<span style="flex:1;">' + (message || '') + '</span>' +
+                '<button type="button" class="sa-toast-close" aria-label="Dismiss">×</button>';
+            el.querySelector('.sa-toast-close').addEventListener('click', () => dismiss(el));
+            root.appendChild(el);
+            setTimeout(() => { if (el.isConnected) dismiss(el); }, 4000);
+            return el;
+        };
+
+        // saFetchAction(button, fetchFn, opts)
+        // - button: the clicked HTMLElement (will be disabled + "…" suffixed while in flight)
+        // - fetchFn: async () => Response. Caller does the fetch.
+        // - opts: { successMessage?, errorPrefix?, reloadOnSuccess?, onSuccess? }
+        window.saFetchAction = async function (button, fetchFn, opts) {
+            opts = opts || {};
+            const orig = button.innerHTML;
+            button.disabled = true;
+            button.dataset.saInFlight = '1';
+            button.innerHTML = orig + ' …';
+            try {
+                const res = await fetchFn();
+                let body = null;
+                try { body = await res.clone().json(); } catch (_e) { body = null; }
+                if (!res.ok || (body && body.success === false)) {
+                    const msg = (body && (body.error || body.message)) || (res.status + ' ' + res.statusText);
+                    saToast((opts.errorPrefix || 'Failed') + ': ' + msg, 'error');
+                    return { ok: false, body, response: res };
+                }
+                if (opts.successMessage) saToast(opts.successMessage, 'success');
+                if (typeof opts.onSuccess === 'function') opts.onSuccess(body, res);
+                if (opts.reloadOnSuccess) {
+                    setTimeout(() => window.location.reload(), 350);
+                }
+                return { ok: true, body, response: res };
+            } catch (err) {
+                saToast((opts.errorPrefix || 'Network error') + ': ' + (err.message || err), 'error');
+                return { ok: false, error: err };
+            } finally {
+                button.disabled = false;
+                button.innerHTML = orig;
+                delete button.dataset.saInFlight;
+            }
+        };
+
+        // Mirror server-rendered flash messages into toasts at page load
+        // so AJAX + form-POST round trips share the same UX surface.
+        document.querySelectorAll('.flash-messages .alert').forEach((el) => {
+            const text = (el.textContent || '').replace(/×\s*$/, '').trim();
+            if (!text) return;
+            let type = 'info';
+            if (el.classList.contains('alert-success')) type = 'success';
+            else if (el.classList.contains('alert-error') || el.classList.contains('alert-danger')) type = 'error';
+            else if (el.classList.contains('alert-warning')) type = 'warning';
+            saToast(text, type);
+        });
+    })();
     </script>
     {% endif %}
     {% block scripts %}{% endblock %}

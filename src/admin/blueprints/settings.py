@@ -279,6 +279,14 @@ def update_general(tenant_id):
             else:
                 tenant.human_review_required = False
 
+            # Per-tenant Beta feature flags. Unchecked checkboxes are absent
+            # from the form, so we explicitly write False for every flag not
+            # present (otherwise toggling-off would never persist).
+            from src.core.feature_flags import tenant_flag_definitions
+
+            for col, _label, _desc in tenant_flag_definitions():
+                setattr(tenant, col, request.form.get(col) == "true")
+
             tenant.updated_at = datetime.now(UTC)
             db_session.commit()
 

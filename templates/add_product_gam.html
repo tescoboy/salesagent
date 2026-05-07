@@ -491,6 +491,79 @@ Target users based on local weather conditions for maximum relevance.</div>
             <a href="{{ url_for('products.list_products', tenant_id=tenant_id) }}" class="btn btn-secondary">Cancel</a>
         </div>
     </form>
+
+    {% if forecast_enabled and product and product.product_id %}
+    <!-- Availability Forecast (mollybots port — gated on tenants.product_forecast_enabled
+         AND SALESAGENT_FF_PRODUCT_FORECAST). Populates AdCP-spec products.forecast
+         via POST /tenant/<tid>/products/<pid>/forecast/refresh. -->
+    <div class="form-section" style="margin-top: 2rem; padding-top: 2rem; border-top: 1px solid #e5e7eb;">
+        <h3 style="margin-top: 0;">Availability Forecast</h3>
+        <p style="color: #6b7280; font-size: 0.875rem;">
+            Calls GAM <code>ForecastService.getAvailabilityForecast</code> for a 7-day window starting tomorrow,
+            using this product's <code>targeted_ad_unit_ids</code> and line-item type.
+            Result is written to the AdCP-spec <code>products.forecast</code> field returned by <code>get_products</code>.
+        </p>
+        <div id="forecast-display" style="background: #f9fafb; padding: 1rem; border-radius: 6px; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; min-height: 60px;">{% if product.forecast %}{{ product.forecast | tojson(indent=2) }}{% else %}<span style="color: #9ca3af;">No forecast yet — click Refresh.</span>{% endif %}</div>
+        <button type="button" id="refresh-forecast-btn" class="btn btn-secondary" style="margin-top: 0.75rem;">
+            Refresh Forecast
+        </button>
+        <span id="forecast-status" style="margin-left: 0.75rem; color: #6b7280; font-size: 0.875rem;"></span>
+    </div>
+    <script>
+    (function () {
+        const btn = document.getElementById('refresh-forecast-btn');
+        const display = document.getElementById('forecast-display');
+        const status = document.getElementById('forecast-status');
+        if (!btn) return;
+        const scriptRoot = '{{ request.script_root }}' || '';
+        const url = scriptRoot + '/tenant/{{ tenant_id }}/products/{{ product.product_id }}/forecast/refresh';
+        btn.addEventListener('click', async () => {
+            // Use saFetchAction (modern UX flag) when available so the
+            // user gets a corner toast on success / error in addition to
+            // the inline status text. Falls back to the older inline-only
+            // path when the flag is off.
+            if (typeof window.saFetchAction === 'function') {
+                status.textContent = 'Calling GAM ForecastService…';
+                const result = await window.saFetchAction(
+                    btn,
+                    () => fetch(url, { method: 'POST', credentials: 'same-origin', headers: {'Accept': 'application/json'} }),
+                    {
+                        successMessage: 'Forecast refreshed',
+                        errorPrefix: 'Forecast refresh failed',
+                        onSuccess: (body) => {
+                            display.textContent = JSON.stringify(body.forecast, null, 2);
+                            status.textContent = body.forecast ? 'Updated.' : 'No forecast (' + (body.error || 'see response') + ').';
+                        },
+                    },
+                );
+                if (!result.ok) {
+                    display.textContent = JSON.stringify(result.body || {error: 'request failed'}, null, 2);
+                    status.textContent = 'Error — see response.';
+                }
+                return;
+            }
+            // Fallback (modern UX flag off): legacy inline-only behaviour.
+            btn.disabled = true;
+            status.textContent = 'Calling GAM ForecastService…';
+            try {
+                const res = await fetch(url, { method: 'POST', credentials: 'same-origin', headers: {'Accept': 'application/json'} });
+                const data = await res.json();
+                if (data.success) {
+                    display.textContent = JSON.stringify(data.forecast, null, 2);
+                    status.textContent = 'Updated.';
+                } else {
+                    display.textContent = JSON.stringify(data, null, 2);
+                    status.textContent = 'Error — see response.';
+                }
+            } catch (e) {
+                status.textContent = 'Network error: ' + e.message;
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    })();
+    </script>
+    {% endif %}
 </div>
 
 <script>

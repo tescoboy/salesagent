@@ -149,6 +149,65 @@ def review_workflow_step(tenant_id, workflow_id, step_id):
         )
 
 
+def _replay_update_media_buy(step, tenant_id, db):
+    """Re-invoke ``_update_media_buy_impl`` with the persisted ``request_data``.
+
+    The workflow-step approve endpoint historically only executed
+    ``create_media_buy`` deferred ops. ``update_media_buy`` steps flipped to
+    ``approved`` but never actually applied the change. This helper closes
+    that gap: it reconstructs a transport-agnostic ``ResolvedIdentity`` from
+    the step's ``Context`` row (principal_id + tenant_id are sufficient for
+    the buyer-protocol surface) and replays the persisted request payload
+    through the same impl that the original MCP/A2A call used.
+
+    Raises on failure so the caller can flag the workflow step accordingly.
+    """
+    from src.core.config_loader import get_tenant_by_id
+    from src.core.resolved_identity import ResolvedIdentity
+    from src.core.schemas import UpdateMediaBuyRequest
+    from src.core.tools.media_buy_update import _update_media_buy_impl
+
+    if not step.request_data:
+        raise ValueError(f"workflow step {step.step_id} has no request_data to replay")
+
+    context = db.scalars(select(Context).filter_by(context_id=step.context_id)).first()
+    if context is None:
+        raise ValueError(f"context {step.context_id} not found for workflow step {step.step_id}")
+
+    tenant_dict = get_tenant_by_id(tenant_id)
+    if tenant_dict is None:
+        raise ValueError(f"tenant {tenant_id} not found while replaying workflow step {step.step_id}")
+
+    identity = ResolvedIdentity(
+        principal_id=context.principal_id,
+        tenant_id=tenant_id,
+        tenant=tenant_dict,
+        protocol="mcp",
+    )
+
+    # Filter to keys the schema actually accepts. Persisted request_data
+    # carries transport metadata (e.g. ``protocol``) and historical
+    # injections (e.g. the ``canceled: true`` quirk tracked in
+    # draft-issue-canceled-flag-injection.md) that strict pydantic
+    # validation refuses. We only want the original buyer-protocol fields.
+    allowed_fields = set(UpdateMediaBuyRequest.model_fields.keys())
+    payload = {k: v for k, v in step.request_data.items() if k in allowed_fields}
+    req = UpdateMediaBuyRequest.model_validate(payload)
+    # bypass_manual_approval — we are the approval handler. Without this
+    # flag the impl would re-create another requires_approval step
+    # instead of applying the change.
+    result = _update_media_buy_impl(
+        req,
+        identity=identity,
+        context_id=step.context_id,
+        bypass_manual_approval=True,
+    )
+    logger.info(
+        f"[APPROVAL] Replayed update_media_buy step {step.step_id} → result type {type(result).__name__}"
+    )
+    return result
+
+
 @workflows_bp.route("/<tenant_id>/workflows/<workflow_id>/steps/<step_id>/approve", methods=["POST"])
 @require_tenant_access()
 @log_admin_action("approve_workflow_step")
@@ -246,10 +305,31 @@ def approve_workflow_step(tenant_id, workflow_id, step_id):
                     logger.info(f"[APPROVAL] Media buy {media_buy_id} successfully created in adapter")
                     flash("Workflow step approved and media buy created successfully", "success")
                 else:
-                    logger.warning(
-                        f"[APPROVAL] Media buy not executed: media_buy={media_buy is not None}, status={media_buy.status if media_buy else 'N/A'}"
-                    )
-                    flash("Workflow step approved successfully", "success")
+                    # Buy isn't in pending_approval — this branch covers
+                    # workflow steps that are NOT create_media_buy. Today's
+                    # only one is update_media_buy: re-invoke the impl with
+                    # the persisted request_data so the deferred op
+                    # actually runs. Without this, approving an
+                    # update_media_buy step silently no-ops (DB and GAM
+                    # both stay at old values). See draft-issue-approve-
+                    # workflow-step-doesnt-execute-deferred-ops.md.
+                    if step.tool_name == "update_media_buy":
+                        try:
+                            _replay_update_media_buy(step, tenant_id, db)
+                            flash("Workflow step approved and update applied", "success")
+                        except Exception as exc:  # noqa: BLE001 — soft-fail
+                            logger.exception(
+                                f"[APPROVAL] update_media_buy replay failed for step {step.step_id}: {exc}"
+                            )
+                            flash(
+                                f"Workflow step approved but update apply failed: {exc}",
+                                "error",
+                            )
+                    else:
+                        logger.warning(
+                            f"[APPROVAL] Media buy not executed: media_buy={media_buy is not None}, status={media_buy.status if media_buy else 'N/A'}"
+                        )
+                        flash("Workflow step approved successfully", "success")
             else:
                 flash("Workflow step approved successfully", "success")
 

@@ -32,6 +32,50 @@ from adcp.types import ContextObject, Error, MediaBuyStatus
 from src.core.auth import get_principal_object
 from src.core.database.models import MediaBuy, PricingOption
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
+from src.core.feature_flags import is_agent_cache_enabled, is_agent_media_buys_enabled
+
+
+def _cached_video_completions(tenant: Any, gam_order_id: str | None) -> int | None:
+    """Return cached ``video_completions`` count for an order, or ``None``.
+
+    Looks up ``agent_gam_cache`` by ``(tenant_id, order_id)``. Returns
+    ``None`` (matching today's behavior) when:
+
+    - either feature-flag tier is off,
+    - the buy has no ``gam_order_id``,
+    - or no cache row exists yet.
+
+    The AdCP ``DeliveryTotals.video_completions`` field is optional, so
+    ``None`` is spec-valid and is what every call site uses today. We only
+    swap in a real number when the cache is populated AND the flags say
+    yes.
+    """
+    if not is_agent_cache_enabled() or not is_agent_media_buys_enabled(tenant):
+        return None
+    if not gam_order_id:
+        return None
+    from sqlalchemy import text
+
+    from src.core.database.database_session import get_db_session
+
+    try:
+        with get_db_session() as s:
+            row = s.execute(
+                text("SELECT video_completions FROM agent_gam_cache WHERE tenant_id = :tid AND order_id = :oid"),
+                {"tid": tenant.tenant_id, "oid": str(gam_order_id)},
+            ).first()
+            return int(row[0]) if row else None
+    except Exception as exc:
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            "agent_gam_cache lookup failed for tenant=%s order=%s: %s",
+            getattr(tenant, "tenant_id", "?"),
+            gam_order_id,
+            exc,
+        )
+        return None
+
+
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.database.repositories.product import ProductRepository
 from src.core.helpers.adapter_helpers import get_adapter
@@ -223,6 +267,11 @@ def _get_media_buy_delivery_impl(
         total_impressions = 0
         media_buy_count = 0
         total_clicks = 0
+        # Aggregate video completions across buys when cache lookups produce
+        # numbers (None values from off-flag tenants stay None and don't
+        # contribute). If every contribution is None, the aggregate stays
+        # None — matches today's behavior at the off-flag default.
+        total_video_completions: float | None = None
 
         for media_buy_id, buy in target_media_buys:
             try:
@@ -488,6 +537,13 @@ def _get_media_buy_delivery_impl(
                 status_typed = cast(
                     LiteralType["ready", "active", "paused", "completed", "failed", "reporting_delayed"], status
                 )
+                # Pull cached video_completions from agent_gam_cache when
+                # both feature-flag tiers are on. Returns None when off /
+                # empty / not GAM, which preserves today's behavior. The
+                # field is optional in the AdCP DeliveryTotals spec, so
+                # None remains spec-valid.
+                buy_video_completions = _cached_video_completions(tenant, getattr(buy, "gam_order_id", None))
+
                 delivery_data = MediaBuyDeliveryData(
                     media_buy_id=media_buy_id,
                     status=status_typed,
@@ -500,7 +556,7 @@ def _get_media_buy_delivery_impl(
                         spend=spend,
                         clicks=clicks,  # Optional field
                         ctr=ctr,  # Optional field
-                        video_completions=None,  # Optional field
+                        video_completions=(float(buy_video_completions) if buy_video_completions is not None else None),
                         completion_rate=None,  # Optional field
                         conversions=adapter_conversions,  # From adapter totals
                         viewability=adapter_viewability,  # From adapter totals
@@ -515,6 +571,8 @@ def _get_media_buy_delivery_impl(
                 total_impressions += impressions
                 media_buy_count += 1
                 total_clicks += clicks if clicks is not None else 0
+                if buy_video_completions is not None:
+                    total_video_completions = (total_video_completions or 0.0) + float(buy_video_completions)
 
             except Exception as e:
                 logger.error(f"Error getting delivery for {media_buy_id}: {e}")
@@ -568,7 +626,7 @@ def _get_media_buy_delivery_impl(
                 impressions=float(total_impressions),
                 spend=total_spend,
                 clicks=float(total_clicks) if total_clicks else None,
-                video_completions=None,
+                video_completions=total_video_completions,
                 media_buy_count=media_buy_count,
             ),
             media_buy_deliveries=deliveries,

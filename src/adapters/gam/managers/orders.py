@@ -77,6 +77,17 @@ class GAMOrdersManager:
                 "These must be provided when initializing GAMOrdersManager for order operations."
             )
 
+        # Convert to the network timezone before pulling hour/minute
+        # (same bug class as the LineItem datetime — see note below).
+        # Order doesn't carry an explicit timeZoneId; GAM uses the network
+        # timezone, so we localize to that.
+        from zoneinfo import ZoneInfo as _ZoneInfo
+
+        _order_tz_id = "America/New_York"  # network default; override only if API surface allows it
+        _order_tz = _ZoneInfo(_order_tz_id)
+        _ord_start = start_time.astimezone(_order_tz) if getattr(start_time, "tzinfo", None) else start_time
+        _ord_end = end_time.astimezone(_order_tz) if getattr(end_time, "tzinfo", None) else end_time
+
         # Create Order object
         order = {
             "name": order_name,
@@ -85,16 +96,16 @@ class GAMOrdersManager:
             "status": "DRAFT",  # Start as DRAFT - will approve after line items are created
             "totalBudget": {"currencyCode": currency, "microAmount": int(total_budget * 1_000_000)},
             "startDateTime": {
-                "date": {"year": start_time.year, "month": start_time.month, "day": start_time.day},
-                "hour": start_time.hour,
-                "minute": start_time.minute,
-                "second": start_time.second,
+                "date": {"year": _ord_start.year, "month": _ord_start.month, "day": _ord_start.day},
+                "hour": _ord_start.hour,
+                "minute": _ord_start.minute,
+                "second": _ord_start.second,
             },
             "endDateTime": {
-                "date": {"year": end_time.year, "month": end_time.month, "day": end_time.day},
-                "hour": end_time.hour,
-                "minute": end_time.minute,
-                "second": end_time.second,
+                "date": {"year": _ord_end.year, "month": _ord_end.month, "day": _ord_end.day},
+                "hour": _ord_end.hour,
+                "minute": _ord_end.minute,
+                "second": _ord_end.second,
             },
         }
 
@@ -433,8 +444,11 @@ class GAMOrdersManager:
             if impl_config.get("targeted_placement_ids"):
                 if "inventoryTargeting" not in line_item_targeting:
                     line_item_targeting["inventoryTargeting"] = {}
-                line_item_targeting["inventoryTargeting"]["targetedPlacements"] = [
-                    {"placementId": placement_id} for placement_id in impl_config["targeted_placement_ids"]
+                # GAM InventoryTargeting takes 'targetedPlacementIds' (string[]),
+                # not 'targetedPlacements' (object[]). Confirmed against the
+                # WSDL for v202505..v202602.
+                line_item_targeting["inventoryTargeting"]["targetedPlacementIds"] = [
+                    str(placement_id) for placement_id in impl_config["targeted_placement_ids"]
                 ]
 
             # Require inventory targeting - no fallback
@@ -451,19 +465,67 @@ class GAMOrdersManager:
                 log(f"[red]Error: {error_msg}[/red]")
                 raise ValueError(error_msg)
 
-            # Add custom targeting from product config
-            # IMPORTANT: Merge without overwriting buyer's targeting (e.g., AEE signals from key_value_pairs)
-            if impl_config.get("custom_targeting_keys"):
-                if "customTargeting" not in line_item_targeting:
-                    line_item_targeting["customTargeting"] = {}
-                # Add product custom targeting, but don't overwrite existing keys from buyer
-                for key, value in impl_config["custom_targeting_keys"].items():
-                    if key not in line_item_targeting["customTargeting"]:
-                        line_item_targeting["customTargeting"][key] = value
-                    else:
-                        log(
-                            f"[yellow]Product config custom targeting key '{key}' conflicts with buyer targeting, keeping buyer value[/yellow]"
-                        )
+            # Add custom targeting from product config.
+            #
+            # The GAM v202602 ``Targeting.customTargeting`` field is a
+            # ``CustomCriteriaSet`` (a logical-operator-with-children
+            # structure), NOT a flat dict keyed by key id. Emitting the
+            # bare dict shape — which the prior code did — produces
+            # ``KeyError: '<keyId>'`` from the googleads SOAP serializer
+            # because the WSDL has no field named after the numeric key
+            # id. Same flavor of bug as the ``targetedPlacements`` →
+            # ``targetedPlacementIds`` fix earlier in this branch.
+            #
+            # impl_config shape we accept::
+            #
+            #     {
+            #         "<keyId>": {
+            #             "values": ["<valueId>", ...],
+            #             "operator": "IS" | "IS_NOT",
+            #         },
+            #         ...
+            #     }
+            #
+            # Translates to::
+            #
+            #     "customTargeting": {
+            #         "logicalOperator": "AND",
+            #         "children": [
+            #             {
+            #                 "xsi_type": "CustomCriteria",
+            #                 "keyId": <keyId>,
+            #                 "valueIds": [<valueId>, ...],
+            #                 "operator": "IS" | "IS_NOT",
+            #             },
+            #             ...
+            #         ],
+            #     }
+            #
+            # If the buyer's targeting has already populated
+            # ``customTargeting`` upstream (via ``package_targeting``), we
+            # respect that and skip — overwriting buyer-supplied targeting
+            # is worse than skipping product-default targeting.
+            if impl_config.get("custom_targeting_keys") and not line_item_targeting.get("customTargeting"):
+                children: list[dict[str, Any]] = []
+                for key_id, value_spec in impl_config["custom_targeting_keys"].items():
+                    if not isinstance(value_spec, dict):
+                        continue
+                    raw_values = value_spec.get("values") or []
+                    if not raw_values:
+                        continue
+                    children.append(
+                        {
+                            "xsi_type": "CustomCriteria",
+                            "keyId": str(key_id),
+                            "valueIds": [str(v) for v in raw_values],
+                            "operator": value_spec.get("operator", "IS"),
+                        }
+                    )
+                if children:
+                    line_item_targeting["customTargeting"] = {
+                        "logicalOperator": "AND",
+                        "children": children,
+                    }
 
             # Build creative placeholders from format_ids
             # First try to get from package.format_ids (buyer-specified)
@@ -879,6 +941,21 @@ class GAMOrdersManager:
             # In dry-run mode, order_id is a string like 'dry_run_order_123'; use a dummy numeric ID
             # In real mode, order_id is numeric string that can be converted
             order_id_int = 999999999 if (self.dry_run and not order_id.isdigit()) else int(order_id)
+
+            # Convert to the target timezone BEFORE pulling hour/minute.
+            # Reading start_time.hour on a UTC datetime and labelling it
+            # America/New_York (the prior code) shifted the wall-clock by
+            # the timezone offset — a UTC 15:22 buy ended up starting at
+            # 15:22 NY = 19:22 UTC, a 4-hour delay.
+            # If the input is naive (no tzinfo), assume it's already in
+            # the target tz so we don't double-convert.
+            from zoneinfo import ZoneInfo
+
+            _tz_id = impl_config.get("time_zone", "America/New_York")
+            _tz = ZoneInfo(_tz_id)
+            _local_start = start_time.astimezone(_tz) if getattr(start_time, "tzinfo", None) else start_time
+            _local_end = end_time.astimezone(_tz) if getattr(end_time, "tzinfo", None) else end_time
+
             line_item = {
                 "name": line_item_name,
                 "orderId": order_id_int,
@@ -896,18 +973,18 @@ class GAMOrdersManager:
                 "creativeRotationType": impl_config.get("creative_rotation_type", "EVEN"),
                 "deliveryRateType": impl_config.get("delivery_rate_type", "EVENLY"),
                 "startDateTime": {
-                    "date": {"year": start_time.year, "month": start_time.month, "day": start_time.day},
-                    "hour": start_time.hour,
-                    "minute": start_time.minute,
-                    "second": start_time.second,
-                    "timeZoneId": impl_config.get("time_zone", "America/New_York"),
+                    "date": {"year": _local_start.year, "month": _local_start.month, "day": _local_start.day},
+                    "hour": _local_start.hour,
+                    "minute": _local_start.minute,
+                    "second": _local_start.second,
+                    "timeZoneId": _tz_id,
                 },
                 "endDateTime": {
-                    "date": {"year": end_time.year, "month": end_time.month, "day": end_time.day},
-                    "hour": end_time.hour,
-                    "minute": end_time.minute,
-                    "second": end_time.second,
-                    "timeZoneId": impl_config.get("time_zone", "America/New_York"),
+                    "date": {"year": _local_end.year, "month": _local_end.month, "day": _local_end.day},
+                    "hour": _local_end.hour,
+                    "minute": _local_end.minute,
+                    "second": _local_end.second,
+                    "timeZoneId": _tz_id,
                 },
                 # Set status based on whether manual approval is required
                 # DRAFT = needs manual approval, READY = ready to serve (when creatives added)
@@ -1075,6 +1152,174 @@ class GAMOrdersManager:
             if current is None:
                 return default
         return current if current is not None else default
+
+    def update_order_dates(
+        self,
+        order_id: str,
+        start_time: Any | None = None,
+        end_time: Any | None = None,
+        time_zone_id: str = "America/New_York",
+    ) -> bool:
+        """Update Order + all its LineItem flight dates in GAM.
+
+        Closes the TODO in ``src/core/tools/media_buy_update.py:1137``
+        ("Currently only updates database — does NOT sync to GAM API").
+
+        Both the Order and every active LineItem under it get the new
+        flight bounds. Pass ``None`` for a field to leave it unchanged.
+
+        **Timezone handling.** ``start_time`` / ``end_time`` are converted
+        to ``time_zone_id`` *before* extracting hour/minute. This avoids
+        the wall-clock-shift bug we hit when reading ``.hour`` of a UTC
+        datetime and labelling it as Eastern. Naive datetimes are
+        passed through assumed already in the target tz.
+
+        Returns True if the order + all line items updated cleanly.
+        Logs and returns False on any partial failure — caller decides
+        whether the partial state is recoverable (typically retry).
+        """
+        if not start_time and not end_time:
+            return True  # nothing to do
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would update Order {order_id} dates")
+            return True
+
+        import time
+        from datetime import UTC, datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(time_zone_id)
+
+        def _to_gam_dt(dt: Any) -> dict:
+            local = dt.astimezone(tz) if getattr(dt, "tzinfo", None) else dt
+            return {
+                "date": {"year": local.year, "month": local.month, "day": local.day},
+                "hour": local.hour,
+                "minute": local.minute,
+                "second": local.second,
+                "timeZoneId": time_zone_id,
+            }
+
+        # If the requested start is in the past (or within the next 60 s, where
+        # the SOAP roundtrip will land it in the past anyway), GAM rejects the
+        # update with START_DATE_TIME_IS_IN_PAST. Switch to startDateTimeType
+        # = IMMEDIATELY for that case — Order/LineItem will start as soon as
+        # GAM accepts the mutation. End-date logic is unchanged.
+        start_is_immediate = False
+        if start_time is not None:
+            now_aware = datetime.now(UTC)
+            start_aware = (
+                start_time.astimezone(UTC)
+                if getattr(start_time, "tzinfo", None)
+                else start_time.replace(tzinfo=UTC)
+            )
+            start_is_immediate = start_aware <= now_aware + timedelta(seconds=60)
+
+        try:
+            order_service = self.client_manager.get_service("OrderService")
+            li_service = self.client_manager.get_service("LineItemService")
+
+            # 1) Fetch + patch the Order itself
+            sb = ad_manager.StatementBuilder()
+            sb.Where("id = :oid").WithBindVariable("oid", int(order_id))
+            order_page = order_service.getOrdersByStatement(sb.ToStatement())
+            orders = order_page["results"] if order_page and "results" in order_page else []
+            if not orders:
+                logger.error(f"Order {order_id} not found in GAM")
+                return False
+            order = orders[0]
+            if start_time is not None and not start_is_immediate:
+                # Order startDateTime has no separate timeZoneId field — GAM
+                # uses the network timezone. Build the dict without the field.
+                start_dict = _to_gam_dt(start_time)
+                start_dict.pop("timeZoneId", None)
+                if isinstance(order, dict):
+                    order["startDateTime"] = start_dict
+                else:
+                    order.startDateTime = start_dict
+            if end_time is not None:
+                end_dict = _to_gam_dt(end_time)
+                end_dict.pop("timeZoneId", None)
+                if isinstance(order, dict):
+                    order["endDateTime"] = end_dict
+                else:
+                    order.endDateTime = end_dict
+            updated_orders = order_service.updateOrders([order])
+            if not updated_orders:
+                logger.error(f"Failed to update Order {order_id} dates")
+                return False
+            logger.info(f"✓ Updated Order {order_id} dates")
+
+            # 2) Fetch + patch every LineItem under the order
+            sbl = ad_manager.StatementBuilder()
+            sbl.Where("orderId = :oid").WithBindVariable("oid", int(order_id)).Limit(500)
+            li_page = li_service.getLineItemsByStatement(sbl.ToStatement())
+            line_items = li_page["results"] if li_page and "results" in li_page else []
+            if not line_items:
+                logger.info(f"No line items under Order {order_id}; order-only update succeeded")
+                return True
+
+            patched: list = []
+            for li in line_items:
+                if start_time is not None:
+                    if start_is_immediate:
+                        if isinstance(li, dict):
+                            li["startDateTimeType"] = "IMMEDIATELY"
+                            li.pop("startDateTime", None)
+                        else:
+                            li.startDateTimeType = "IMMEDIATELY"
+                    else:
+                        if isinstance(li, dict):
+                            li["startDateTimeType"] = "USE_START_DATE_TIME"
+                            li["startDateTime"] = _to_gam_dt(start_time)
+                        else:
+                            li.startDateTimeType = "USE_START_DATE_TIME"
+                            li.startDateTime = _to_gam_dt(start_time)
+                if end_time is not None:
+                    if isinstance(li, dict):
+                        li["endDateTime"] = _to_gam_dt(end_time)
+                    else:
+                        li.endDateTime = _to_gam_dt(end_time)
+                patched.append(li)
+
+            # Retry updateLineItems on NO_FORECAST_YET. GAM's forecast warmup
+            # window (~60 min after creation or any targeting change) rejects
+            # mutations until forecasting completes. Mirrors the existing
+            # retry pattern in approve_order() and update_line_item_budget().
+            # See draft-issue-line-item-update-no-forecast-yet.md.
+            max_retries = 8
+            updated_lis = None
+            for attempt in range(max_retries):
+                try:
+                    updated_lis = li_service.updateLineItems(patched)
+                    break  # success
+                except Exception as li_exc:
+                    error_str = str(li_exc)
+                    is_forecast_warmup = (
+                        "NO_FORECAST_YET" in error_str or "ForecastingError" in error_str
+                    )
+                    if is_forecast_warmup and attempt < max_retries - 1:
+                        wait_time = min(5 * (2**attempt), 30)
+                        logger.warning(
+                            f"⏳ Line items under Order {order_id} forecasting not ready - "
+                            f"retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    raise
+
+            if not updated_lis or len(updated_lis) != len(patched):
+                logger.error(
+                    f"Failed to update line items under Order {order_id}: requested {len(patched)}, got {len(updated_lis or [])}"
+                )
+                return False
+            logger.info(f"✓ Updated {len(updated_lis)} line item(s) under Order {order_id}")
+            return True
+
+        except Exception as exc:
+            logger.exception(f"update_order_dates failed for Order {order_id}: {exc}")
+            return False
 
     def update_line_item_budget(
         self, line_item_id: str, new_budget: float, pricing_model: str, currency: str = "USD", max_retries: int = 5

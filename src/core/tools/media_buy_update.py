@@ -24,10 +24,7 @@ from adcp import PushNotificationConfig
 #: Configurable via MAX_CAMPAIGN_BUDGET_USD env var; default 10,000,000.
 MAX_CAMPAIGN_BUDGET: Decimal = Decimal(os.environ.get("MAX_CAMPAIGN_BUDGET_USD", "10000000"))
 
-from adcp.types import Error
-from adcp.types import ContextObject
-from adcp.types import TargetingOverlay
-from adcp.types import CreativeAction
+from adcp.types import ContextObject, CreativeAction, Error, TargetingOverlay
 from adcp.types import PackageUpdate as UpdatePackage
 from fastmcp.server.context import Context
 from fastmcp.tools.tool import ToolResult
@@ -118,6 +115,7 @@ def _update_media_buy_impl(
     req: UpdateMediaBuyRequest,
     identity: ResolvedIdentity | None = None,
     context_id: str | None = None,
+    bypass_manual_approval: bool = False,
 ) -> UpdateMediaBuySuccess | UpdateMediaBuyError:
     """Shared implementation for update_media_buy (used by both MCP and A2A).
 
@@ -249,11 +247,79 @@ def _update_media_buy_impl(
         assert step is not None, "step should be created when not in dry_run mode"
         assert persistent_ctx is not None, "persistent_ctx should be created when not in dry_run mode"
 
+        # Pre-flight: refuse reservation-affecting changes to guaranteed
+        # GAM line items. GAM rejects them server-side with
+        # LineItemError.UPDATE_RESERVATION_NOT_ALLOWED, but only after the
+        # forecast warmup window — meaning the buyer waits ~3 minutes of
+        # NO_FORECAST_YET retries to get an opaque SOAP fault, with the
+        # Order possibly already mutated. Catch it here at the protocol
+        # boundary instead. See draft-issue-update-media-buy-guaranteed-
+        # line-item-rejected-late.md.
+        GUARANTEED_LINE_ITEM_TYPES = {"STANDARD", "SPONSORSHIP"}
+        RESERVATION_FIELDS = {"start_time", "end_time", "budget"}
+
+        requested_reservation_fields = sorted(req.model_fields_set & RESERVATION_FIELDS)
+        if requested_reservation_fields:
+            from src.core.database.models import Product as ProductModel
+
+            packages = uow.media_buys.get_packages(req.media_buy_id) or []
+            product_ids = {
+                pkg.package_config.get("product_id")
+                for pkg in packages
+                if pkg.package_config and pkg.package_config.get("product_id")
+            }
+            blocking_line_item_type: str | None = None
+            for pid in product_ids:
+                product = session.scalars(
+                    select(ProductModel).where(
+                        ProductModel.tenant_id == tenant["tenant_id"],
+                        ProductModel.product_id == pid,
+                    )
+                ).first()
+                if not product or not product.implementation_config:
+                    continue
+                li_type = product.implementation_config.get("line_item_type")
+                if li_type in GUARANTEED_LINE_ITEM_TYPES:
+                    blocking_line_item_type = li_type
+                    break
+
+            if blocking_line_item_type:
+                error_msg = (
+                    f"Media buy {req.media_buy_id} is a guaranteed line item "
+                    f"({blocking_line_item_type}); reservation-affecting fields "
+                    f"({', '.join(requested_reservation_fields)}) cannot be modified "
+                    f"after approval. Pause and recreate, or contact the publisher."
+                )
+                response_data = UpdateMediaBuyError(
+                    errors=[
+                        Error(
+                            code="guaranteed_line_item_immutable",
+                            message=error_msg,
+                            details={
+                                "line_item_type": blocking_line_item_type,
+                                "blocked_fields": requested_reservation_fields,
+                            },
+                        )
+                    ],
+                    context=req.context,
+                )
+                ctx_manager.update_workflow_step(
+                    step.step_id,
+                    status="failed",
+                    response_data=response_data.model_dump(mode="json"),
+                    error_message=error_msg,
+                )
+                return response_data
+
         # Check if manual approval is required
         manual_approval_required = adapter.manual_approval_required
         manual_approval_operations = adapter.manual_approval_operations
 
-        if manual_approval_required and "update_media_buy" in manual_approval_operations:
+        if (
+            manual_approval_required
+            and "update_media_buy" in manual_approval_operations
+            and not bypass_manual_approval
+        ):
             # Store the original request alongside the response so the approval
             # execution path can re-execute the update after human approval.
             # This mirrors create_media_buy's raw_request pattern.
@@ -1207,11 +1273,56 @@ def _update_media_buy_impl(
                     return response_data
 
                 uow.media_buys.update_fields(req.media_buy_id, **update_values)
-                logger.warning(
-                    f"Updated MediaBuy {req.media_buy_id} dates in database ONLY: "
+                logger.info(
+                    f"Updated MediaBuy {req.media_buy_id} dates in database: "
                     f"start_time={update_values.get('start_time')}, end_time={update_values.get('end_time')}"
                 )
-                logger.warning("GAM sync NOT implemented - GAM still has old dates")
+
+                # Sync to the ad server. GAM-only path today: extend to other
+                # adapters as they implement update_order_dates.
+                # The buy must already have a populated gam_order_id (set by
+                # the create_media_buy approval flow); without it there's no
+                # ad-server artifact to update and we just update the DB.
+                if existing_mb.gam_order_id:
+                    try:
+                        # Resolve adapter via the per-call helper. Use a
+                        # locally-scoped name to avoid shadowing the
+                        # module-level ``get_adapter`` import that other
+                        # branches in this function rely on.
+                        from src.core.helpers.adapter_helpers import (
+                            get_adapter as _get_adapter_helper,
+                        )
+
+                        principal_obj = get_principal_object(
+                            existing_mb.principal_id, tenant_id=identity.tenant_id
+                        )
+                        tenant_obj = identity.tenant
+                        if principal_obj and tenant_obj:
+                            adapter = _get_adapter_helper(
+                                principal_obj, dry_run=False, tenant=tenant_obj
+                            )
+                            if hasattr(adapter, "orders_manager") and adapter.orders_manager:
+                                ok = adapter.orders_manager.update_order_dates(
+                                    order_id=existing_mb.gam_order_id,
+                                    start_time=final_start_time,
+                                    end_time=final_end_time,
+                                )
+                                if ok:
+                                    logger.info(
+                                        f"Synced flight dates to GAM Order {existing_mb.gam_order_id}"
+                                    )
+                                else:
+                                    logger.error(
+                                        f"GAM sync FAILED for Order {existing_mb.gam_order_id} — DB and GAM now disagree"
+                                    )
+                            else:
+                                logger.info(
+                                    "Adapter has no orders_manager; flight-date update is DB-only for this adapter"
+                                )
+                    except Exception as exc:
+                        logger.exception(
+                            f"GAM sync raised for Order {existing_mb.gam_order_id}: {exc} — DB updated, GAM unchanged"
+                        )
 
         # Create ObjectWorkflowMapping to link media buy update to workflow step
         # This enables webhook delivery when the update completes
