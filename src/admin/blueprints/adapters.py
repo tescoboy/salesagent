@@ -20,7 +20,7 @@ adapters_bp = Blueprint("adapters", __name__)
 
 
 @adapters_bp.route("/adapters/mock/config/<tenant_id>/<product_id>", methods=["GET", "POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def mock_config(tenant_id, product_id, **kwargs):
     """Configure mock adapter settings for a product."""
     with get_db_session() as session:
@@ -126,7 +126,7 @@ def adapter_adapter_name_inventory_schema(tenant_id, **kwargs):
 
 @adapters_bp.route("/setup_adapter", methods=["POST"])
 @log_admin_action("setup_adapter")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def setup_adapter(tenant_id, **kwargs):
     """TODO: Extract implementation from admin_ui.py."""
     # Placeholder implementation
@@ -135,7 +135,7 @@ def setup_adapter(tenant_id, **kwargs):
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapter-config", methods=["POST"])
 @log_admin_action("update_adapter_config")
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def save_adapter_config(tenant_id, **kwargs):
     """Save adapter connection configuration.
 
@@ -230,7 +230,7 @@ def get_adapter_capabilities(adapter_type, tenant_id, **kwargs):
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/broadstreet/test-connection", methods=["POST"])
-@require_tenant_access()
+@require_tenant_access(role=("admin",))
 def test_broadstreet_connection(tenant_id, **kwargs):
     """Test Broadstreet API connection with provided credentials."""
     try:
