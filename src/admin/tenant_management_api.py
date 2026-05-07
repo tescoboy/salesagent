@@ -166,7 +166,6 @@ def _tenant_to_detail(tenant: Tenant, adapter_configured: bool) -> dict:
         created_at=tenant.created_at,
         contact_email=contact_email,
         default_currency=default_currency,
-        house_domain=tenant.house_domain,
         public_agent_url=tenant.public_agent_url,
         default_gam_advertiser_id=tenant.default_gam_advertiser_id,
         embed_breadcrumb_root=tenant.embed_breadcrumb_root,
@@ -700,7 +699,28 @@ def provision_tenant():
                 details={"tenant_id": existing.tenant_id},
             )
 
-    # Step 2: probe the adapter BEFORE writing anything. A failure here means we never
+    # Step 2a: validate public_agent_url's hostname is a platform-managed
+    # serving host. Embedded provisions all live under the platform's shared
+    # host (interchange.io by default, configurable via
+    # ``EMBEDDED_PLATFORM_AGENT_HOSTS``). Fail closed BEFORE we touch the DB
+    # so a bad URL never ends up persisted.
+    from src.services.aao_lookup_service import (
+        PublicAgentUrlMismatch,
+        validate_public_agent_url_hostname,
+    )
+
+    try:
+        validate_public_agent_url_hostname(
+            req.public_agent_url,
+            is_embedded=True,
+            virtual_host=None,
+            subdomain=None,
+            sales_agent_domain=None,
+        )
+    except PublicAgentUrlMismatch as exc:
+        return _api_error("public_agent_url_mismatch", str(exc), 422)
+
+    # Step 2b: probe the adapter BEFORE writing anything. A failure here means we never
     # touch the DB at all — keeps the table free of half-configured tenants.
     adapter_dict = _adapter_config_to_dict(req.adapter)
     success, error = test_adapter_connection(adapter_dict["type"], adapter_dict)
@@ -734,7 +754,6 @@ def provision_tenant():
             is_embedded=True,
             external_org_id=req.external_org_id,
             external_source=req.external_source,
-            house_domain=req.house_domain,
             public_agent_url=req.public_agent_url,
             default_gam_advertiser_id=req.default_gam_advertiser_id,
             embed_breadcrumb_root=(
@@ -914,9 +933,24 @@ def patch_tenant(tenant_id: str):
             tenant.billing_contact = req.contact_email
         if req.billing_plan is not None:
             tenant.billing_plan = req.billing_plan
-        if req.house_domain is not None:
-            tenant.house_domain = req.house_domain
         if req.public_agent_url is not None:
+            from src.core.domain_config import get_sales_agent_domain
+            from src.services.aao_lookup_service import (
+                PublicAgentUrlMismatch,
+                validate_public_agent_url_hostname,
+            )
+
+            try:
+                validate_public_agent_url_hostname(
+                    req.public_agent_url,
+                    is_embedded=bool(tenant.is_embedded),
+                    virtual_host=tenant.virtual_host,
+                    subdomain=tenant.subdomain,
+                    sales_agent_domain=get_sales_agent_domain(),
+                )
+            except PublicAgentUrlMismatch as exc:
+                session.rollback()
+                return _api_error("public_agent_url_mismatch", str(exc), 422)
             tenant.public_agent_url = req.public_agent_url
         if req.default_gam_advertiser_id is not None:
             tenant.default_gam_advertiser_id = req.default_gam_advertiser_id

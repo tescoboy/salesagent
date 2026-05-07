@@ -182,19 +182,14 @@ class Tenant(Base, JSONValidatorMixin):
         nullable=False,
         server_default=text("false"),
     )
-    # AAO model (sprint 1.7 — see docs/design/replace-authorized-properties-with-aao-lookup.md):
-    # house_domain is where the publisher's brand.json lives; properties are
-    # looked up live from https://{house_domain}/.well-known/brand.json. Replaces
-    # the manually-maintained AuthorizedProperty table for new tenants.
-    house_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # public_agent_url is what publishers list in their adagents.json to
     # authorize this tenant's agent. Embedded-mode tenants share one
     # (https://interchange.io); self-hosted publishers use their own salesagent.
     public_agent_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # Where THIS salesagent operator publishes its own brand.json (under
-    # ``house_domain``, typically ``/.well-known/brand.json``). Surfaced on
+    # Absolute URL of the operator's brand.json (typically
+    # ``https://{operator_domain}/.well-known/brand.json``). Surfaced on
     # ``get_adcp_capabilities → identity.brand_json_url`` so receivers verifying
-    # our outbound signatures resolve through our house_domain.
+    # our outbound signatures can fetch our operator-side keys.
     # See docs/design/signing-non-embedded.md.
     brand_json_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     # Sprint 1.8 buyer-advertiser routing — see
@@ -2267,6 +2262,13 @@ class PublisherPartner(Base, JSONValidatorMixin):
         String(20), nullable=False, default="pending", comment="pending, success, error"
     )
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # AAO status counts — populated by sync_publisher_partners + the per-row
+    # refresh endpoint. Drive the "47 / 200 authorized" UI without re-hitting
+    # AAO on every page render.
+    total_properties: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    authorized_properties: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_fetch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
