@@ -45,6 +45,18 @@ _DEFAULT_PUBLISHER_PROPERTY = {
     "publisher_domain": "test-publisher.com",
 }
 
+# adcp 4.4: Product.reporting_capabilities is required on the wire.  Mirror
+# the column's server_default so unit tests don't have to declare this on
+# every product they construct.
+_DEFAULT_REPORTING_CAPABILITIES = {
+    "available_reporting_frequencies": ["daily"],
+    "expected_delay_minutes": 0,
+    "timezone": "UTC",
+    "supports_webhooks": False,
+    "available_metrics": ["impressions"],
+    "date_range_support": "date_range",
+}
+
 
 def _make_product(
     product_id: str = "prod_001",
@@ -59,6 +71,7 @@ def _make_product(
     delivery_measurement: dict[str, str] | None = None,
     publisher_properties: list[dict[str, Any]] | None = None,
     estimated_exposures: int | None = None,
+    reporting_capabilities: dict[str, Any] | None = None,
     **extra: Any,
 ) -> Product:
     """Build a Product schema instance for unit testing."""
@@ -75,6 +88,7 @@ def _make_product(
         delivery_measurement=delivery_measurement or {"provider": "publisher"},
         publisher_properties=publisher_properties or [_DEFAULT_PUBLISHER_PROPERTY],
         estimated_exposures=estimated_exposures,
+        reporting_capabilities=reporting_capabilities or dict(_DEFAULT_REPORTING_CAPABILITIES),
         **extra,
     )
 

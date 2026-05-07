@@ -338,8 +338,18 @@ class XandrAdapter(AdServerAdapter):
                 PriceGuidance as AdCPPriceGuidance,
             )
             from adcp.types.generated_poc.core.publisher_property_selector import PublisherPropertySelector1
+            from adcp.types.generated_poc.core.reporting_capabilities import ReportingCapabilities
 
             from src.core.schemas import FormatId
+
+            xandr_reporting_capabilities = ReportingCapabilities(
+                available_reporting_frequencies=["daily"],
+                expected_delay_minutes=0,
+                timezone="UTC",
+                supports_webhooks=False,
+                available_metrics=["impressions", "clicks", "spend"],
+                date_range_support="date_range",
+            )
 
             # In Xandr, products map to placement groups or custom deals
             # For now, return standard IAB formats as products
@@ -372,7 +382,7 @@ class XandrAdapter(AdServerAdapter):
                     product_card=None,
                     product_card_detailed=None,
                     placements=None,
-                    reporting_capabilities=None,
+                    reporting_capabilities=xandr_reporting_capabilities,
                 ),
                 Product(
                     product_id="xandr_video_instream",
@@ -401,7 +411,7 @@ class XandrAdapter(AdServerAdapter):
                     product_card=None,
                     product_card_detailed=None,
                     placements=None,
-                    reporting_capabilities=None,
+                    reporting_capabilities=xandr_reporting_capabilities,
                 ),
                 Product(
                     product_id="xandr_native",
@@ -430,7 +440,7 @@ class XandrAdapter(AdServerAdapter):
                     product_card=None,
                     product_card_detailed=None,
                     placements=None,
-                    reporting_capabilities=None,
+                    reporting_capabilities=xandr_reporting_capabilities,
                 ),
                 Product(
                     product_id="xandr_deals",
@@ -460,7 +470,7 @@ class XandrAdapter(AdServerAdapter):
                     product_card=None,
                     product_card_detailed=None,
                     placements=None,
-                    reporting_capabilities=None,
+                    reporting_capabilities=xandr_reporting_capabilities,
                 ),
             ]
 

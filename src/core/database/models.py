@@ -120,9 +120,7 @@ class Tenant(Base, JSONValidatorMixin):
     # for buys in pending_start (warm-up window) and paused — not just active
     # and completed. Lets buyers stop polling for "did my flight start yet?"
     # and "is the pause still in effect?". Default True. See issue #48.
-    report_pre_start_buys: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true")
-    )
+    report_pre_start_buys: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
     # Measurement providers configuration
     # Structure: {"providers": ["Provider 1", "Provider 2"], "default": "Provider 1"}
@@ -366,8 +364,30 @@ class Product(Base, JSONValidatorMixin):
     product_card_detailed: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     # Type hint: list of placement dicts (each with placement_id, name, description, format_ids)
     placements: Mapped[list[dict] | None] = mapped_column(JSONType, nullable=True)
-    # Type hint: reporting capabilities dict
-    reporting_capabilities: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Type hint: reporting capabilities dict (AdCP 4.4: required on wire)
+    # ``default`` populates the attribute on Python-side construction (in-memory
+    # models, factory helpers); ``server_default`` covers DB INSERTs that bypass
+    # the ORM (raw SQL, legacy clients).  Both must agree.
+    reporting_capabilities: Mapped[dict] = mapped_column(
+        JSONType,
+        nullable=False,
+        default=lambda: {
+            "available_reporting_frequencies": ["daily"],
+            "expected_delay_minutes": 0,
+            "timezone": "UTC",
+            "supports_webhooks": False,
+            "available_metrics": ["impressions"],
+            "date_range_support": "date_range",
+        },
+        server_default=text(
+            '\'{"available_reporting_frequencies": ["daily"], '
+            '"expected_delay_minutes": 0, '
+            '"timezone": "UTC", '
+            '"supports_webhooks": false, '
+            '"available_metrics": ["impressions"], '
+            '"date_range_support": "date_range"}\'::jsonb'
+        ),
+    )
 
     # AdCP 3.6.0 product fields
     property_targeting_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

@@ -29,6 +29,17 @@ class ProductFactory(factory.alchemy.SQLAlchemyModelFactory):
     delivery_type = "guaranteed"
     property_tags = factory.LazyFunction(lambda: ["all_inventory"])
     delivery_measurement = factory.LazyFunction(lambda: {"provider": "publisher"})
+    # AdCP 4.4 requires reporting_capabilities. Mirrors the column's server_default.
+    reporting_capabilities = factory.LazyFunction(
+        lambda: {
+            "available_reporting_frequencies": ["daily"],
+            "expected_delay_minutes": 0,
+            "timezone": "UTC",
+            "supports_webhooks": False,
+            "available_metrics": ["impressions"],
+            "date_range_support": "date_range",
+        }
+    )
 
 
 class PricingOptionFactory(factory.alchemy.SQLAlchemyModelFactory):

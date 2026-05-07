@@ -867,6 +867,19 @@ def create_test_db_product(
     if targeting_template is None:
         targeting_template = {}
 
+    # AdCP 4.4 requires reporting_capabilities. Production INSERTs use the
+    # column's server_default, but in-memory ORM construction (unit tests)
+    # bypasses the DB so we set the same baseline here.
+    if "reporting_capabilities" not in kwargs:
+        kwargs["reporting_capabilities"] = {
+            "available_reporting_frequencies": ["daily"],
+            "expected_delay_minutes": 0,
+            "timezone": "UTC",
+            "supports_webhooks": False,
+            "available_metrics": ["impressions"],
+            "date_range_support": "date_range",
+        }
+
     return DBProduct(
         tenant_id=tenant_id,
         product_id=product_id,
