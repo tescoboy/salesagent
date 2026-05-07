@@ -19,6 +19,29 @@ def generate_buyer_ref(prefix: str = "test") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
+def _build_reporting_webhook(url: str, reporting_frequency: str | None = None) -> dict[str, Any]:
+    """Build a 4.4-compliant ``ReportingWebhook`` block.
+
+    AdCP 4.4 made ``authentication.schemes`` and ``authentication.credentials``
+    required (Bearer or HMAC-SHA256, credentials min length 32). The
+    ``{"type": "none"}`` shape was rejected by SDK validation in 4.4.
+
+    Returns the inner block — callers wrap it under
+    ``push_notification_config`` (e.g. update_media_buy) or
+    ``reporting_webhook`` (e.g. create_media_buy) per spec naming.
+    """
+    block: dict[str, Any] = {
+        "url": url,
+        "authentication": {
+            "credentials": "test-webhook-bearer-token-at-least-32-chars-long",
+            "schemes": ["Bearer"],
+        },
+    }
+    if reporting_frequency is not None:
+        block["reporting_frequency"] = reporting_frequency
+    return block
+
+
 def _inject_wire_required_fields(
     request: dict[str, Any],
     *,
@@ -154,17 +177,9 @@ def build_adcp_media_buy_request(
         request["packages"][0]["targeting_overlay"] = targeting_overlay
 
     if webhook_url:
-        # AdCP-compliant ReportingWebhook authentication requires:
-        # - credentials: string with minLength 32 (shared secret or bearer token)
-        # - schemes: array of authentication schemes ["Bearer" or "HMAC-SHA256"]
-        request["reporting_webhook"] = {
-            "url": webhook_url,
-            "reporting_frequency": reporting_frequency,
-            "authentication": {
-                "credentials": "test-webhook-bearer-token-at-least-32-chars-long",
-                "schemes": ["Bearer"],
-            },
-        }
+        request["reporting_webhook"] = _build_reporting_webhook(
+            webhook_url, reporting_frequency=reporting_frequency
+        )
 
     if context:
         request["context"] = context
@@ -239,10 +254,7 @@ def build_sync_creatives_request(
         request["creative_ids"] = creative_ids
 
     if webhook_url:
-        request["push_notification_config"] = {
-            "url": webhook_url,
-            "authentication": {"type": "none"},
-        }
+        request["push_notification_config"] = _build_reporting_webhook(webhook_url)
 
     return request
 
@@ -343,10 +355,7 @@ def build_update_media_buy_request(
     if packages is not None:
         request["packages"] = packages
     if webhook_url:
-        request["push_notification_config"] = {
-            "url": webhook_url,
-            "authentication": {"type": "none"},
-        }
+        request["push_notification_config"] = _build_reporting_webhook(webhook_url)
     if context is not None:
         request["context"] = context
 

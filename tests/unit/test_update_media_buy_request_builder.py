@@ -13,6 +13,7 @@ breakages get caught before the slow e2e suite even starts.
 from __future__ import annotations
 
 from tests.e2e.adcp_request_builder import (
+    _build_reporting_webhook,
     _inject_wire_required_fields,
     build_adcp_media_buy_request,
     build_update_media_buy_request,
@@ -75,14 +76,18 @@ def test_optional_fields_only_present_when_passed():
 
 
 def test_passes_webhook_with_correct_authentication_shape():
+    """AdCP 4.4 Authentication requires ``schemes`` (Bearer or HMAC-SHA256)
+    and ``credentials`` (min length 32). The legacy ``{"type": "none"}``
+    shape was rejected by SDK validation post-4.4."""
     req = build_update_media_buy_request(
         media_buy_id="mb_test",
         webhook_url="https://example.com/cb",
     )
     pnc = req["push_notification_config"]
     assert pnc["url"] == "https://example.com/cb"
-    # AdCP 4.4 ReportingWebhook authentication: type=none is the simplest valid form.
-    assert pnc["authentication"] == {"type": "none"}
+    auth = pnc["authentication"]
+    assert auth["schemes"] == ["Bearer"]
+    assert isinstance(auth["credentials"], str) and len(auth["credentials"]) >= 32
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +111,25 @@ def test_helper_falls_back_to_default_brand_when_brand_is_none():
     _inject_wire_required_fields(request, brand=None, idempotency_prefix="x")
     assert request["account"]["brand"] == {"domain": "testbrand.com"}
     assert request["account"]["operator"] == "testbrand.com"
+
+
+def test_helper_build_reporting_webhook_is_4_4_compliant():
+    """``_build_reporting_webhook`` must produce a dict that satisfies
+    AdCP 4.4's Authentication schema: ``schemes`` array of size 1 with
+    Bearer/HMAC-SHA256, ``credentials`` of length >= 32."""
+    block = _build_reporting_webhook("https://example.com/cb")
+    assert block["url"] == "https://example.com/cb"
+    auth = block["authentication"]
+    assert auth["schemes"] == ["Bearer"]
+    assert len(auth["credentials"]) >= 32
+    # ``reporting_frequency`` is opt-in (only relevant on
+    # create_media_buy.reporting_webhook, not update.push_notification_config).
+    assert "reporting_frequency" not in block
+
+
+def test_helper_build_reporting_webhook_includes_frequency_when_supplied():
+    block = _build_reporting_webhook("https://example.com/cb", reporting_frequency="daily")
+    assert block["reporting_frequency"] == "daily"
 
 
 def test_create_and_update_builders_use_consistent_account_shape():
