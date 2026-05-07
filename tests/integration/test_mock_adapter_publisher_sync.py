@@ -8,7 +8,6 @@ verified publishers but no properties, causing the product creation UI
 to show empty property/tag lists.
 """
 
-import os
 from contextlib import contextmanager
 
 import pytest
@@ -29,24 +28,18 @@ from src.core.database.models import (
 def _authorized_request_context(app):
     """Yield a Flask test request context that satisfies @require_tenant_access.
 
-    Sets ADCP_AUTH_TEST_MODE + super_admin session state so the decorator's
-    test-mode bypass at src/admin/utils/helpers.py:481 grants access.
-    Otherwise the route returns ``(jsonify(error), 401)`` and the tests'
-    ``response.get_json()`` chokes on the tuple.
+    The decorator's test-mode bypass at src/admin/utils/helpers.py:475-482
+    activates when ``test_user`` is in session AND either
+    ``ADCP_AUTH_TEST_MODE`` is set OR the tenant has
+    ``auth_setup_mode=True``. The fixture in this module sets
+    ``auth_setup_mode=True``, so the test-mode session keys alone are
+    enough — no env-var mutation needed (avoids cross-test leakage).
     """
-    prior_test_mode = os.environ.get("ADCP_AUTH_TEST_MODE")
-    os.environ["ADCP_AUTH_TEST_MODE"] = "true"
-    try:
-        with app.test_request_context():
-            session["test_user"] = "test@example.com"
-            session["test_user_role"] = "super_admin"
-            session["test_user_name"] = "Test Admin"
-            yield
-    finally:
-        if prior_test_mode is None:
-            os.environ.pop("ADCP_AUTH_TEST_MODE", None)
-        else:
-            os.environ["ADCP_AUTH_TEST_MODE"] = prior_test_mode
+    with app.test_request_context():
+        session["test_user"] = "test@example.com"
+        session["test_user_role"] = "super_admin"
+        session["test_user_name"] = "Test Admin"
+        yield
 
 
 @pytest.mark.requires_db
@@ -66,6 +59,10 @@ class TestMockAdapterPublisherSync:
                 subdomain="test-mock-sync",
                 ad_server="mock",
                 authorized_emails=["test@example.com"],
+                # Per-tenant test-mode flag — lets _authorized_request_context()
+                # satisfy @require_tenant_access without mutating the global
+                # ADCP_AUTH_TEST_MODE env var (which would leak across tests).
+                auth_setup_mode=True,
                 created_at=datetime.now(UTC),
                 updated_at=datetime.now(UTC),
             )
