@@ -31,7 +31,6 @@ the existing salesagent ``MediaBuy`` ORM.
 from __future__ import annotations
 
 import secrets
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -53,10 +52,12 @@ from adcp.decisioning.capabilities import (
 
 from core.idempotency import get_idempotency_store
 from core.platforms._delegate import (
+    _delegate_get_media_buy_delivery,
     _delegate_get_products,
     _delegate_list_creative_formats,
     _delegate_list_creatives,
     _delegate_provide_performance_feedback,
+    _delegate_sync_creatives,
 )
 from core.stores.accounts import SalesagentAccountStore
 
@@ -294,7 +295,16 @@ class MockSellerPlatform(DecisioningPlatform):
                 record["valid_actions"] = _valid_actions_for("pending_start")
 
         record["updated_at"] = datetime.now(UTC).isoformat()
-        return _project_media_buy(record)
+        # AdCP spec: response.context echoes THIS request's context, not
+        # the record's stored (create-time) context. ``_project_media_buy``
+        # carries ``record["context"]`` through for ``get_media_buys`` /
+        # ``create_media_buy`` returns; for ``update_media_buy`` we drop
+        # it so the SDK's :func:`adcp.server.helpers.inject_context` fills
+        # the buyer's update-call context from ``raw_params`` instead.
+        # Without this, every update echoes the create's context — see #95.
+        projected = _project_media_buy(record)
+        projected.pop("context", None)
+        return projected
 
     # ─────────────────────────── sync_creatives ──────────────────────
 
@@ -302,25 +312,9 @@ class MockSellerPlatform(DecisioningPlatform):
     async def sync_creatives(
         self,
         req: Any,
-        ctx: RequestContext[Any],  # noqa: ARG002 — ctx unused in stub
+        ctx: RequestContext[Any],
     ) -> dict[str, Any]:
-        creatives = getattr(req, "creatives", None) or []
-        # Per sync-creatives-response.json each entry needs ``action``
-        # (created | updated | unchanged) plus ``status`` from the
-        # creative-status enum (processing, pending_review, approved,
-        # rejected, archived).
-        return {
-            "creatives": [
-                {
-                    "creative_id": (
-                        c.creative_id if hasattr(c, "creative_id") else c.get("creative_id") or _new_creative_id()
-                    ),
-                    "action": "created",
-                    "status": "approved",
-                }
-                for c in creatives
-            ],
-        }
+        return await _delegate_sync_creatives(req, ctx)
 
     # ─────────────────────────── get_media_buys ──────────────────────
 
@@ -348,26 +342,12 @@ class MockSellerPlatform(DecisioningPlatform):
 
     # ─────────────────────────── get_media_buy_delivery ──────────────
 
-    def get_media_buy_delivery(
+    async def get_media_buy_delivery(
         self,
         req: Any,
-        ctx: RequestContext[Any],  # noqa: ARG002 — ctx unused in stub
+        ctx: RequestContext[Any],
     ) -> dict[str, Any]:
-        ids = list(getattr(req, "media_buy_ids", None) or [])
-        if not ids and isinstance(req, dict):
-            ids = list(req.get("media_buy_ids") or [])
-        if not ids:
-            ids = [getattr(req, "media_buy_id", None) or "mb_unknown"]
-
-        return {
-            "media_buy_deliveries": [
-                {
-                    "media_buy_id": mb_id,
-                    "totals": {"impressions": 0, "spend": 0.0},
-                }
-                for mb_id in ids
-            ],
-        }
+        return await _delegate_get_media_buy_delivery(req, ctx)
 
     # ───────────────────── v6.0-rc.1 SalesPlatform Protocol methods ────
     # These were soft-warned as missing because MockSellerPlatform didn't
@@ -538,10 +518,6 @@ def _project_package(p: dict[str, Any]) -> dict[str, Any]:
     if p.get("targeting_overlay") is not None:
         out["targeting_overlay"] = p["targeting_overlay"]
     return out
-
-
-def _new_creative_id() -> str:
-    return f"creative_{uuid.uuid4().hex[:12]}"
 
 
 def _adcp_error(

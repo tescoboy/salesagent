@@ -239,30 +239,24 @@ def preview_tenant(integration_db):
         PropertyTag,
     )
     from tests.factories import TenantFactory
+    from tests.helpers.managed_tenant_api import bind_factories_to_session
 
     tid = f"t_prev_{uuid.uuid4().hex[:8]}"
     org_id = f"org_{uuid.uuid4().hex[:8]}"
-    with get_db_session() as session:
-        # Bind the factory to this session so the auto-created CurrencyLimit
-        # cascades into the same transaction.
-        saved = (
-            TenantFactory._meta.sqlalchemy_session,
-            TenantFactory._meta.sqlalchemy_session_persistence,
+    # bind_factories_to_session binds every factory in ALL_FACTORIES so the
+    # RelatedFactory(CurrencyLimitFactory) cascade on TenantFactory has a
+    # session too — binding only TenantFactory left the cascaded child
+    # without a session and raised "No session provided." on every test
+    # in this fixture's class.
+    with bind_factories_to_session():
+        TenantFactory(
+            tenant_id=tid,
+            name="Preview Tenant",
+            subdomain=tid,
+            is_embedded=False,
+            external_org_id=org_id,
+            external_source="scope3",
         )
-        TenantFactory._meta.sqlalchemy_session = session
-        TenantFactory._meta.sqlalchemy_session_persistence = "commit"
-        try:
-            TenantFactory(
-                tenant_id=tid,
-                name="Preview Tenant",
-                subdomain=tid,
-                is_embedded=False,
-                external_org_id=org_id,
-                external_source="scope3",
-            )
-        finally:
-            TenantFactory._meta.sqlalchemy_session = saved[0]
-            TenantFactory._meta.sqlalchemy_session_persistence = saved[1]
     yield {"tenant_id": tid, "external_org_id": org_id}
     with get_db_session() as session:
         for model in (AdapterConfig, CurrencyLimit, PropertyTag, Principal):

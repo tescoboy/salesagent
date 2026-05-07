@@ -1,7 +1,9 @@
 """Blueprint for managing publisher partnerships."""
 
 import asyncio
+import ipaddress
 import logging
+import re
 from datetime import UTC, datetime
 
 from adcp.adagents import (
@@ -14,17 +16,53 @@ from adcp.exceptions import AdagentsNotFoundError, AdagentsTimeoutError, Adagent
 from flask import Blueprint, Response, jsonify, request
 from sqlalchemy import select
 
+from src.admin.utils import require_tenant_access
 from src.core.config import get_config
 from src.core.database.database_session import get_db_session
 from src.core.database.models import PublisherPartner, Tenant
 from src.core.domain_config import get_tenant_url
+from src.core.security.url_validator import BLOCKED_HOSTNAMES, check_url_ssrf
 
 logger = logging.getLogger(__name__)
 
 publisher_partners_bp = Blueprint("publisher_partners", __name__)
 
 
+# RFC 1035-ish — each label up to 63 chars, total up to 253. Conservative
+# subset of the spec (ASCII, no underscores, no leading/trailing hyphens).
+# Real publisher domains all match this; the regex doubles as an SSRF gate
+# by rejecting non-hostname strings before they reach any outbound call.
+_DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+
+def _validate_publisher_domain(domain: str) -> tuple[bool, str]:
+    """Format-only validation for publisher_domain at create time.
+
+    Rejects IP literals, localhost-likes, Docker-internal hostnames, and
+    structurally-malformed strings. Does NOT do DNS resolution — a brand-
+    new publisher domain may not resolve yet but should still be acceptable
+    to register; the DNS-time SSRF check fires inside ``check_publisher``
+    before the actual outbound HTTP call.
+
+    Returns ``(is_safe, error_message)``.
+    """
+    if not domain or len(domain) > 253:
+        return False, "Publisher domain must be 1-253 characters"
+    if domain in BLOCKED_HOSTNAMES:
+        return False, f"Publisher domain '{domain}' is blocked (internal/private)"
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        return False, "Publisher domain must be a hostname, not an IP address"
+    if not _DOMAIN_RE.match(domain):
+        return False, "Publisher domain has invalid format"
+    return True, ""
+
+
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners", methods=["GET"])
+@require_tenant_access(api_mode=True)
 def list_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
     """List all publisher partners for a tenant."""
     try:
@@ -85,6 +123,7 @@ def list_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
 
 
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners", methods=["POST"])
+@require_tenant_access(api_mode=True)
 def add_publisher_partner(tenant_id: str) -> Response | tuple[Response, int]:
     """Add a new publisher partner."""
     try:
@@ -99,6 +138,13 @@ def add_publisher_partner(tenant_id: str) -> Response | tuple[Response, int]:
         publisher_domain = publisher_domain.replace("https://", "").replace("http://", "")
         # Remove trailing slash
         publisher_domain = publisher_domain.rstrip("/")
+
+        # SSRF gate at the boundary — IP literals, localhost-likes, malformed
+        # strings can't be persisted, so downstream callers (sync, property
+        # discovery) never see them. See ``_validate_publisher_domain``.
+        ok, err = _validate_publisher_domain(publisher_domain)
+        if not ok:
+            return jsonify({"error": err}), 400
 
         with get_db_session() as session:
             # Check tenant adapter type
@@ -164,6 +210,7 @@ def add_publisher_partner(tenant_id: str) -> Response | tuple[Response, int]:
 
 
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners/<int:partner_id>", methods=["DELETE"])
+@require_tenant_access(api_mode=True)
 def delete_publisher_partner(tenant_id: str, partner_id: int) -> Response | tuple[Response, int]:
     """Delete a publisher partner."""
     try:
@@ -185,6 +232,7 @@ def delete_publisher_partner(tenant_id: str, partner_id: int) -> Response | tupl
 
 
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners/sync", methods=["POST"])
+@require_tenant_access(api_mode=True)
 def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
     """Sync verification status for all publisher partners."""
     try:
@@ -347,6 +395,22 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
             async def check_publisher(domain: str) -> tuple[str, dict]:
                 """Check a single publisher and return status."""
                 try:
+                    # DNS-time SSRF check — defense in depth on top of the
+                    # create-time format gate. Catches a domain whose
+                    # resolution flips to a private/loopback/metadata IP
+                    # *after* it was registered. Refuse to make the
+                    # outbound call if the resolved IP is unsafe.
+                    ssrf_ok, ssrf_err = check_url_ssrf(f"https://{domain}")
+                    if not ssrf_ok:
+                        return (
+                            domain,
+                            {
+                                "status": "error",
+                                "is_verified": False,
+                                "error": f"Refused to sync {domain}: {ssrf_err}",
+                            },
+                        )
+
                     # Fetch adagents.json
                     adagents_data = await fetch_adagents(domain, timeout=10.0)
 
@@ -473,6 +537,7 @@ def sync_publisher_partners(tenant_id: str) -> Response | tuple[Response, int]:
 
 
 @publisher_partners_bp.route("/<tenant_id>/publisher-partners/<int:partner_id>/properties", methods=["GET"])
+@require_tenant_access(api_mode=True)
 def get_publisher_properties(tenant_id: str, partner_id: int) -> Response | tuple[Response, int]:
     """Get properties for a specific publisher (fetched fresh from adagents.json)."""
     try:
