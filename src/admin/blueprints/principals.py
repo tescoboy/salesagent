@@ -245,12 +245,17 @@ def create_principal(tenant_id):
                 flash(f"An advertiser named '{principal_name}' already exists", "error")
                 return redirect(request.url)
 
-            # Optional signing config — empty agent_url means bearer-only auth
+            # Optional signing config. brand_domain is the trust anchor
+            # (operator-typed buyer domain); the verifier walks
+            # https://<brand_domain>/.well-known/brand.json on every signed
+            # request via BrandJsonJwksResolver. agent_url is informational
+            # (audit-log stamping); rotation in brand.json propagates without
+            # operator action.
+            brand_domain = (request.form.get("brand_domain", "") or "").strip() or None
             agent_url = (request.form.get("agent_url", "") or "").strip() or None
-            jwks_uri = (request.form.get("jwks_uri", "") or "").strip() or None
             signing_required = bool(request.form.get("signing_required"))
-            if signing_required and not agent_url:
-                flash("Cannot require signed requests without an Agent URL", "error")
+            if signing_required and not brand_domain:
+                flash("Cannot require signed requests without a buyer domain", "error")
                 return redirect(request.url)
 
             # Strict-admit guard: a brand-new principal cannot start with
@@ -275,7 +280,7 @@ def create_principal(tenant_id):
                 access_token=access_token,
                 platform_mappings=platform_mappings,  # JSONType handles serialization
                 agent_url=agent_url,
-                jwks_uri=jwks_uri,
+                brand_domain=brand_domain,
                 signing_required=signing_required,
                 created_at=datetime.now(UTC),
                 updated_at=datetime.now(UTC),
@@ -369,34 +374,43 @@ def edit_principal(tenant_id, principal_id):
             # principal — a downstream validation failure must not partially
             # save a strict-admit flip.
 
-            # Signing config
+            # Signing config. brand_domain is the trust anchor; agent_url is
+            # informational. The verifier walks brand.json on every request,
+            # so agent_url rotation in brand.json doesn't need operator
+            # action — only brand_domain change resets evidence.
+            brand_domain = (request.form.get("brand_domain", "") or "").strip() or None
             agent_url = (request.form.get("agent_url", "") or "").strip() or None
-            jwks_uri = (request.form.get("jwks_uri", "") or "").strip() or None
             signing_required = bool(request.form.get("signing_required"))
-            if signing_required and not agent_url:
-                flash("Cannot require signed requests without an Agent URL", "error")
+            if signing_required and not brand_domain:
+                flash("Cannot require signed requests without a buyer domain", "error")
                 return redirect(request.url)
 
-            # Reset the verification snapshot when agent_url or jwks_uri
-            # changes — past verifications were against a different identity
-            # and must not satisfy the strict-admit guard for the new config
-            # (security review H3).
-            url_changed = (agent_url != principal.agent_url) or (jwks_uri != principal.jwks_uri)
-            if url_changed:
+            # Reset the verification snapshot when brand_domain changes —
+            # past verifications were against a different trust root and
+            # must not satisfy the strict-admit guard for the new config.
+            # agent_url change does NOT reset; the verifier walks brand.json
+            # so agent_url rotation is handled automatically by the library.
+            brand_changed = brand_domain != principal.brand_domain
+            if brand_changed:
                 principal.last_signed_verified_at = None
+                # Drop the cached BrandJsonJwksResolver so the next verify
+                # walks the new trust root rather than the stale snapshot.
+                from src.core.signing import get_buyer_agent_jwks_cache
 
-            # Strict-admit guard: don't let the operator flip signing_required
-            # to true unless we've actually verified at least one signed
-            # request from THIS principal AT THIS agent_url. Reading the
-            # cached column means the check is a single field lookup, and
-            # it's already been zeroed above if URLs changed in this submit.
+                get_buyer_agent_jwks_cache().invalidate(tenant_id, principal_id)
+
+            # Strict-admit guard: refuse to flip signing_required=true unless
+            # a signed request from THIS principal under the CURRENT
+            # brand_domain has been verified. The cached column is reset
+            # above on brand_domain change, so stale evidence can't satisfy
+            # the guard for a new trust root.
             if signing_required and not principal.signing_required:
                 if principal.last_signed_verified_at is None:
                     flash(
                         "Refusing to require signed requests: no signed request from "
-                        "this buyer has been verified at the current agent URL yet. "
-                        "Ask the buyer to send a signed request first; this page will "
-                        "show 🟢 once it lands.",
+                        "this buyer has been verified under the current brand domain "
+                        "yet. Ask the buyer to send a signed request first; this page "
+                        "will show 🟢 once it lands.",
                         "error",
                     )
                     return redirect(request.url)
@@ -428,7 +442,7 @@ def edit_principal(tenant_id, principal_id):
             principal.platform_mappings = new_mappings
 
             principal.agent_url = agent_url
-            principal.jwks_uri = jwks_uri
+            principal.brand_domain = brand_domain
             principal.signing_required = signing_required
 
             principal.updated_at = datetime.now(UTC)

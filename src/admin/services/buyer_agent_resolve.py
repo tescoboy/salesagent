@@ -170,13 +170,25 @@ def _ssrf_check(host: str) -> str:
     return addrs[0]
 
 
-def _fetch_jwks(jwks_uri: str) -> list[dict[str, str]]:
-    """Fetch + parse a JWKS document, enforcing SSRF / size / redirect caps.
+def _fetch_jwks(jwks_uri: str, *, domain: str) -> list[dict[str, str]]:
+    """Fetch + parse a JWKS document, enforcing SSRF / size / redirect caps
+    AND cross-domain on every redirect hop.
+
+    Uses :func:`adcp.signing.ip_pinned_transport.build_ip_pinned_transport`
+    so the IP we SSRF-checked is the IP we connect to (closes the
+    DNS-rebind window between resolve-time check and connect-time resolve).
+
+    ``domain`` is the operator-typed buyer domain. Every redirect target
+    must be on or under it — without this, a redirect from
+    ``jwks.buyer.com`` → ``victim.com/jwks.json`` would slip past the
+    initial cross-domain enforcement at the call site.
 
     Returns ``[{kid, alg}, ...]`` summary; raises :class:`ResolveError` on
     anything that prevents a clean parse. Streams the body so the size cap
     aborts the transfer before buffering exceeds the limit.
     """
+    from adcp.signing.ip_pinned_transport import build_ip_pinned_transport
+
     seen: set[str] = set()
     current = jwks_uri
     for _ in range(JWKS_MAX_REDIRECTS + 1):
@@ -188,9 +200,14 @@ def _fetch_jwks(jwks_uri: str) -> list[dict[str, str]]:
             raise ResolveError(f"jwks_uri must be https:// (got {parts.scheme!r})")
         if not parts.hostname:
             raise ResolveError("jwks_uri has no hostname")
-        _ssrf_check(parts.hostname)
+        if not _is_same_or_subdomain(parts.hostname, domain):
+            raise ResolveError(f"jwks redirect target {parts.hostname!r} is not on or under {domain!r}")
+        # SSRF-checked + IP-pinned: build_ip_pinned_transport resolves once,
+        # rejects private/loopback, and pins the connection so DNS rebinding
+        # between SSRF check and connect can't redirect us into RFC1918.
+        transport = build_ip_pinned_transport(current, allow_private=False)
 
-        with httpx.Client(timeout=JWKS_FETCH_TIMEOUT_SECONDS, follow_redirects=False) as client:
+        with httpx.Client(transport=transport, timeout=JWKS_FETCH_TIMEOUT_SECONDS, follow_redirects=False) as client:
             with client.stream("GET", current) as resp:
                 if resp.status_code in (301, 302, 303, 307, 308):
                     loc = resp.headers.get("location")
@@ -294,9 +311,10 @@ def resolve_domain(raw_domain: str) -> ResolveResult:
     # (operator can edit the name field before saving).
     result.name = domain
 
-    # JWKS reachability + alg readiness check
+    # JWKS reachability + alg readiness check (IP-pinned + per-hop
+    # cross-domain enforcement on redirects, see _fetch_jwks docstring).
     try:
-        keys = _fetch_jwks(jwks_uri)
+        keys = _fetch_jwks(jwks_uri, domain=domain)
     except ResolveError as exc:
         result.checks.append(CheckResult("jwks.fetched", False, str(exc)))
         # brand.json was valid, JWKS just isn't ready — operator can still

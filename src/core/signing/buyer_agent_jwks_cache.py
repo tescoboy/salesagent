@@ -1,14 +1,27 @@
-"""Per-buyer-agent JWKS cache.
+"""Per-buyer-agent brand.json resolver cache.
 
-Each :class:`Principal` carries ``agent_url`` and (optionally) ``jwks_uri``,
-both resolved at admit time from the buyer's brand.json. The verifier picks
-``jwks_uri`` when set; otherwise falls back to the same-origin convention
-``<agent_url>/.well-known/jwks.json``. We cache
-:class:`adcp.signing.CachingJwksResolver` keyed by JWKS URI so concurrent
-verifies share one cached JWK set + TTL refresh.
+Each :class:`Principal` carries a ``brand_domain`` (operator-typed buyer
+domain — the trust anchor) that points at
+``https://<brand_domain>/.well-known/brand.json``. The verifier looks up
+JWKS by walking that brand.json via :class:`adcp.signing.BrandJsonJwksResolver`,
+which handles:
 
-The lib does the heavy lifting (TTL, SSRF validation via IP-pinned transport,
-unknown-kid refresh). We just memoize the resolver instance.
+* Cooldown-respecting brand.json re-walks (default 1h, honors counterparty
+  ``Cache-Control``)
+* Unknown-kid cascade: when the verifier asks for a kid the resolver hasn't
+  seen, the resolver re-fetches brand.json + JWKS rather than returning
+  ``None`` and forcing operator intervention
+* IP-pinned transport (DNS-rebinding-safe)
+* Same-origin guard on the implicit ``jwks_uri`` fallback
+
+We cache one resolver instance per ``(tenant_id, principal_id)`` so concurrent
+verifies on the same principal share the cooldown window + JWK set without
+re-walking brand.json from scratch.
+
+This replaces the prior model where we stored ``jwks_uri`` as a column and
+constructed a :class:`CachingJwksResolver` directly — that bypassed the
+library's brand.json-walk semantics, so a buyer rotating ``jwks_uri`` in
+their brand.json would never propagate without manual operator re-resolve.
 """
 
 from __future__ import annotations
@@ -17,7 +30,7 @@ import asyncio
 import os
 from typing import TYPE_CHECKING
 
-from adcp.signing import CachingJwksResolver
+from adcp.signing.brand_jwks import BrandJsonJwksResolver
 
 if TYPE_CHECKING:
     pass
@@ -32,42 +45,49 @@ def _allow_private_destinations() -> bool:
     return False
 
 
-def default_jwks_uri_for_agent(agent_url: str) -> str:
-    """Same-origin fallback when the buyer's brand.json didn't declare an
-    explicit ``jwks_uri``. Mirrors :func:`adcp.signing.brand_jwks._default_jwks_uri`.
-    """
-    base = agent_url.rstrip("/")
-    return f"{base}/.well-known/jwks.json"
+def brand_json_url_for(brand_domain: str) -> str:
+    """Convention: each buyer publishes brand.json at the well-known path on
+    their typed domain. This is the trust-root URL the resolver walks."""
+    return f"https://{brand_domain.strip('/')}/.well-known/brand.json"
 
 
 class BuyerAgentJwksCache:
-    """Process-singleton cache of :class:`CachingJwksResolver` per JWKS URI."""
+    """Process-singleton cache of :class:`BrandJsonJwksResolver` per
+    ``(tenant_id, principal_id)``.
+
+    Library resolvers are async + designed to be long-lived: their internal
+    snapshot/cooldown/unknown-kid-cascade only works correctly when the same
+    instance is reused across requests. Memoize per-principal so we don't
+    construct one per verify.
+    """
 
     def __init__(self) -> None:
-        self._resolvers: dict[str, CachingJwksResolver] = {}
+        self._resolvers: dict[tuple[str, str], BrandJsonJwksResolver] = {}
         self._lock = asyncio.Lock()
 
-    def resolver_for(self, agent_url: str, jwks_uri: str | None = None) -> CachingJwksResolver:
-        """Return the cached resolver for the given JWKS URI.
+    def resolver_for(self, tenant_id: str, principal_id: str, brand_domain: str) -> BrandJsonJwksResolver:
+        """Return the cached resolver. Lazy-construct on first use.
 
-        ``jwks_uri`` is the column stored on Principal at admit time (resolved
-        from brand.json). When ``None`` we fall back to the same-origin
-        convention ``<agent_url>/.well-known/jwks.json``.
-
-        Sync (no await) — :class:`CachingJwksResolver` is sync; we don't need
-        the lib's async chain walker. The verifier itself is sync, so passing
-        a sync resolver into ``VerifyOptions`` is exactly the right shape.
+        ``brand_domain`` is the operator-typed buyer domain. The library's
+        :class:`BrandJsonJwksResolver` walks ``https://<brand_domain>/.well-known/brand.json``
+        and selects the buyer-protocol agent (``agent_type="buying"``).
         """
-        target = jwks_uri or default_jwks_uri_for_agent(agent_url)
-        cached = self._resolvers.get(target)
+        key = (tenant_id, principal_id)
+        cached = self._resolvers.get(key)
         if cached is not None:
             return cached
-        resolver = CachingJwksResolver(
-            jwks_uri=target,
-            allow_private=_allow_private_destinations(),
+        resolver = BrandJsonJwksResolver(
+            brand_json_url=brand_json_url_for(brand_domain),
+            agent_type="buying",
+            allow_private_destinations=_allow_private_destinations(),
         )
-        self._resolvers[target] = resolver
+        self._resolvers[key] = resolver
         return resolver
+
+    def invalidate(self, tenant_id: str, principal_id: str) -> None:
+        """Drop the cached resolver — call when the operator changes
+        ``brand_domain`` so the next verify picks up the new trust root."""
+        self._resolvers.pop((tenant_id, principal_id), None)
 
     def clear(self) -> None:
         """Drop all cached resolvers — primarily for tests."""

@@ -53,7 +53,7 @@ def upgrade() -> None:
     )
     op.add_column(
         "principals",
-        sa.Column("jwks_uri", sa.String(length=2048), nullable=True),
+        sa.Column("brand_domain", sa.String(length=253), nullable=True),
     )
     op.add_column(
         "principals",
@@ -188,7 +188,7 @@ def downgrade() -> None:
     op.drop_index("idx_principals_agent_url", table_name="principals")
     op.drop_column("principals", "last_signed_verified_at")
     op.drop_column("principals", "signing_required")
-    op.drop_column("principals", "jwks_uri")
+    op.drop_column("principals", "brand_domain")
     op.drop_column("principals", "agent_url")
 
 

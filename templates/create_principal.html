@@ -105,19 +105,19 @@
             <legend style="padding: 0 var(--sa-space-2); font-weight: 600;">Request signing</legend>
 
             <div class="form-group">
-                <label for="agent_url">Agent URL</label>
-                <input type="url" id="agent_url" name="agent_url"
-                       placeholder="https://buyer.example.com"
-                       value="{{ principal.agent_url if edit_mode and principal.agent_url else '' }}">
-                <small>Resolved from the buyer's <code>brand.json</code>. Leave blank for bearer-token auth (legacy).</small>
+                <label for="brand_domain">Buyer domain</label>
+                <input type="text" id="brand_domain" name="brand_domain"
+                       placeholder="e.g., interchange.io"
+                       value="{{ principal.brand_domain if edit_mode and principal.brand_domain else '' }}">
+                <small>The trust anchor. The verifier walks <code>https://&lt;buyer-domain&gt;/.well-known/brand.json</code> to discover keys + agent URL on every signed request, so rotation propagates without operator action. Leave blank for bearer-token auth (legacy).</small>
             </div>
 
             <div class="form-group" style="margin-top: var(--sa-space-3);">
-                <label for="jwks_uri">JWKS URI <span style="color: var(--sa-text-muted); font-weight: normal;">(optional)</span></label>
-                <input type="url" id="jwks_uri" name="jwks_uri"
-                       placeholder="leave blank for &lt;agent_url&gt;/.well-known/jwks.json"
-                       value="{{ principal.jwks_uri if edit_mode and principal.jwks_uri else '' }}">
-                <small>Defaults to the same-origin convention. Auto-filled from <code>brand.json</code> when the buyer publishes a separate keys host.</small>
+                <label for="agent_url">Agent URL <span style="color: var(--sa-text-muted); font-weight: normal;">(informational)</span></label>
+                <input type="url" id="agent_url" name="agent_url"
+                       placeholder="auto-filled from brand.json"
+                       value="{{ principal.agent_url if edit_mode and principal.agent_url else '' }}">
+                <small>Display-only — captured at admit time for audit logs. The verifier doesn't depend on this; brand.json rotation handles agent URL changes automatically.</small>
             </div>
 
             <div class="form-group" style="margin-top: var(--sa-space-3);">
@@ -126,7 +126,7 @@
                            {{ 'checked' if edit_mode and principal.signing_required else '' }}>
                     <span>Require signed requests (reject unsigned requests from this agent)</span>
                 </label>
-                <small style="display: block; margin-top: var(--sa-space-1);">Only enforced when Agent URL is set. Cannot be enabled until the buyer's first signed request has been verified.</small>
+                <small style="display: block; margin-top: var(--sa-space-1);">Only enforced when Buyer Domain is set. Cannot be enabled until the buyer's first signed request has been verified under the current domain.</small>
             </div>
         </fieldset>
 
@@ -201,7 +201,7 @@ input:invalid { border-color: var(--sa-danger); }
     const principalIdInput = document.getElementById('principal_id');
     const nameInput = document.getElementById('name');
     const agentUrlInput = document.getElementById('agent_url');
-    const jwksUriInput = document.getElementById('jwks_uri');
+    const brandDomainInput = document.getElementById('brand_domain');
     const signingRequiredInput = document.getElementById('signing_required');
 
     function showError(msg) {
@@ -216,7 +216,8 @@ input:invalid { border-color: var(--sa-danger); }
         principalIdInput.value = data.principal_id || '';
         nameInput.value = data.name || '';
         if (agentUrlInput) agentUrlInput.value = data.agent_url || '';
-        if (jwksUriInput) jwksUriInput.value = data.jwks_uri || '';
+        // brand_domain is the operator-typed value (the trust anchor).
+        if (brandDomainInput) brandDomainInput.value = data.domain || '';
         // signing_required cannot be enabled at create time (strict-admit
         // guard: the buyer must send a verified signed request first). Leave
         // unchecked; operator flips it on the edit page once 🟢 lights up.

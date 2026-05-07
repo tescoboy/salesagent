@@ -1,10 +1,12 @@
 """Starlette ASGI middleware for inbound RFC 9421 signature verification.
 
-Per-buyer-agent trust model. Each :class:`Principal` optionally carries an
-``agent_url`` plus a ``signing_required`` flag. When the verifier sees a
-signature, it fetches JWKS from ``<agent_url>/.well-known/jwks.json`` and
-verifies against it. The salesagent trusts the buyer agent for its operator
-identity (no brand.json walk).
+Per-buyer-agent trust model. Each :class:`Principal` optionally carries a
+``brand_domain`` (operator-typed buyer domain — the trust anchor) plus a
+``signing_required`` flag. When the verifier sees a signature, it walks
+``https://<brand_domain>/.well-known/brand.json`` via
+:class:`adcp.signing.BrandJsonJwksResolver`, which auto-refreshes on
+cooldown + unknown-kid cascade so JWKS rotation propagates without
+operator action.
 
 Enforcement is per-principal — there is no tenant-wide kill switch and no
 per-operation gating list. An operator marks an individual buyer agent as
@@ -14,7 +16,8 @@ Buffers the request body up front (so the verifier reads digest-covered body
 AND downstream handlers see the same bytes via a replay-receive callable),
 extracts the AdCP operation name, then:
 
-* Signed request → verify against ``<agent_url>/.well-known/jwks.json`` or 401.
+* Signed request → verify against ``brand.json`` (walked per-request,
+  library-cached) or 401.
 * Unsigned request from principal with ``signing_required=True`` → 401
   ``request_signature_required``.
 * Anything else → pass through (bearer auth handles the principal lookup).
@@ -295,14 +298,15 @@ class SigningVerifyMiddleware:
             logger.exception("signing principal lookup crashed")
             ctx = None
 
+        tenant_id = ctx.get("tenant_id") if ctx else None
         principal_id = ctx.get("principal_id") if ctx else None
         agent_url = ctx.get("agent_url") if ctx else None
-        jwks_uri = ctx.get("jwks_uri") if ctx else None
+        brand_domain = ctx.get("brand_domain") if ctx else None
         signing_required = bool(ctx and ctx.get("signing_required"))
 
         # Per-principal enforcement: if the principal is marked must-sign,
-        # an unsigned request is rejected. signing_required without agent_url
-        # is a misconfiguration — also reject (fail closed).
+        # an unsigned request is rejected. signing_required without
+        # brand_domain is a misconfiguration — also reject (fail closed).
         if signing_required and not signed:
             await self._send_401(
                 send,
@@ -311,8 +315,8 @@ class SigningVerifyMiddleware:
                     step=0,
                     message=(
                         "principal requires signed requests"
-                        if agent_url
-                        else "principal marked signing_required but has no agent_url"
+                        if brand_domain
+                        else "principal marked signing_required but has no brand_domain"
                     ),
                 ),
             )
@@ -325,21 +329,21 @@ class SigningVerifyMiddleware:
             return
 
         # Signature is present. Must verify or reject — no silent-drop path.
-        # If we have no agent_url (bearer-only principal sent a signature, or
-        # tenant lookup failed), we have no JWKS source: reject.
-        if agent_url is None:
+        # If we have no brand_domain (bearer-only principal sent a signature,
+        # or tenant lookup failed), we have no trust root: reject.
+        if brand_domain is None or tenant_id is None or principal_id is None:
             await self._send_401(
                 send,
                 SignatureVerificationError(
                     REQUEST_SIGNATURE_REQUIRED,
                     step=0,
-                    message="signed request received but principal has no agent_url",
+                    message="signed request received but principal has no brand_domain",
                 ),
             )
             return
 
         try:
-            verified = await self._verify(scope, body, agent_url, jwks_uri, principal_id, operation)
+            verified = await self._verify(scope, body, tenant_id, principal_id, brand_domain, agent_url, operation)
         except SignatureVerificationError as exc:
             await self._send_401(send, exc)
             return
@@ -375,42 +379,69 @@ class SigningVerifyMiddleware:
             )
 
             # Cache the verification timestamp on the principal row so the
-            # admin UI's strict-admit guard can read a single column instead
-            # of querying audit_logs. Best-effort — a failed update here must
-            # never block the verified request from proceeding.
-            if principal_id and ctx and ctx.get("tenant_id"):
+            # admin UI's strict-admit guard can read a single column. Three
+            # belt-and-suspenders properties on this write:
+            #
+            # 1. Race-safe: the UPDATE is conditional on
+            #    ``brand_domain == :verified_brand_domain`` — if the operator
+            #    changed brand_domain mid-flight, the WHERE filters out and
+            #    we don't stamp evidence against the new (un-verified) trust
+            #    root.
+            # 2. Write-amplification-safe: we only stamp when the existing
+            #    timestamp is older than ~60s. A buyer doing 100 req/sec
+            #    triggers 1 UPDATE/min/principal instead of 100/sec.
+            # 3. Best-effort: a failed update here must never block the
+            #    verified request from proceeding.
+            if tenant_id and principal_id and brand_domain:
                 try:
                     await asyncio.to_thread(
                         self._record_verified_timestamp_sync,
-                        ctx["tenant_id"],
+                        tenant_id,
                         principal_id,
+                        brand_domain,
                     )
                 except Exception:
                     logger.exception("failed to cache last_signed_verified_at")
 
         await self.app(scope, replayed, send)
 
-    def _record_verified_timestamp_sync(self, tenant_id: str, principal_id: str) -> None:
+    # Don't UPDATE the cache column on every signed request — collapses
+    # write amplification under high-traffic verifies. Cache-skew of up to
+    # this window is fine for the strict-admit guard (it's UX, not auth).
+    _CACHE_REFRESH_WINDOW_SECONDS = 60
+
+    def _record_verified_timestamp_sync(self, tenant_id: str, principal_id: str, verified_brand_domain: str) -> None:
         """Stamp ``principals.last_signed_verified_at = now()`` for this caller.
 
-        Run inside ``asyncio.to_thread`` after a successful verify. Best-effort:
-        the verify itself succeeded; failure to cache the timestamp is logged
-        but doesn't fail the request (the audit_logs row is the durable
-        record-of-truth for verification — this column is just a UI cache).
+        Run inside ``asyncio.to_thread`` after a successful verify. The UPDATE
+        is conditional on ``brand_domain == :verified_brand_domain`` so a
+        concurrent operator brand_domain change doesn't get stamped with
+        stale evidence (race fix). Skipped entirely when an existing stamp
+        is younger than ``_CACHE_REFRESH_WINDOW_SECONDS`` (write-storm fix).
         """
-        from datetime import UTC, datetime
+        from datetime import UTC, datetime, timedelta
 
-        from sqlalchemy import update
+        from sqlalchemy import select, update
 
         from src.core.database.database_session import get_db_session
         from src.core.database.models import Principal
 
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=self._CACHE_REFRESH_WINDOW_SECONDS)
+
         with get_db_session() as session:
+            current_ts = session.scalars(
+                select(Principal.last_signed_verified_at).filter_by(tenant_id=tenant_id, principal_id=principal_id)
+            ).first()
+            # Skip the UPDATE entirely if a recent stamp already covers us.
+            if current_ts is not None and current_ts >= cutoff:
+                return
             session.execute(
                 update(Principal)
                 .where(Principal.tenant_id == tenant_id)
                 .where(Principal.principal_id == principal_id)
-                .values(last_signed_verified_at=datetime.now(UTC))
+                .where(Principal.brand_domain == verified_brand_domain)
+                .values(last_signed_verified_at=now)
             )
             session.commit()
 
@@ -462,7 +493,7 @@ class SigningVerifyMiddleware:
                 "tenant_id": tenant_id,
                 "principal_id": principal_id,
                 "agent_url": None,
-                "jwks_uri": None,
+                "brand_domain": None,
                 "signing_required": False,
             }
 
@@ -475,7 +506,7 @@ class SigningVerifyMiddleware:
             if principal is None:
                 return ctx
             ctx["agent_url"] = principal.agent_url
-            ctx["jwks_uri"] = principal.jwks_uri
+            ctx["brand_domain"] = principal.brand_domain
             ctx["signing_required"] = bool(principal.signing_required)
             return ctx
 
@@ -483,18 +514,26 @@ class SigningVerifyMiddleware:
         self,
         scope: dict,
         body: bytes,
-        agent_url: str,
-        jwks_uri: str | None,
-        principal_id: str | None,
+        tenant_id: str,
+        principal_id: str,
+        brand_domain: str,
+        agent_url: str | None,
         operation: str | None,
     ) -> dict[str, str] | None:
-        """Run the verifier checklist. Return verified state or raise."""
+        """Run the verifier checklist. Return verified state or raise.
+
+        Walks the buyer's brand.json via :class:`BrandJsonJwksResolver` —
+        the library handles cooldown re-walks + unknown-kid cascade, so
+        rotation of ``agent_url`` or ``jwks_uri`` in brand.json propagates
+        without operator action. ``agent_url`` here is informational only
+        (audit-log stamping); the trust root is ``brand_domain``.
+        """
         from src.core.signing import get_buyer_agent_jwks_cache, get_replay_store
 
         headers = _decode_scope_headers(scope)
 
         cache = get_buyer_agent_jwks_cache()
-        sync_resolver_for_agent = cache.resolver_for(agent_url, jwks_uri=jwks_uri)
+        async_brand_resolver = cache.resolver_for(tenant_id, principal_id, brand_domain)
         replay_store = get_replay_store()
 
         kid = _peek_kid_from_signature_input(headers)
@@ -504,14 +543,16 @@ class SigningVerifyMiddleware:
                 step=1,
                 message="could not parse keyid from Signature-Input",
             )
-        # CachingJwksResolver is sync — call directly without await.
-        jwk = sync_resolver_for_agent(kid)
+        # BrandJsonJwksResolver is async + handles cooldown + unknown-kid
+        # cascade internally. ``await resolver(kid)`` triggers a brand.json
+        # re-walk if the kid hasn't been seen, so JWKS rotation propagates
+        # without operator action.
+        jwk = await async_brand_resolver(kid)
         if jwk is None:
-            jwks_target = jwks_uri or f"{agent_url.rstrip('/')}/.well-known/jwks.json"
             raise SignatureVerificationError(
                 REQUEST_SIGNATURE_KEY_UNKNOWN,
                 step=7,
-                message=f"kid {kid!r} not found in JWKS at {jwks_target}",
+                message=f"kid {kid!r} not found in JWKS resolved from {brand_domain}/.well-known/brand.json",
             )
         sync_resolver = StaticJwksResolver({"keys": [jwk]})
 
@@ -539,9 +580,14 @@ class SigningVerifyMiddleware:
 
         signer = await verify_starlette_request(request, options=options)
 
+        # Prefer the resolver's live agent_url (last known good from
+        # brand.json) over the cached column — the column is informational
+        # and may lag rotation. Falls back to the column when the resolver
+        # hasn't snapshotted yet (cold start / failure).
+        live_agent_url = async_brand_resolver.agent_url or agent_url or ""
         return {
-            "principal_id": principal_id or "",
-            "agent_url": agent_url,
+            "principal_id": principal_id,
+            "agent_url": live_agent_url,
             "key_id": signer.key_id,
         }
 

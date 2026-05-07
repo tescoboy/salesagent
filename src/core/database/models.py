@@ -614,23 +614,28 @@ class Principal(Base, JSONValidatorMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     platform_mappings: Mapped[dict] = mapped_column(JSONType, nullable=False)
     access_token: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    # Buyer-agent URL. Resolved at admit time from the buyer's brand.json.
-    # When set, this principal is signature-capable. NULL means bearer-only
-    # (legacy auth path). See docs/design/signing-non-embedded.md.
+    # Buyer-agent URL — informational; populated from brand.json at admit
+    # time so it shows up in audit logs and the admin UI. NOT used by the
+    # verifier hot path; rotation of agent_url in brand.json doesn't need
+    # operator action because the verifier walks brand.json itself.
     agent_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    # JWKS URI resolved alongside agent_url from brand.json. Stored so the
-    # verifier doesn't have to walk brand.json on every signed request. NULL
-    # falls back to the convention <agent_url>/.well-known/jwks.json.
-    jwks_uri: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    # Operator-typed buyer domain. The TRUST ANCHOR — verifier constructs
+    # ``https://<brand_domain>/.well-known/brand.json`` and walks it via
+    # adcp.signing.BrandJsonJwksResolver, which auto-refreshes on cooldown
+    # + unknown-kid cascade. NULL means bearer-only auth (legacy path).
+    # See docs/design/signing-non-embedded.md.
+    brand_domain: Mapped[str | None] = mapped_column(String(253), nullable=True)
     # When True, unsigned requests from this principal are rejected. When False
     # and agent_url is set, the verifier accepts signed requests but does not
     # require them (mixed mode for migration). Ignored when agent_url is NULL
     # (bearer-only principals can't sign). Replaces tenant-wide required_for.
     signing_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     # Most-recent successful signed-request verification. Updated by the
-    # verifier middleware; reset to NULL when the operator changes agent_url
-    # or jwks_uri so the strict-admit guard doesn't carry stale evidence
-    # forward across reconfiguration.
+    # verifier middleware; reset to NULL when the operator changes
+    # ``brand_domain`` so the strict-admit guard doesn't carry stale
+    # evidence forward across trust-root changes. ``agent_url`` change
+    # does NOT reset — the verifier walks brand.json and the library
+    # handles agent_url rotation automatically.
     last_signed_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
