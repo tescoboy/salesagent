@@ -96,6 +96,16 @@ def add_user(tenant_id):
             flash("Email is required", "error")
             return redirect(url_for("users.list_users", tenant_id=tenant_id))
 
+        # Application-layer role validation. The ``ck_users_role`` CHECK
+        # constraint is the hard backstop, but rejecting at the boundary
+        # gives a clear UX message instead of an opaque DB exception.
+        from src.core.validation import FormValidator
+
+        role_err = FormValidator.validate_role(role)
+        if role_err:
+            flash(role_err, "error")
+            return redirect(url_for("users.list_users", tenant_id=tenant_id))
+
         # Validate email format
         import re
 

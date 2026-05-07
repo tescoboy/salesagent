@@ -20,7 +20,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "8407a32e9b07"
-down_revision: str | Sequence[str] | None = "e9f8a7ce4e46"
+down_revision: str | Sequence[str] | None = "ee6fe59f5407"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -66,6 +66,12 @@ def upgrade() -> None:
 
     # Migrate the rows.
     op.execute("UPDATE users SET role = 'member' WHERE role = 'manager'")
+
+    # Drop any pre-existing constraint with our target name (defensive —
+    # a fresh dev DB initialized from ``database_schema.py`` post-rename
+    # may already have a ``ck_users_role`` constraint, which would
+    # collide with the create below).
+    bind.execute(sa.text("ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_role"))
 
     # Pin the canonical enum.
     op.create_check_constraint(
