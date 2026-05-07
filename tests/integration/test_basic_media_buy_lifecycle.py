@@ -483,3 +483,217 @@ class TestDeliveryWebhookFires:
         finally:
             server.shutdown()
             server.server_close()
+
+
+class TestDeliveryWebhookHeartbeatForPendingStart:
+    """Issue #48: future-dated buys (pending_start) should get heartbeat reports.
+
+    Default ``tenant.report_pre_start_buys=True`` means a buy with
+    ``start_time`` in the future and a configured reporting_webhook still
+    receives a daily heartbeat — flagged ``partial_data=true`` and carrying
+    impressions=0. Lets buyers stop polling for "did my flight land?" once
+    they configure the webhook.
+    """
+
+    async def test_pending_start_buy_gets_heartbeat_with_partial_data(
+        self, sample_tenant, sample_principal, sample_products
+    ):
+        import json
+        import socket
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from threading import Thread
+        from time import sleep
+
+        from src.core.schemas import CreateMediaBuyRequest
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+
+        received: list[dict] = []
+
+        class _Receiver(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                received.append(json.loads(self.rfile.read(length).decode()))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+            def log_message(self, *_a, **_k):
+                pass
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        server = HTTPServer(("127.0.0.1", port), _Receiver)
+        Thread(target=server.serve_forever, daemon=True).start()
+
+        try:
+            tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
+            identity = make_lifecycle_identity(
+                tenant_dict, sample_principal["principal_id"]
+            )
+
+            create_result = await _create_media_buy_impl(
+                req=CreateMediaBuyRequest(
+                    brand={"domain": "testbrand.com"},
+                    # Future start so the date-derived dynamic status is
+                    # 'pending_start'. Pre-#48 the scheduler skipped these.
+                    start_time=_future(2),
+                    end_time=_future(8),
+                    packages=[
+                        {
+                            "product_id": "guaranteed_display",
+                            "budget": 5000.0,
+                            "pricing_option_id": "cpm_usd_fixed",
+                        }
+                    ],
+                    reporting_webhook={
+                        "url": f"http://127.0.0.1:{port}/webhook",
+                        "reporting_frequency": "daily",
+                        "authentication": {
+                            "schemes": ["Bearer"],
+                            "credentials": "test_credential_minimum_32_chars_xxx",
+                        },
+                    },
+                ),
+                identity=identity,
+            )
+            assert create_result.status not in ("failed",), (
+                f"create failed: {getattr(create_result.response, 'errors', None)}"
+            )
+            media_buy_id = create_result.response.media_buy_id
+            assert media_buy_id
+
+            scheduler = DeliveryWebhookScheduler()
+            triggered = await scheduler.trigger_report_for_media_buy_by_id(
+                media_buy_id=media_buy_id,
+                tenant_id=tenant_dict["tenant_id"],
+            )
+            assert triggered
+
+            deadline = 10.0
+            elapsed = 0.0
+            while not received and elapsed < deadline:
+                sleep(0.5)
+                elapsed += 0.5
+            assert received, (
+                f"No webhook received within {deadline}s — pre-#48 the "
+                f"scheduler silently skipped pending_start buys; this test "
+                f"guards the new heartbeat behaviour."
+            )
+
+            payload = received[0]
+            result = payload.get("result") or {}
+            assert result.get("partial_data") is True, (
+                f"Heartbeat for pending_start should set partial_data=True, "
+                f"got result={result}"
+            )
+            deliveries = result.get("media_buy_deliveries") or []
+            assert deliveries, f"missing media_buy_deliveries: {result}"
+            assert deliveries[0]["media_buy_id"] == media_buy_id
+            # Buy is pre-start so no impressions yet.
+            assert (deliveries[0].get("totals") or {}).get("impressions", 0) == 0
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestDeliveryWebhookOptOutPreStart:
+    """Issue #48: tenant can opt out of pre-start heartbeats.
+
+    With ``tenant.report_pre_start_buys=False`` the scheduler reverts to
+    the legacy ``[active, completed]`` filter — pending_start buys get
+    silently skipped (status_excluded INFO log, no webhook).
+    """
+
+    async def test_opt_out_silences_pending_start_heartbeat(
+        self, sample_tenant, sample_principal, sample_products
+    ):
+        import json
+        import socket
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from threading import Thread
+        from time import sleep
+
+        from src.core.database.repositories.uow import TenantConfigUoW
+        from src.core.schemas import CreateMediaBuyRequest
+        from src.core.tools.media_buy_create import _create_media_buy_impl
+        from src.services.delivery_webhook_scheduler import DeliveryWebhookScheduler
+
+        # Opt the tenant out of pre-start heartbeats.
+        with TenantConfigUoW(sample_tenant["tenant_id"]) as uow:
+            assert uow.tenant_config is not None
+            t = uow.tenant_config.get_tenant()
+            assert t is not None
+            t.report_pre_start_buys = False
+
+        received: list[dict] = []
+
+        class _Receiver(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                received.append(json.loads(self.rfile.read(length).decode()))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+            def log_message(self, *_a, **_k):
+                pass
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        server = HTTPServer(("127.0.0.1", port), _Receiver)
+        Thread(target=server.serve_forever, daemon=True).start()
+
+        try:
+            tenant_dict = _tenant_dict(sample_tenant["tenant_id"])
+            identity = make_lifecycle_identity(
+                tenant_dict, sample_principal["principal_id"]
+            )
+
+            create_result = await _create_media_buy_impl(
+                req=CreateMediaBuyRequest(
+                    brand={"domain": "testbrand.com"},
+                    start_time=_future(2),
+                    end_time=_future(8),
+                    packages=[
+                        {
+                            "product_id": "guaranteed_display",
+                            "budget": 5000.0,
+                            "pricing_option_id": "cpm_usd_fixed",
+                        }
+                    ],
+                    reporting_webhook={
+                        "url": f"http://127.0.0.1:{port}/webhook",
+                        "reporting_frequency": "daily",
+                        "authentication": {
+                            "schemes": ["Bearer"],
+                            "credentials": "test_credential_minimum_32_chars_xxx",
+                        },
+                    },
+                ),
+                identity=identity,
+            )
+            assert create_result.status not in ("failed",)
+            media_buy_id = create_result.response.media_buy_id
+
+            scheduler = DeliveryWebhookScheduler()
+            await scheduler.trigger_report_for_media_buy_by_id(
+                media_buy_id=media_buy_id,
+                tenant_id=tenant_dict["tenant_id"],
+            )
+
+            # Give the receiver thread a chance to pick up any inbound POST.
+            sleep(2.0)
+            assert not received, (
+                f"Expected no webhook (tenant opted out of pre-start "
+                f"heartbeats) but receiver got: {received}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
