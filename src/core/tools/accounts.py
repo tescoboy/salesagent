@@ -331,10 +331,19 @@ def _check_billing_policy(
     billing_val: str | None,
     identity: ResolvedIdentity,
 ) -> list[Any] | None:
-    """Check if the billing model is supported by the seller.
+    """Check if the billing model is supported by the seller AND the calling
+    principal is allowed to be billed under that model.
+
+    Two gates:
+
+    * **BR-RULE-059** (tenant-level) — billing must be in the tenant's
+      ``supported_billing`` list. Reject with ``BILLING_NOT_SUPPORTED``.
+    * **BR-RULE-061** (principal-level, slice 4) — when ``billing="agent"``,
+      the calling principal must have ``billing_enabled=True``. Operators
+      mark internal/free-tier/test agents as ``billing_enabled=False`` so
+      they can't be set as the billing party for any Account.
 
     Returns a list of Error objects if rejected, None if accepted.
-    Per BR-RULE-059: unsupported billing → BILLING_NOT_SUPPORTED.
     """
     from adcp.types import Error
 
@@ -342,10 +351,7 @@ def _check_billing_policy(
     # Both dict and TenantContext expose .get() identically, so no branching needed.
     tenant = identity.tenant if identity else None
     supported = tenant.get("supported_billing") if tenant else None
-    if supported is None:
-        return None  # No policy configured → accept all
-
-    if billing_val not in supported:
+    if supported is not None and billing_val not in supported:
         return [
             Error(
                 code="BILLING_NOT_SUPPORTED",
@@ -354,6 +360,34 @@ def _check_billing_policy(
                 suggestion=f"Use one of the supported billing models: {', '.join(supported)}.",
             )
         ]
+
+    # Per-principal billing-capability gate (BR-RULE-061).
+    if billing_val == "agent" and identity is not None and identity.principal_id and identity.tenant_id:
+        from sqlalchemy import select
+
+        from src.core.database.database_session import get_db_session
+        from src.core.database.models import Principal
+
+        with get_db_session() as session:
+            billing_enabled = session.scalars(
+                select(Principal.billing_enabled).filter_by(
+                    tenant_id=identity.tenant_id,
+                    principal_id=identity.principal_id,
+                )
+            ).first()
+        # Treat None (principal lookup failed) as billing-disabled — fail closed.
+        if not billing_enabled:
+            return [
+                Error(
+                    code="BILLING_NOT_SUPPORTED",
+                    message=(
+                        "This buyer agent is not authorized to be billed "
+                        "(billing_enabled=False). Use billing='operator' instead."
+                    ),
+                    suggestion="Use billing='operator', or ask the seller to enable billing for this agent.",
+                )
+            ]
+
     return None
 
 
