@@ -884,17 +884,13 @@ class TargetingOverlay(LibraryTargetingOverlay):
     device_type_none_of: list[str] | None = None
 
     os_any_of: list[str] | None = None  # Operating systems: ["iOS", "Android", "Windows"]
-    os_none_of: list[str] | None = None
 
     browser_any_of: list[str] | None = None  # Browsers: ["Chrome", "Safari", "Firefox"]
-    browser_none_of: list[str] | None = None
 
     # Content and contextual targeting
     content_cat_any_of: list[str] | None = None  # IAB content categories
-    content_cat_none_of: list[str] | None = None
 
     keywords_any_of: list[str] | None = None  # Keyword targeting
-    keywords_none_of: list[str] | None = None
 
     # Audience targeting
     audiences_any_of: list[str] | None = None  # Audience segments
@@ -905,11 +901,6 @@ class TargetingOverlay(LibraryTargetingOverlay):
 
     # Media type targeting
     media_type_any_of: list[str] | None = None  # ["video", "audio", "display", "native"]
-    media_type_none_of: list[str] | None = None
-
-    # Connection type targeting
-    connection_type_any_of: list[int] | None = None  # OpenRTB connection types
-    connection_type_none_of: list[int] | None = None
 
     # Platform-specific custom targeting
     custom: dict[str, Any] | None = None  # Platform-specific targeting options
@@ -1011,6 +1002,27 @@ class TargetingOverlay(LibraryTargetingOverlay):
             else:
                 result[name] = value
         return result
+
+    @classmethod
+    def model_validate_persisted(cls, raw: "dict[str, Any] | TargetingOverlay") -> "TargetingOverlay":
+        """Hydrate from trusted DB-stored targeting JSON.
+
+        Strips keys that are no longer in the schema (e.g. fields dropped in
+        #280 cleanup waves). DB rows written before a field was removed would
+        otherwise trip ``extra='forbid'`` in dev/CI — production survives via
+        ``extra='ignore'`` but local replay of prod-shaped data would not.
+
+        Safe because DB-stored targeting is salesagent's own past output, not
+        untrusted buyer input. Buyer-facing validation still runs through the
+        normal ``Targeting(**...)`` / ``model_validate`` paths with strict
+        extras.
+        """
+        if isinstance(raw, TargetingOverlay):
+            return raw
+        valid_keys = set(cls.model_fields) | {v2 for v2, _v3, _t in _LEGACY_GEO_FIELDS}
+        valid_keys |= {"geo_city_any_of", "geo_city_none_of"}  # legacy normalizer signal
+        cleaned: dict[str, Any] = {k: v for k, v in raw.items() if k in valid_keys}
+        return cls.model_validate(cleaned)
 
 
 # Back-compat alias — many adapters and tests import ``Targeting`` directly.
