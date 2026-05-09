@@ -232,6 +232,10 @@ class GAMTargetingManager:
             from src.core.database.repositories.adapter_config import AdapterConfigRepository
 
             with get_db_session() as session:
+                # Targeting key sync is a platform-level operation — set the
+                # management_api_caller flag so the embedded-tenant guard
+                # allows the write to AdapterConfig.
+                session.info["management_api_caller"] = True
                 repo = AdapterConfigRepository(session, self.tenant_id)
                 repo.update_custom_targeting_keys(key_name_to_id)
                 session.commit()
