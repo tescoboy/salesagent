@@ -278,6 +278,31 @@ def _list_creatives_impl(
             from src.core.schemas._asset_type_compat import infer_asset_types
 
             assets_dict = infer_asset_types(assets_dict)
+            # Drop null-valued *optional* asset fields the bundled
+            # response schema declares as non-nullable scalar / object
+            # types. Pydantic ImageAsset / VideoAsset / etc. allow
+            # ``None`` on these (``str | None``); the bundled spec
+            # schema (``creative/list-creatives-response.json``) does
+            # not, so emitting ``format: null`` / ``alt_text: null`` /
+            # ``provenance: null`` makes the asset value ambiguous
+            # against the AssetVariant ``oneOf`` and the storyboard
+            # validator rejects with ``Invalid input`` at
+            # ``/creatives/0/assets/<key>``.
+            #
+            # Allowlist (vs. stripping every null) so a future field
+            # that genuinely uses ``null`` as a meaningful sentinel
+            # isn't silently elided.
+            _NULL_STRIP_FIELDS: frozenset[str] = frozenset(
+                {"format", "alt_text", "provenance", "mime_type", "container_format"}
+            )
+            assets_dict = {
+                key: (
+                    {k: v for k, v in value.items() if v is not None or k not in _NULL_STRIP_FIELDS}
+                    if isinstance(value, dict)
+                    else value
+                )
+                for key, value in assets_dict.items()
+            }
 
             # Convert string status to CreativeStatus enum
             from src.core.schemas import CreativeStatus

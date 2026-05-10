@@ -447,3 +447,9 @@ async def _delegate_list_creatives(req: Any, ctx: RequestContext[Any]) -> dict[s
         identity=identity,
     )
     return _to_wire(response)
+
+
+# Account dispatch (sync_accounts / list_accounts) lives on the
+# ``SalesagentAccountStore`` instance via the framework's
+# AccountStoreUpsert / AccountStoreList Protocols, not in this delegate
+# module — adcp >= 4.6.1 wires the framework dispatchers natively.
