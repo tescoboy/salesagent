@@ -1,18 +1,67 @@
 """FreeWheel adapter — implements ``AdServerAdapter`` against the Publisher API.
 
-Entity mapping (from the Publisher API docs):
-- AdCP MediaBuy → FreeWheel Campaign
-- AdCP Package → FreeWheel Line Item
-- AdCP Creative → FreeWheel Creative
-- AdCP creative-to-package assignment → Creative-Line Item Association
-- AdCP Product → FreeWheel Placement(s) + targeting profile
+Entity mapping (Mapping A — see docs/adapters/freewheel/):
+- AdCP MediaBuy → FreeWheel Insertion Order (the commercial transaction:
+  carries budget, schedule, currency, stage)
+- AdCP Package  → FreeWheel Placement (the delivery unit, one per package)
+- FW Campaign   → per-buy wrapper above the IO (auto-created; carries
+  ``advertiser_id`` and groups the IO + its placements)
 
-This is a skeleton: dry-run mode logs the planned API calls based on the
-public Publisher API reference. Live mode currently raises a clear error
-for create_media_buy and stubs the remaining methods so the adapter can be
-selected and configured before staging credentials arrive. Concrete request
-shapes and live-mode coverage are finalised once we can exercise the API
-against a sandbox.
+FreeWheel's data model is three levels (Campaign > IO > Placement). The IO
+is the unit of commerce; the Campaign is a grouping layer above. Reusing a
+single Campaign across many IOs (the publisher-ideal pattern) would require
+state we don't currently have, so v1 creates one Campaign per AdCP MediaBuy.
+
+Live coverage:
+- ✅ create_media_buy — creates Campaign + IO + Placement(s) and returns
+  the IO id as ``media_buy_id``.
+- ✅ check_media_buy_status — reads the IO (not the Campaign).
+- ⏳ update_media_buy — write paths verified against the live API and
+  available as ``client.commercial.update_insertion_order`` /
+  ``update_placement``. Adapter wiring is blocked on two data-model
+  gaps that need state we don't currently keep or scopes we don't have:
+
+  1. Per-package pause/resume needs to look up the FW placement_id from
+     the AdCP package_id. The v3 placements endpoint does not honour an
+     ``?insertion_order_id=X`` filter (returns the full network list)
+     and there's no nested-collection endpoint at v3
+     (``/insertion_orders/{id}/placements`` returns 404). The v4 nested
+     form exists (``/services/v4/insertion_orders/{id}/placements``) but
+     our token gets a 403 IAM deny on it — needs publisher scope grant.
+
+  2. Per-package budget changes aren't directly representable: FW's
+     budget lives on the IO, not on the placement. update_package_budget
+     would either need a one-IO-per-package mapping (a different Mapping
+     than A) or per-package budget tracking we don't have.
+
+- ✅ add_creative_assets + associate_creatives — fully unblocked as of
+  2026-05-13. Live-verified create→bind→unbind→delete cycle against Talpa.
+
+    * ✅ ``/services/v4/creative_resources`` (POST/GET/DELETE) — manage
+      creative records: name, base_ad_unit, renditions (VAST tag URIs or
+      hosted content), advertiser scoping. POST body wrapped under
+      ``{"creative": {...}}``; response wrapped under
+      ``{"data": {"creative": {...}}}``. Exposed on the client at
+      ``client.creatives``.
+    * ✅ ``/services/v4/creative_instances`` (POST/DELETE) — the
+      creative-to-ad_unit_node binding. FW's docs call the body param
+      ``ad_id`` but its description says "The Ad Unit Node ID to link
+      Creative" — there's no separate Ad object. POST returns 201 with
+      ``placement_id`` auto-populated. The adapter looks up
+      ad_unit_node_ids per placement from the inventory cache and
+      posts one creative_instance per (node, creative) pair.
+
+  AdCP semantic note: ``sync_creatives`` (buyer registering creatives)
+  maps cleanly: ``add_creative_assets`` POSTs creative_resources,
+  ``associate_creatives`` POSTs creative_instances binding each
+  resource to every ad_unit_node under the target placements.
+
+  Demand-side path (out of scope for publisher integration): a buyer
+  with their own DSP seat would POST to
+  ``/demand/v1/accounts/{seat_id}/ads`` using a separate Demand API
+  bearer Talpa doesn't have.
+- ⏳ get_media_buy_delivery — reporting lives on a different API surface
+  not yet mapped.
 """
 
 from __future__ import annotations
@@ -25,23 +74,33 @@ from src.adapters.base import (
     AdapterCapabilities,
     AdServerAdapter,
     CreativeEngineAdapter,
+    DeliveryDataUnavailable,
+    PermissionCheck,
+    PermissionsReport,
     TargetingCapabilities,
 )
 from src.adapters.constants import REQUIRED_UPDATE_ACTIONS
-from src.adapters.freewheel.client import FreeWheelAPIError, FreeWheelClient
+from src.adapters.freewheel.client import FreeWheelClient, FreeWheelError
+from src.adapters.freewheel.formats import freewheel_creative_formats
 from src.adapters.freewheel.schemas import FREEWHEEL_HOSTS, FreeWheelConnectionConfig, FreeWheelProductConfig
 from src.adapters.freewheel.targeting import build_targeting, validate_targeting
+from src.core.database.database_session import get_db_session
+from src.core.database.repositories.freewheel_inventory import FreeWheelInventoryRepository
+from src.core.database.repositories.freewheel_placement_stats import FreeWheelPlacementStatsRepository
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
+    AdapterPackageDelivery,
     AssetStatus,
     CheckMediaBuyStatusResponse,
     CreateMediaBuyError,
     CreateMediaBuyRequest,
     CreateMediaBuyResponse,
+    DeliveryTotals,
     Error,
     MediaPackage,
     Principal,
     ReportingPeriod,
+    Snapshot,
     UpdateMediaBuyResponse,
     UpdateMediaBuySuccess,
 )
@@ -80,11 +139,10 @@ class FreeWheelAdapter(AdServerAdapter):
         creative_engine: CreativeEngineAdapter | None = None,
         tenant_id: str | None = None,
     ):
-        """Resolve OAuth client credentials and the target environment host.
+        """Resolve the bearer token and target environment host.
 
-        Dry-run defers OAuth client construction so the adapter can be
-        configured before staging credentials are provisioned by FreeWheel's
-        Account Team.
+        Dry-run defers client construction so the adapter can be configured
+        before a bearer token is provisioned by FreeWheel (or the publisher).
         """
         super().__init__(config, principal, dry_run, creative_engine, tenant_id)
 
@@ -95,9 +153,9 @@ class FreeWheelAdapter(AdServerAdapter):
                 "and no default_advertiser_id is configured"
             )
 
-        self.client_id = self.config.get("client_id")
-        self.client_secret = self.config.get("client_secret")
-        self.network_id = self.config.get("network_id")
+        self.username = self.config.get("username")
+        self.password = self.config.get("password")
+        self.api_token = self.config.get("api_token")
         self.environment = self.config.get("environment", "production")
         self.base_url = FREEWHEEL_HOSTS.get(self.environment, FREEWHEEL_HOSTS["production"])
 
@@ -105,12 +163,14 @@ class FreeWheelAdapter(AdServerAdapter):
             self.log("Running in dry-run mode — FreeWheel Publisher API calls will be simulated", dry_run_prefix=False)
             self._client: FreeWheelClient | None = None
         else:
-            if not self.client_id or not self.client_secret or not self.network_id:
-                raise ValueError("FreeWheel config is missing 'client_id', 'client_secret', or 'network_id'")
+            has_password_grant = bool(self.username) and bool(self.password)
+            has_token = bool(self.api_token)
+            if not has_password_grant and not has_token:
+                raise ValueError("FreeWheel config requires either (username + password) or api_token")
             self._client = FreeWheelClient(
-                client_id=self.client_id,
-                client_secret=self.client_secret,
-                network_id=self.network_id,
+                username=self.username,
+                password=self.password,
+                api_token=self.api_token,
                 base_url=self.base_url,
             )
 
@@ -119,12 +179,274 @@ class FreeWheelAdapter(AdServerAdapter):
     def get_supported_pricing_models(self) -> set[str]:
         return {"cpm", "flat_rate"}
 
+    def get_creative_formats(self) -> list[dict[str, Any]]:
+        """Return the static set of VAST video formats this adapter supports.
+
+        FreeWheel delivers video via VAST tag forwarding — the six declared
+        formats cover the common pre/mid/post-roll × 15s/30s combinations.
+        See :mod:`._formats` for the canonical list and the rationale for
+        declaring statically rather than synthesising from synced data.
+        """
+        return freewheel_creative_formats(self.tenant_id)
+
     def get_targeting_capabilities(self) -> TargetingCapabilities:
         return TargetingCapabilities(
             geo_countries=True,
             geo_regions=True,
             nielsen_dma=True,
         )
+
+    async def get_available_inventory(self) -> dict[str, Any]:
+        """Surface the locally-synced FW taxonomy for AI product configuration.
+
+        Reads from the ``freewheel_inventory`` cache (refreshed via the
+        Sync Inventory button or :class:`FreeWheelInventorySync`). No FW
+        API calls happen here — everything is served from the local cache
+        so the AI product configurator can run offline.
+
+        Shape follows the base ``get_available_inventory`` contract:
+
+        * ``placements`` — FW ``ad_unit_packages`` (the buyer-facing bundles)
+        * ``ad_units``   — FW sites + site_sections (where ads can run)
+        * ``targeting_options`` — ``standard_attributes`` grouped by parent
+          taxonomy key (genres, tv_ratings, languages, device_types, …)
+        * ``creative_specs`` — the static VAST format declarations
+        * ``properties`` — counts and metadata about the synced cache
+        """
+        with get_db_session() as session:
+            repo = FreeWheelInventoryRepository(session, self.tenant_id or "default")
+            sites = repo.list_by_type("site")
+            site_sections = repo.list_by_type("site_section")
+            video_groups = repo.list_by_type("video_group")
+            series = repo.list_by_type("series")
+            ad_unit_packages = repo.list_by_type("ad_unit_package")
+            standard_attrs = repo.list_by_type("standard_attribute")
+
+            placements = [
+                {
+                    "id": f"ad_unit_package:{row.entity_id}",
+                    "name": row.name or row.entity_id,
+                    "type": "ad_unit_package",
+                }
+                for row in ad_unit_packages
+            ]
+
+            ad_units = [
+                {"path": f"site:{row.entity_id}", "name": row.name or row.entity_id, "type": "site"} for row in sites
+            ] + [
+                {
+                    "path": f"site_section:{row.entity_id}",
+                    "name": row.name or row.entity_id,
+                    "type": "site_section",
+                    "parent": row.parent_id,
+                }
+                for row in site_sections
+            ]
+
+            targeting_options: dict[str, list[dict[str, Any]]] = {}
+            for row in standard_attrs:
+                bucket = row.parent_id or "uncategorized"
+                targeting_options.setdefault(bucket, []).append(
+                    {"id": row.entity_id, "name": row.name or row.entity_id}
+                )
+
+            properties = {
+                "sites_count": len(sites),
+                "site_sections_count": len(site_sections),
+                "series_count": len(series),
+                "video_groups_count": len(video_groups),
+                "ad_unit_packages_count": len(ad_unit_packages),
+                "standard_attributes_count": len(standard_attrs),
+            }
+
+        return {
+            "placements": placements,
+            "ad_units": ad_units,
+            "targeting_options": targeting_options,
+            "creative_specs": freewheel_creative_formats(self.tenant_id),
+            "properties": properties,
+        }
+
+    def check_permissions(self) -> PermissionsReport:
+        """Probe every FW endpoint the adapter depends on, return a report.
+
+        Probes are cheap GETs with one-row pagination where supported. The
+        permission is considered granted unless the upstream returns a hard
+        deny (401/403). 4xx validation errors (400/404/422) prove the
+        endpoint accepts the call — just with a missing query param or
+        body — so they count as granted.
+
+        Auth-level failures (no token, expired refresh, bad credentials)
+        surface on the report as ``error=...`` with all checks granted=False
+        — separating a credentials problem from a per-endpoint scope gap.
+        """
+        report = PermissionsReport(
+            adapter=self.adapter_name,
+            tenant_id=self.tenant_id,
+            checked_at=datetime.now(UTC),
+            fully_operational=False,
+            checks=[],
+        )
+
+        if self.dry_run or self._client is None:
+            report.error = "Dry-run mode — no live FreeWheel client to probe with."
+            return report
+
+        # Each tuple: (name, description, method, path, required, feature)
+        probes = [
+            ("auth_token_info", "Validate bearer token", "GET", "/auth/token/info", True, "auth"),
+            (
+                "v4_inventory_sites",
+                "Read inventory taxonomy (v4 sites)",
+                "GET",
+                "/services/v4/sites?page=1&per_page=1",
+                True,
+                "inventory_sync",
+            ),
+            (
+                "v4_inventory_ad_unit_packages",
+                "Read inventory ad unit packages",
+                "GET",
+                "/services/v4/ad_unit_packages?page=1&per_page=1",
+                True,
+                "inventory_sync",
+            ),
+            (
+                "v3_commercial_campaigns",
+                "Read/create campaigns (v3 commercial)",
+                "GET",
+                "/services/v3/campaigns?per_page=1",
+                True,
+                "create_media_buy",
+            ),
+            (
+                "v3_commercial_insertion_orders",
+                "Read/create insertion orders",
+                "GET",
+                "/services/v3/insertion_orders?per_page=1",
+                True,
+                "create_media_buy",
+            ),
+            (
+                "v3_commercial_placements",
+                "Read/create placements",
+                "GET",
+                "/services/v3/placements?per_page=1",
+                True,
+                "create_media_buy",
+            ),
+            (
+                "v3_ad_unit_nodes_read",
+                "Read placement→inventory bindings",
+                "GET",
+                "/services/v3/ad_unit_nodes?per_page=1",
+                True,
+                "inventory_sync",
+            ),
+            (
+                "v4_creative_resources",
+                "Read/create creative resources",
+                "GET",
+                "/services/v4/creative_resources?page=1&per_page=1",
+                True,
+                "sync_creatives",
+            ),
+            (
+                # FW's docs name the field ad_id but the description says
+                # "The Ad Unit Node ID to link Creative" — there's no
+                # separate Ad object. POSTing creative_instances with
+                # ad_id=<ad_unit_node_id from inventory sync> binds the
+                # creative to the placement (FW auto-populates placement_id).
+                # Verified live: 201 Created.
+                "v4_creative_instances",
+                "Bind creatives to ad_unit_nodes (creative trafficking)",
+                "GET",
+                "/services/v4/creative_instances?ad_id=1",
+                True,
+                "creative_trafficking",
+            ),
+            (
+                # The Reporting API lives at /reporting/* (singular) at the
+                # host root, NOT under /services/v*. Probing the schema
+                # endpoint is cheap and tells us if scope is granted at all;
+                # /reporting/jobs is the actual submit URL when wired.
+                "reporting_schema",
+                "Query Reporting API (introspect available dimensions)",
+                "GET",
+                "/reporting/dimensions",
+                False,
+                "delivery_reporting",
+            ),
+            (
+                "reporting_jobs",
+                "Query Reporting API (submit + poll delivery report jobs)",
+                "GET",
+                "/reporting/jobs",
+                False,
+                "delivery_reporting",
+            ),
+            (
+                "v4_targeting_profiles",
+                "Read saved targeting profiles",
+                "GET",
+                "/services/v4/targeting_profiles?page=1&per_page=1",
+                False,
+                "advanced_targeting",
+            ),
+            (
+                "v4_audiences",
+                "Read audience definitions",
+                "GET",
+                "/services/v4/audiences?page=1&per_page=1",
+                False,
+                "audience_targeting",
+            ),
+            (
+                "v4_webhooks",
+                "Push state-change notifications via webhooks",
+                "GET",
+                "/services/v4/webhooks?page=1&per_page=1",
+                False,
+                "webhooks",
+            ),
+        ]
+
+        from src.adapters.freewheel.client import FreeWheelAuthError
+
+        try:
+            for name, description, method, path, required, feature in probes:
+                try:
+                    accept = "application/xml" if "/services/v3/" in path else "application/json"
+                    status, body = self._client._transport.probe(method, path, accept=accept)
+                except FreeWheelAuthError as exc:
+                    # Auth failure invalidates the whole pass — bail
+                    report.error = f"Authentication failed: {exc}"
+                    return report
+
+                granted = status not in (401, 403)
+                detail: str | None = None
+                if not granted:
+                    snippet = body.strip().replace("\n", " ")[:120]
+                    detail = f"{status}: {snippet}" if snippet else f"HTTP {status}"
+
+                report.checks.append(
+                    PermissionCheck(
+                        name=name,
+                        description=description,
+                        granted=granted,
+                        required=required,
+                        feature=feature,
+                        probe_target=f"{method} {path.split('?', 1)[0]}",
+                        detail=detail,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("FreeWheel permissions probe failed unexpectedly: %s", exc)
+            report.error = f"Permissions probe failed: {type(exc).__name__}: {exc}"
+            return report
+
+        report.fully_operational = all(c.granted for c in report.checks if c.required)
+        return report
 
     # ----- helpers -----
 
@@ -141,18 +463,49 @@ class FreeWheelAdapter(AdServerAdapter):
         end_time: datetime,
     ) -> dict[str, Any]:
         product_config = self._product_config_from_package(package)
+        # Dry-run payload — surfaces what the adapter would send to FW.
+        # FreeWheel inventory targeting (sites, video_groups, series, ad_unit_package)
+        # ultimately becomes ad_unit_nodes attached to the placement; that write
+        # path is blocked on the v4 ``ad_unit_nodes`` scope, so for now we just
+        # echo the configured intent.
+        # Targeting fields that are list-shaped — echo every configured
+        # dimension into the dry-run payload so operators can verify intent.
+        list_dimensions = (
+            "site_ids",
+            "site_section_ids",
+            "video_group_ids",
+            "series_ids",
+            "viewership_profile_ids",
+            "audience_item_ids",
+            "genre_ids",
+            "content_daypart_ids",
+            "content_duration_ids",
+            "content_territory_ids",
+            "language_ids",
+            "device_type_ids",
+            "os_ids",
+            "environment_ids",
+            "stream_type_ids",
+            "subscription_model_ids",
+            "addressability_ids",
+            "privacy_signal_ids",
+            "tv_rating_ids",
+        )
         payload: dict[str, Any] = {
             "name": package.name,
-            "advertiserId": self.advertiser_id,
-            "startDate": start_time.date().isoformat(),
-            "endDate": end_time.date().isoformat(),
-            "impressionGoal": package.impressions,
+            "advertiser_id": self.advertiser_id,
+            "start_date": start_time.date().isoformat(),
+            "end_date": end_time.date().isoformat(),
+            "impression_goal": package.impressions,
             "rate": rate,
-            "rateType": rate_type,
-            "placementIds": list(product_config.get("placement_ids", [])),
+            "rate_type": rate_type,
+            "ad_unit_package_id": product_config.get("ad_unit_package_id"),
+            "price_model": product_config.get("price_model"),
             "targeting": build_targeting(package.targeting_overlay, product_config),
-            "externalId": package.package_id,
+            "external_id": package.package_id,
         }
+        for dim in list_dimensions:
+            payload[dim] = list(product_config.get(dim, []))
         if product_config.get("priority") is not None:
             payload["priority"] = product_config["priority"]
         return payload
@@ -188,96 +541,338 @@ class FreeWheelAdapter(AdServerAdapter):
         if targeting_error is not None:
             return targeting_error
 
-        media_buy_id = (
-            f"freewheel_{request.po_number}" if request.po_number else f"freewheel_{int(datetime.now(UTC).timestamp())}"
-        )
+        buy_name = self._buy_name(request)
 
         if self.dry_run:
-            self.log(f"Would call: POST {self.base_url}/networks/{self.network_id}/campaigns")
+            self.log(f"Would call: POST {self.base_url}/services/v3/campaign")
+            self.log(f"  Campaign: name={buy_name}, advertiser_id={self.advertiser_id}")
+            self.log(f"Would call: POST {self.base_url}/services/v3/insertion_order")
             self.log(
-                f"  Campaign: name=AdCP {media_buy_id}, advertiserId={self.advertiser_id}, "
-                f"start={start_time.date()}, end={end_time.date()}"
+                f"  InsertionOrder: name={buy_name}, campaign_id=<new>, start={start_time.date()}, end={end_time.date()}"
             )
             for package in packages:
                 rate, rate_type = self._resolve_pricing_rate(package, package_pricing_info)
                 payload = self._line_item_payload(package, rate, rate_type, start_time, end_time)
-                self.log(f"Would call: POST .../campaigns/{media_buy_id}/line-items")
-                self.log(f"  LineItem: {payload}")
-            return self._build_create_success(request, media_buy_id, packages)
+                self.log(f"Would call: POST {self.base_url}/services/v3/placement")
+                self.log(f"  Placement: {payload}")
+            return self._build_create_success(request, f"freewheel_{buy_name}", packages)
 
-        # Live mode — pending credential validation and JSON-shape lock-in.
-        return self._pending_creds_error()
+        # Live mode — Mapping A: Campaign(wrapper) > IO(buy) > Placement(packages).
+        assert self._client is not None
+        assert self.advertiser_id is not None  # enforced in __init__ for non-dry-run
+        try:
+            campaign = self._client.commercial.create_campaign(name=buy_name, advertiser_id=int(self.advertiser_id))
+            io = self._client.commercial.create_insertion_order(name=buy_name, campaign_id=campaign.id)
+            for package in packages:
+                self._client.commercial.create_placement(
+                    name=package.name or package.package_id,
+                    insertion_order_id=io.id,
+                )
+        except FreeWheelError as exc:
+            logger.warning("FreeWheel create_media_buy failed: %s body=%s", exc, exc.body)
+            return CreateMediaBuyError(
+                errors=[
+                    Error(
+                        code="upstream_error",
+                        message=f"FreeWheel rejected the request: {exc}",
+                        details=None,
+                    )
+                ]
+            )
+
+        return self._build_create_success(request, f"freewheel_{io.id}", packages)
+
+    def _buy_name(self, request: CreateMediaBuyRequest) -> str:
+        """Derive a human-readable buy name from the AdCP request.
+
+        Uses po_number when present (the buyer's reference), otherwise falls
+        back to a timestamp so we don't collide if a buyer issues multiple
+        buys without po_numbers.
+        """
+        if request.po_number:
+            return f"adcp_{request.po_number}"
+        return f"adcp_{int(datetime.now(UTC).timestamp())}"
 
     # ----- creatives -----
 
     def add_creative_assets(
         self, media_buy_id: str, assets: list[dict[str, Any]], today: datetime
     ) -> list[AssetStatus]:
+        """POST each asset to ``/services/v4/creative_resources`` and return
+        AssetStatus carrying the FW-assigned creative_id.
+
+        Each AdCP asset becomes one FW creative_resource. The returned
+        ``creative_id`` is the FW resource id — caller threads it into
+        :meth:`associate_creatives` so we can bind it to ad_unit_nodes.
+
+        Dry-run logs the planned POST and echoes the AdCP creative_id back
+        so callers downstream still get a stable id to plumb through.
+        """
         if self.dry_run:
             for asset in assets:
                 self.log(
-                    f"Would POST {self.base_url}/networks/{self.network_id}/creatives "
-                    f"name={asset.get('name')} format={asset.get('format')}"
+                    f"Would POST {self.base_url}/services/v4/creative_resources "
+                    f"name={asset.get('name')} advertiser_id={self.advertiser_id}"
                 )
-                self.log(f"  Then POST creative-association for line items {asset.get('package_assignments', [])}")
+                self.log(
+                    f"  Then POST creative_instances for ad_unit_nodes under {asset.get('package_assignments', [])}"
+                )
             return [AssetStatus(creative_id=a["creative_id"], status="approved") for a in assets]
-        return [AssetStatus(creative_id=a["creative_id"], status="pending") for a in assets]
+
+        assert self._client is not None
+        statuses: list[AssetStatus] = []
+        for asset in assets:
+            try:
+                created = self._client.creatives.create_creative(
+                    name=asset.get("name") or f"adcp-{asset['creative_id']}",
+                    advertiser_ids=[int(self.advertiser_id)] if self.advertiser_id else None,
+                    base_ad_unit_id=asset.get("base_ad_unit_id"),
+                    external_id=asset["creative_id"],
+                )
+                # Echo the FW id back so associate_creatives can use it
+                # as platform_creative_ids[] input.
+                statuses.append(AssetStatus(creative_id=str(created.id), status="approved"))
+            except FreeWheelError as exc:
+                logger.warning(
+                    "FreeWheel creative_resource create failed for asset %s: %s",
+                    asset.get("creative_id"),
+                    exc,
+                )
+                statuses.append(AssetStatus(creative_id=asset["creative_id"], status="failed"))
+        return statuses
 
     def associate_creatives(self, line_item_ids: list[str], platform_creative_ids: list[str]) -> list[dict[str, Any]]:
+        """Bind FW creatives to FW placements via creative_instances.
+
+        FW's data model: creative_instance binds a creative to an
+        ad_unit_node (the placement→inventory binding row). One placement
+        has N ad_unit_nodes (pre-roll, mid-roll, post-roll, etc.) — to
+        traffic a creative against a placement we POST one creative_instance
+        per ad_unit_node under it.
+
+        ``line_item_ids`` here are FW placement IDs. We look up the
+        ad_unit_nodes for each placement from the synced inventory cache
+        (``freewheel_inventory`` parent_id=placement_id, entity_type=
+        ad_unit_node) and POST creative_instances for each (node, creative)
+        pair.
+
+        Returns one row per attempted binding with status="success" /
+        "failed" / "skipped" + a message explaining the failure or skip.
+        """
         if self.dry_run:
             for li in line_item_ids:
                 for ci in platform_creative_ids:
-                    self.log(f"Would POST .../line-items/{li}/creative-associations with creativeId={ci}")
+                    self.log(
+                        f"Would look up ad_unit_nodes for placement={li}, "
+                        f"then POST .../creative_instances ad_id=<each node> creative_id={ci}"
+                    )
             return [
                 {"line_item_id": li, "creative_id": ci, "status": "success"}
                 for li in line_item_ids
                 for ci in platform_creative_ids
             ]
-        return [
-            {
-                "line_item_id": li,
-                "creative_id": ci,
-                "status": "skipped",
-                "message": "FreeWheel creative association pending live-mode implementation",
-            }
-            for li in line_item_ids
-            for ci in platform_creative_ids
-        ]
+
+        assert self._client is not None
+        results: list[dict[str, Any]] = []
+
+        # Build placement_id → [ad_unit_node_ids] lookup from the cache.
+        # One query per unique placement (small set in practice).
+        node_ids_by_placement: dict[str, list[str]] = {}
+        with get_db_session() as session:
+            repo = FreeWheelInventoryRepository(session, self.tenant_id or "default")
+            for placement_id in set(line_item_ids):
+                rows = repo.list_by_type("ad_unit_node", parent_id=placement_id)
+                node_ids_by_placement[placement_id] = [row.entity_id for row in rows]
+
+        for placement_id in line_item_ids:
+            ad_unit_nodes = node_ids_by_placement.get(placement_id, [])
+            if not ad_unit_nodes:
+                for ci in platform_creative_ids:
+                    results.append(
+                        {
+                            "line_item_id": placement_id,
+                            "creative_id": ci,
+                            "status": "skipped",
+                            "message": (
+                                f"No ad_unit_nodes cached for placement {placement_id} — run inventory sync first."
+                            ),
+                        }
+                    )
+                continue
+
+            for ci in platform_creative_ids:
+                for node_id in ad_unit_nodes:
+                    try:
+                        binding = self._client.creatives.create_creative_instance(
+                            ad_unit_node_id=int(node_id),
+                            creative_id=int(ci),
+                        )
+                        results.append(
+                            {
+                                "line_item_id": placement_id,
+                                "creative_id": ci,
+                                "ad_unit_node_id": node_id,
+                                "creative_instance_id": binding.get("id"),
+                                "status": "success",
+                            }
+                        )
+                    except FreeWheelError as exc:
+                        logger.warning(
+                            "FreeWheel creative_instance bind failed for placement=%s node=%s creative=%s: %s",
+                            placement_id,
+                            node_id,
+                            ci,
+                            exc,
+                        )
+                        results.append(
+                            {
+                                "line_item_id": placement_id,
+                                "creative_id": ci,
+                                "ad_unit_node_id": node_id,
+                                "status": "failed",
+                                "message": str(exc),
+                            }
+                        )
+        return results
 
     # ----- status / delivery -----
 
     def check_media_buy_status(self, media_buy_id: str, today: datetime) -> CheckMediaBuyStatusResponse:
+        io_id = media_buy_id.removeprefix("freewheel_")
         if self.dry_run:
-            self.log(
-                f"Would call: GET {self.base_url}/networks/{self.network_id}"
-                f"/campaigns/{media_buy_id.replace('freewheel_', '')}"
-            )
+            self.log(f"Would call: GET {self.base_url}/services/v3/insertion_orders/{io_id}")
             return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status="active")
         assert self._client is not None
         try:
-            campaign = self._client.get_campaign(media_buy_id.removeprefix("freewheel_"))
-            status = campaign.get("status", "active").lower()
-            return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status=status)
-        except FreeWheelAPIError as exc:
-            logger.warning("FreeWheel get_campaign failed: %s", exc)
+            io = self._client.commercial.get_insertion_order(int(io_id))
+            # The IO carries its booking state on ``stage`` (NOT_BOOKED, BOOKED, etc.);
+            # ``status`` is reserved for placement/campaign-level lifecycle.
+            status_value = (io.stage or io.status or "active").lower()
+            return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status=status_value)
+        except FreeWheelError as exc:
+            logger.warning("FreeWheel get_insertion_order failed: %s", exc)
             return CheckMediaBuyStatusResponse(media_buy_id=media_buy_id, status="unknown")
 
     def get_media_buy_delivery(
         self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
     ) -> AdapterGetMediaBuyDeliveryResponse:
-        """Return delivery totals.
+        """Aggregate delivery totals from the placement-stats cache.
 
-        Live-mode reporting requires hitting FreeWheel's separate reporting
-        API (a different surface from the Publisher API). Skeleton-only:
-        dry-run returns simulated numbers, live mode returns zeros until
-        the reporting flow is wired.
+        Live mode reads ``freewheel_placement_stats`` (populated by the
+        reporting sync job — pending Tier 2 FW scope). When the cache is
+        empty (sync not running yet, or scope still pending), raises
+        :class:`DeliveryDataUnavailable` so the impl layer can surface a
+        ``data_unavailable`` error rather than a zero-delivery response.
+
+        Returning zeros silently was misleading buyers and the delivery
+        webhook scheduler (which would fire false "delivering=0" signals
+        every hour). Raising lets the AdCP layer respond with a clear
+        "no data yet" error code, which the scheduler skips on.
+
+        Dry-run returns simulated numbers for demo/testing.
         """
-        if not self.dry_run:
-            return self._empty_delivery_response(media_buy_id, date_range)
+        if self.dry_run:
+            return self._simulated_delivery_response(
+                media_buy_id, date_range, today, target_impressions=750_000, cpm=18.0, completion_rate=0.85
+            )
 
-        return self._simulated_delivery_response(
-            media_buy_id, date_range, today, target_impressions=750_000, cpm=18.0, completion_rate=0.85
+        insertion_order_id = media_buy_id.removeprefix("freewheel_")
+        with get_db_session() as session:
+            repo = FreeWheelPlacementStatsRepository(session, self.tenant_id or "default")
+            stats_rows = repo.list_by_insertion_order(insertion_order_id)
+
+        if not stats_rows:
+            raise DeliveryDataUnavailable(media_buy_id)
+
+        total_impressions = sum(row.impressions or 0 for row in stats_rows)
+        total_spend = sum((row.spend_micros or 0) for row in stats_rows) / 1_000_000.0
+        total_completed = sum((row.completed_views or 0) for row in stats_rows)
+        # Pick a currency: every row should agree, but fall back to the
+        # first non-null if they don't.
+        currency = next((row.currency for row in stats_rows if row.currency), "USD")
+
+        totals = DeliveryTotals(
+            impressions=float(total_impressions),
+            spend=total_spend,
+            completed_views=float(total_completed) if total_completed else None,
+            completion_rate=(total_completed / total_impressions) if total_impressions else None,
         )
+        by_package = [
+            AdapterPackageDelivery(
+                package_id=row.placement_id,
+                impressions=int(row.impressions or 0),
+                spend=(row.spend_micros or 0) / 1_000_000.0,
+                completed_views=int(row.completed_views) if row.completed_views is not None else None,
+            )
+            for row in stats_rows
+        ]
+        return AdapterGetMediaBuyDeliveryResponse(
+            media_buy_id=media_buy_id,
+            reporting_period=date_range,
+            totals=totals,
+            by_package=by_package,
+            currency=currency,
+        )
+
+    def get_packages_snapshot(
+        self, package_refs: list[tuple[str, str, str | None]]
+    ) -> dict[str, dict[str, Snapshot | None]]:
+        """Near-real-time package snapshots from the placement-stats cache.
+
+        Reads ``freewheel_placement_stats`` rows for the FW placement IDs
+        in ``package_refs`` and returns one :class:`Snapshot` per package.
+        Missing rows (no reporting sync data yet, or no scope granted)
+        surface as ``None`` so the caller can render a 'no data' state
+        rather than failing.
+        """
+        from src.core.schemas import DeliveryStatus
+
+        now = datetime.now(UTC)
+        result: dict[str, dict[str, Snapshot | None]] = {}
+        placement_ids = [ref[2] for ref in package_refs if ref[2] is not None]
+
+        if not placement_ids:
+            for media_buy_id, package_id, _ in package_refs:
+                result.setdefault(media_buy_id, {})[package_id] = None
+            return result
+
+        with get_db_session() as session:
+            repo = FreeWheelPlacementStatsRepository(session, self.tenant_id or "default")
+            stats = repo.get_by_placement_ids(placement_ids)
+
+        for media_buy_id, package_id, placement_id in package_refs:
+            row = stats.get(placement_id) if placement_id else None
+            if row is None:
+                result.setdefault(media_buy_id, {})[package_id] = None
+                continue
+
+            as_of = row.as_of if row.as_of.tzinfo else row.as_of.replace(tzinfo=UTC)
+            staleness_seconds = max(0, int((now - as_of).total_seconds()))
+
+            delivery_status: DeliveryStatus | None = None
+            if row.delivery_status:
+                # Trust the FW-reported state when present; map common
+                # values to the AdCP enum, leave unknown ones as None.
+                lower = row.delivery_status.lower()
+                if lower in ("delivering", "active"):
+                    delivery_status = DeliveryStatus.delivering
+                elif lower in ("completed", "complete"):
+                    delivery_status = DeliveryStatus.completed
+                elif lower in ("paused", "not_delivering", "inactive"):
+                    delivery_status = DeliveryStatus.not_delivering
+                elif lower in ("exhausted", "budget_exhausted"):
+                    delivery_status = DeliveryStatus.budget_exhausted
+
+            result.setdefault(media_buy_id, {})[package_id] = Snapshot(
+                as_of=as_of,
+                impressions=float(row.impressions or 0),
+                spend=(row.spend_micros or 0) / 1_000_000.0,
+                clicks=float(row.clicks) if row.clicks is not None else None,
+                staleness_seconds=staleness_seconds,
+                delivery_status=delivery_status,
+                currency=row.currency,
+            )
+        return result
 
     # FreeWheel performance index updates aren't yet wired — base default applies.
 

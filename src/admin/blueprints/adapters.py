@@ -233,8 +233,8 @@ def save_adapter_config(tenant_id, **kwargs):
                 adapter_config.mock_manual_approval_required = getattr(
                     validated_config, "manual_approval_required", False
                 )
-            # Note: GAM will be added as its schema is created. Triton + FreeWheel
-            # already use config_json via their connection schemas.
+            # Note: GAM will be added as its schema is created. FreeWheel
+            # already uses config_json via its connection schema.
 
             session.commit()
             logger.info(f"Saved adapter config for tenant {tenant_id}: {adapter_type}")
@@ -265,106 +265,98 @@ def get_adapter_capabilities(adapter_type, tenant_id, **kwargs):
         return jsonify({})
 
 
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/<adapter_type>/check-permissions", methods=["POST"])
+@require_tenant_access(role=("admin", "member"), allow_embedded_writes=True)
+def check_adapter_permissions(tenant_id, adapter_type, **kwargs):
+    """Probe upstream API for permission gaps before they bite us in production.
+
+    Instantiates the configured adapter and calls its ``check_permissions()``
+    method, which probes every endpoint the adapter depends on with cheap
+    GETs. Returns a structured report — operators see at-connect time which
+    AdCP features will work vs which need additional upstream IAM grants.
+
+    Read-only by design — every probe is a GET. Opts into the embedded-write
+    gate accordingly. Adapter must be configured on the tenant; an unconfigured
+    adapter returns 400.
+    """
+    from dataclasses import asdict
+
+    from src.adapters import ADAPTER_REGISTRY
+    from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+    adapter_class = ADAPTER_REGISTRY.get(adapter_type.lower())
+    if not adapter_class:
+        return jsonify({"success": False, "error": f"Unknown adapter type: {adapter_type}"}), 404
+
+    with get_db_session() as session:
+        repo = AdapterConfigRepository(session, tenant_id)
+        config_row = repo.find_by_tenant()
+        if config_row is None or config_row.adapter_type != adapter_type.lower():
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": f"No {adapter_type} adapter configured for tenant {tenant_id}",
+                    }
+                ),
+                400,
+            )
+        adapter_config = dict(config_row.config_json or {})
+
+    # The probe only needs a minimal principal — no real advertiser-scoped
+    # calls happen. A stub principal_id keeps the adapter constructor happy.
+    from src.core.schemas import Principal
+
+    stub_principal = Principal(
+        tenant_id=tenant_id,
+        principal_id="__permissions_probe__",
+        name="permissions-probe",
+        platform_mappings={adapter_type: {"advertiser_id": "0"}},
+    )
+
+    try:
+        adapter = adapter_class(
+            config=adapter_config,
+            principal=stub_principal,
+            dry_run=False,
+            tenant_id=tenant_id,
+        )
+        report = adapter.check_permissions()
+    except Exception as exc:
+        logger.warning("Permissions probe failed for tenant=%s adapter=%s: %s", tenant_id, adapter_type, exc)
+        return jsonify({"success": False, "error": f"Could not run probe: {exc}"}), 500
+
+    return jsonify(
+        {
+            "success": True,
+            "report": {
+                "adapter": report.adapter,
+                "tenant_id": report.tenant_id,
+                "checked_at": report.checked_at.isoformat(),
+                "fully_operational": report.fully_operational,
+                "error": report.error,
+                "checks": [asdict(c) for c in report.checks],
+            },
+        }
+    )
+
+
 # FreeWheel-specific endpoints
 
 
 @adapters_bp.route("/api/tenant/<tenant_id>/adapters/freewheel/test-connection", methods=["POST"])
 @require_tenant_access(role=("admin",), allow_embedded_writes=True)
 def test_freewheel_connection(tenant_id, **kwargs):
-    """Verify FreeWheel OAuth credentials by performing a client_credentials token fetch.
+    """Verify FreeWheel credentials by minting a bearer (password grant) or
+    validating a pre-minted bearer via /auth/token/info.
 
-    Accepts ``client_id``, ``network_id``, ``environment`` (production/staging) and
-    ``client_secret`` (optional — falls back to the encrypted secret already stored
-    on AdapterConfig.config_json).
+    Accepts (in priority order):
+      - ``username`` + ``password`` for OAuth2 password grant — the canonical path
+      - ``api_token`` for pre-minted-bearer use (escape hatch)
 
-    Read-only probe — validates credentials against the upstream provider and
-    never writes to AdapterConfig — so it opts into the embedded-write gate.
-    """
-    from src.core.utils.encryption import is_encrypted
-
-    try:
-        data = request.get_json() or {}
-        client_id = data.get("client_id")
-        client_secret = data.get("client_secret")
-        network_id = data.get("network_id")
-        environment = data.get("environment", "production")
-
-        if not client_id or not network_id:
-            return jsonify({"success": False, "error": "client_id and network_id are required"}), 400
-
-        # Reject submitted ciphertext — only the DB-fallback path is allowed
-        # to use the stored ciphertext. See cross-tenant smuggling note in
-        # save_adapter_config.
-        if client_secret and is_encrypted(client_secret):
-            return (
-                jsonify(
-                    {"success": False, "error": "client_secret must be plaintext (encrypted-token replay rejected)"}
-                ),
-                400,
-            )
-
-        if not client_secret:
-            from src.core.database.repositories.adapter_config import AdapterConfigRepository
-
-            with get_db_session() as session:
-                existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
-                if existing and existing.config_json:
-                    from src.adapters.freewheel import FreeWheelConnectionConfig
-
-                    try:
-                        rehydrated = FreeWheelConnectionConfig.model_validate(existing.config_json)
-                        client_secret = rehydrated.client_secret
-                    except ValidationError:
-                        client_secret = None
-        if not client_secret:
-            return (
-                jsonify({"success": False, "error": "client_secret is required for first connection test"}),
-                400,
-            )
-
-        from src.adapters.freewheel import FreeWheelAPIError, FreeWheelClient
-        from src.adapters.freewheel.schemas import FREEWHEEL_HOSTS
-
-        base_url = FREEWHEEL_HOSTS.get(environment, FREEWHEEL_HOSTS["production"])
-        client = FreeWheelClient(
-            client_id=client_id,
-            client_secret=client_secret,
-            network_id=network_id,
-            base_url=base_url,
-        )
-        try:
-            client._fetch_token()
-        except FreeWheelAPIError as exc:
-            # Log the full upstream body server-side; return only a generic
-            # message to the client to avoid echoing reflected request data
-            # or hint messages from the auth provider.
-            logger.warning("FreeWheel auth probe failed: %s body=%s", exc, exc.body)
-            return jsonify({"success": False, "error": "FreeWheel rejected the credentials"}), 200
-
-        network_name: str | None = None
-        try:
-            network = client.get_network()
-            network_name = network.get("name") or network.get("displayName")
-        except FreeWheelAPIError:
-            pass  # Token works; network endpoint specifics may vary
-
-        return jsonify({"success": True, "environment": environment, "network_name": network_name})
-
-    except Exception as e:
-        logger.error(f"FreeWheel connection test failed: {e}", exc_info=True)
-        return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
-
-
-# Triton-specific endpoints
-
-
-@adapters_bp.route("/api/tenant/<tenant_id>/adapters/triton/test-connection", methods=["POST"])
-@require_tenant_access(role=("admin",), allow_embedded_writes=True)
-def test_triton_connection(tenant_id, **kwargs):
-    """Verify Triton TAP credentials by performing a JWT login.
-
-    Accepts ``username`` (required) and ``password`` (optional — falls back to
-    the encrypted password already stored on AdapterConfig.config_json).
+    Missing fields fall back to the encrypted values already on
+    ``AdapterConfig.config_json``. Submitted ciphertext is rejected to
+    prevent cross-tenant replay (see save_adapter_config).
 
     Read-only probe — validates credentials against the upstream provider and
     never writes to AdapterConfig — so it opts into the embedded-write gate.
@@ -375,62 +367,324 @@ def test_triton_connection(tenant_id, **kwargs):
         data = request.get_json() or {}
         username = data.get("username")
         password = data.get("password")
-        base_url = data.get("base_url") or "https://mbapi.tritondigital.com"
-        login_url = data.get("login_url") or "https://login.tritondigital.com"
+        api_token = data.get("api_token")
+        environment = data.get("environment", "production")
 
-        if not username:
-            return jsonify({"success": False, "error": "username is required"}), 400
+        # Reject submitted ciphertext on secret fields — only the DB-fallback
+        # path is allowed to use stored ciphertext.
+        for field_name, field_value in [("password", password), ("api_token", api_token)]:
+            if field_value and is_encrypted(field_value):
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": f"{field_name} must be plaintext (encrypted-token replay rejected)",
+                        }
+                    ),
+                    400,
+                )
 
-        # https-only — prevent the form from redirecting credential POST to an
-        # attacker-controlled host.
-        if not base_url.startswith("https://") or not login_url.startswith("https://"):
-            return jsonify({"success": False, "error": "base_url and login_url must be https://"}), 400
-
-        # Reject submitted ciphertext — see cross-tenant smuggling note in
-        # save_adapter_config.
-        if password and is_encrypted(password):
-            return (
-                jsonify({"success": False, "error": "password must be plaintext (encrypted-token replay rejected)"}),
-                400,
-            )
-
-        if not password:
+        # Fill in missing fields from stored config so partial submissions work.
+        if not (username and password) and not api_token:
             from src.core.database.repositories.adapter_config import AdapterConfigRepository
 
             with get_db_session() as session:
                 existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
                 if existing and existing.config_json:
-                    from src.adapters.triton import TritonConnectionConfig
+                    from src.adapters.freewheel import FreeWheelConnectionConfig
 
                     try:
-                        rehydrated = TritonConnectionConfig.model_validate(existing.config_json)
-                        password = rehydrated.password
+                        rehydrated = FreeWheelConnectionConfig.model_validate(existing.config_json)
+                        username = username or rehydrated.username
+                        password = password or rehydrated.password
+                        api_token = api_token or rehydrated.api_token
                     except ValidationError:
-                        password = None
-        if not password:
-            return jsonify({"success": False, "error": "password is required for first connection test"}), 400
+                        pass
 
-        from src.adapters.triton import TritonAPIError, TritonClient
+        if not (username and password) and not api_token:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "Connection test requires either (username + password) or api_token",
+                    }
+                ),
+                400,
+            )
 
-        client = TritonClient(username=username, password=password, base_url=base_url, login_url=login_url)
+        from src.adapters.freewheel import FreeWheelClient, FreeWheelError
+        from src.adapters.freewheel.schemas import FREEWHEEL_HOSTS
+
+        base_url = FREEWHEEL_HOSTS.get(environment, FREEWHEEL_HOSTS["production"])
+        client = FreeWheelClient(username=username, password=password, api_token=api_token, base_url=base_url)
         try:
-            client.login()
-        except TritonAPIError as exc:
-            logger.warning("Triton auth probe failed: %s body=%s", exc, exc.body)
-            return jsonify({"success": False, "error": "Triton rejected the credentials"}), 200
+            info = client.token_info()
+        except FreeWheelError as exc:
+            # Log the full upstream body server-side; return only a generic
+            # message to the client to avoid echoing reflected request data
+            # or hint messages from the auth provider.
+            logger.warning("FreeWheel token probe failed: %s body=%s", exc, exc.body)
+            return jsonify({"success": False, "error": "FreeWheel rejected the credentials"}), 200
 
-        publisher_name: str | None = None
-        try:
-            publisher = client.get_publisher()
-            publisher_name = publisher.get("name") or publisher.get("displayName")
-        except TritonAPIError:
-            pass  # JWT works; publisher endpoint specifics may vary
-
-        return jsonify({"success": True, "publisher_name": publisher_name})
+        return jsonify(
+            {
+                "success": True,
+                "environment": environment,
+                "expires_in": info.get("expires_in"),
+                "auth_mode": "password_grant" if (username and password) else "pre_minted_token",
+            }
+        )
 
     except Exception as e:
-        logger.error(f"Triton connection test failed: {e}", exc_info=True)
+        logger.error(f"FreeWheel connection test failed: {e}", exc_info=True)
         return jsonify({"success": False, "error": "Connection test failed (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/freewheel/inventory", methods=["GET"])
+@require_tenant_access()
+def list_freewheel_inventory(tenant_id, **kwargs):
+    """Return locally-cached FreeWheel inventory entries for the product setup UI.
+
+    Filterable by ``entity_type`` (site, site_section, site_group, series,
+    video_group, ad_unit_package, ad_unit, ad_unit_node, standard_attribute).
+    Optional ``parent_id`` narrows to children of a specific parent. Optional
+    ``q`` substring-matches the ``name`` field.
+
+    Returns a flat list (no pagination — the cache is small enough that
+    sending the whole filtered set is fine for now).
+    """
+    from src.core.database.repositories.freewheel_inventory import FreeWheelInventoryRepository
+
+    entity_type = request.args.get("entity_type")
+    parent_id = request.args.get("parent_id")
+    q = request.args.get("q")
+
+    if not entity_type:
+        return jsonify({"success": False, "error": "entity_type query param is required"}), 400
+
+    with get_db_session() as session:
+        repo = FreeWheelInventoryRepository(session, tenant_id)
+        rows = repo.list_by_type(entity_type, parent_id=parent_id)
+
+    items = [
+        {"entity_id": row.entity_id, "name": row.name, "parent_id": row.parent_id}
+        for row in rows
+        if not q or (row.name and q.lower() in row.name.lower())
+    ]
+    return jsonify({"success": True, "entity_type": entity_type, "count": len(items), "items": items})
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/freewheel/sync-inventory", methods=["POST"])
+@require_tenant_access(role=("admin",))
+def sync_freewheel_inventory(tenant_id, **kwargs):
+    """Walk the FreeWheel inventory taxonomy and refresh the local cache.
+
+    Reads the stored connection config, instantiates a FreeWheel client,
+    and runs :class:`FreeWheelInventorySync` against the tenant's adapter
+    config. Returns per-entity-type counts + any partial-failure errors.
+
+    The cache feeds the FreeWheel adapter's product setup UI; it's not
+    exposed to AdCP buyers (property discovery goes through AAO lookup).
+    """
+    try:
+        from src.adapters.freewheel import FreeWheelClient, FreeWheelConnectionConfig
+        from src.adapters.freewheel.inventory_sync import FreeWheelInventorySync
+        from src.adapters.freewheel.schemas import FREEWHEEL_HOSTS
+        from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+        with get_db_session() as session:
+            existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+            if not existing or existing.adapter_type != "freewheel" or not existing.config_json:
+                return (
+                    jsonify({"success": False, "error": "FreeWheel adapter is not configured for this tenant"}),
+                    400,
+                )
+
+            try:
+                cfg = FreeWheelConnectionConfig.model_validate(existing.config_json)
+            except ValidationError as exc:
+                return jsonify({"success": False, "error": f"Stored config is invalid: {exc}"}), 400
+
+            base_url = FREEWHEEL_HOSTS.get(cfg.environment, FREEWHEEL_HOSTS["production"])
+            client = FreeWheelClient(
+                username=cfg.username,
+                password=cfg.password,
+                api_token=cfg.api_token,
+                base_url=base_url,
+            )
+
+            syncer = FreeWheelInventorySync(client=client, session=session, tenant_id=tenant_id)
+            result = syncer.run()
+            session.commit()
+
+        return jsonify(
+            {
+                "success": result.succeeded,
+                "counts": result.counts,
+                "errors": result.errors,
+                "total_synced": result.total_synced,
+                "started_at": result.started_at.isoformat() if result.started_at else None,
+                "finished_at": result.finished_at.isoformat() if result.finished_at else None,
+            }
+        )
+    except Exception as e:
+        logger.error(f"FreeWheel inventory sync failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/freewheel/sync-reporting", methods=["POST"])
+@require_tenant_access(role=("admin",))
+def sync_freewheel_reporting(tenant_id, **kwargs):
+    """Pull a fresh delivery report from FreeWheel and upsert into the
+    placement-stats cache feeding ``get_packages_snapshot`` /
+    ``get_media_buy_delivery``.
+
+    Submits one Query Reporting job covering all placements (or the
+    placements named in ``placement_ids``) for today (or the date window
+    in ``start_date`` / ``end_date``). Polls the job, fetches results,
+    parses each row, bulk-upserts into ``freewheel_placement_stats``.
+
+    Returns 503 when the upstream scope is still pending — the
+    permission-check endpoint surfaces the exact denied paths.
+    """
+    from src.adapters.freewheel import FreeWheelClient, FreeWheelConnectionConfig
+    from src.adapters.freewheel._reporting import ReportingError
+    from src.adapters.freewheel.reporting_sync import (
+        FreeWheelReportingSync,
+        ReportingScopeNotGranted,
+    )
+    from src.adapters.freewheel.schemas import FREEWHEEL_HOSTS
+    from src.core.database.repositories.adapter_config import AdapterConfigRepository
+
+    try:
+        body = request.get_json(silent=True) or {}
+        placement_ids = body.get("placement_ids")  # optional
+        start_date_str = body.get("start_date")
+        end_date_str = body.get("end_date")
+
+        from datetime import date as _date
+
+        start_date = _date.fromisoformat(start_date_str) if start_date_str else None
+        end_date = _date.fromisoformat(end_date_str) if end_date_str else None
+
+        with get_db_session() as session:
+            existing = AdapterConfigRepository(session, tenant_id).find_by_tenant()
+            if not existing or existing.adapter_type != "freewheel" or not existing.config_json:
+                return (
+                    jsonify({"success": False, "error": "FreeWheel adapter is not configured for this tenant"}),
+                    400,
+                )
+            try:
+                cfg = FreeWheelConnectionConfig.model_validate(existing.config_json)
+            except ValidationError as exc:
+                return jsonify({"success": False, "error": f"Stored config is invalid: {exc}"}), 400
+
+            base_url = FREEWHEEL_HOSTS.get(cfg.environment, FREEWHEEL_HOSTS["production"])
+            client = FreeWheelClient(
+                username=cfg.username,
+                password=cfg.password,
+                api_token=cfg.api_token,
+                base_url=base_url,
+            )
+
+            syncer = FreeWheelReportingSync(client=client, tenant_id=tenant_id, session=session)
+            try:
+                result = syncer.run(
+                    placement_ids=placement_ids,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except ReportingScopeNotGranted as exc:
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "scope_pending": True,
+                            "error": str(exc),
+                        }
+                    ),
+                    503,
+                )
+            except ReportingError as exc:
+                return jsonify({"success": False, "error": str(exc)}), 502
+
+        return jsonify(
+            {
+                "success": True,
+                "placements_updated": result.placements_updated,
+                "job_id": result.job_id,
+                "error": result.error,
+            }
+        )
+    except Exception as e:
+        logger.error(f"FreeWheel reporting sync failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": "Sync failed (see server logs)"}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/freewheel/cache-freshness", methods=["GET"])
+@require_tenant_access()
+def freewheel_cache_freshness(tenant_id, **kwargs):
+    """Return ``last_synced_at`` for both FW caches so the settings page
+    can surface a "data is stale" banner.
+
+    Stale thresholds are policy choices, returned alongside the timestamps
+    so the UI doesn't have to embed them:
+
+      - inventory: stale after 24h (taxonomy changes are infrequent;
+        publishers re-sync on a daily-ish cadence).
+      - reporting: stale after 2h (delivery pacing matters in near-
+        real-time; webhook scheduler runs hourly so 2h is one missed
+        cycle).
+
+    ``never_synced=true`` is a distinct signal from "stale by N hours" —
+    a never-run cache is an onboarding gap, not a freshness issue.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from src.core.database.repositories.freewheel_inventory import FreeWheelInventoryRepository
+    from src.core.database.repositories.freewheel_placement_stats import FreeWheelPlacementStatsRepository
+
+    INVENTORY_STALE_THRESHOLD = timedelta(hours=24)
+    REPORTING_STALE_THRESHOLD = timedelta(hours=2)
+
+    with get_db_session() as session:
+        inventory_at = FreeWheelInventoryRepository(session, tenant_id).latest_sync_at()
+        reporting_at = FreeWheelPlacementStatsRepository(session, tenant_id).latest_sync_at()
+
+    now = datetime.now(UTC)
+
+    def _stale_info(last_at, threshold):
+        if last_at is None:
+            return {"last_synced_at": None, "age_seconds": None, "stale": True, "never_synced": True}
+        if last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=UTC)
+        age = (now - last_at).total_seconds()
+        return {
+            "last_synced_at": last_at.isoformat(),
+            "age_seconds": int(age),
+            "stale": age > threshold.total_seconds(),
+            "never_synced": False,
+        }
+
+    return jsonify(
+        {
+            "success": True,
+            "inventory": {
+                **_stale_info(inventory_at, INVENTORY_STALE_THRESHOLD),
+                "threshold_seconds": int(INVENTORY_STALE_THRESHOLD.total_seconds()),
+            },
+            "reporting": {
+                **_stale_info(reporting_at, REPORTING_STALE_THRESHOLD),
+                "threshold_seconds": int(REPORTING_STALE_THRESHOLD.total_seconds()),
+            },
+        }
+    )
+
+
+# Triton test-connection endpoint removed — adapter parked while their APIs
+# aren't production-ready. Source remains under src/adapters/triton/ so
+# restoring the endpoint is a single revert; templates/adapters/triton/ also
+# preserved.
 
 
 # Broadstreet-specific endpoints

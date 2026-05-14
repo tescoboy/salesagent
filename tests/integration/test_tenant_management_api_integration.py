@@ -116,6 +116,82 @@ class TestTenantManagementAPIIntegration:
         assert response.status_code == 200
         assert response.json["status"] == "healthy"
 
+    def test_list_adapters_returns_supported_catalog(self, client, mock_api_key_auth):
+        """Discovery endpoint surfaces the full adapter catalog so embedders
+        can dynamically render the picker. Verifies every shipped adapter
+        appears with its capabilities + connection JSON Schema."""
+        response = client.get(
+            "/api/v1/tenant-management/adapters",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+
+        assert response.status_code == 200
+        body = response.json
+        assert body["count"] == len(body["adapters"])
+
+        types = {entry["type"] for entry in body["adapters"]}
+        assert types == {"google_ad_manager", "mock", "freewheel", "broadstreet"}
+        # Triton is parked — must not appear in the discovery catalog.
+        assert "triton" not in types
+
+        # FreeWheel entry exercises every interesting field path
+        fw = next(entry for entry in body["adapters"] if entry["type"] == "freewheel")
+        assert fw["name"] == "FreeWheel"
+        assert "Video and CTV" in fw["description"]
+        assert fw["tier"] == "live"
+        assert "olv" in fw["default_channels"]
+        assert "ctv" in fw["default_channels"]
+        assert fw["capabilities"]["supports_inventory_sync"] is True
+        assert "cpm" in fw["capabilities"]["supported_pricing_models"]
+
+        # JSON Schema must carry the discriminator literal so embedders can
+        # validate locally before they POST
+        schema = fw["connection_schema"]
+        type_field = schema["properties"]["type"]
+        # Pydantic v2 emits literals via either ``const`` or ``enum`` —
+        # accept either as long as the value is "freewheel".
+        assert type_field.get("const") == "freewheel" or type_field.get("enum") == ["freewheel"]
+
+    def test_list_adapters_tier_filter_excludes_mock_from_live(self, client, mock_api_key_auth):
+        """?tier=live filters out simulated/dev-only adapters (Mock) so
+        production storefronts can render the picker without offering
+        a fake option."""
+        response = client.get(
+            "/api/v1/tenant-management/adapters?tier=live",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert response.status_code == 200
+        types = {entry["type"] for entry in response.json["adapters"]}
+        assert "mock" not in types
+        assert types == {"google_ad_manager", "freewheel", "broadstreet"}
+        # And every returned entry is tier=live
+        assert all(entry["tier"] == "live" for entry in response.json["adapters"])
+
+    def test_list_adapters_tier_filter_test_returns_only_mock(self, client, mock_api_key_auth):
+        """?tier=test returns just the simulated adapters — useful for dev
+        consoles that want to show the test surface explicitly."""
+        response = client.get(
+            "/api/v1/tenant-management/adapters?tier=test",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert response.status_code == 200
+        types = {entry["type"] for entry in response.json["adapters"]}
+        assert types == {"mock"}
+
+    def test_list_adapters_tier_filter_rejects_unknown_value(self, client, mock_api_key_auth):
+        """Unknown tier values must be rejected — silently ignoring them
+        would mask client bugs."""
+        response = client.get(
+            "/api/v1/tenant-management/adapters?tier=beta",
+            headers={"X-Tenant-Management-API-Key": mock_api_key_auth},
+        )
+        assert response.status_code == 400
+
+    def test_list_adapters_requires_api_key(self, client):
+        """Discovery endpoint is gated by the tenant-management API key."""
+        response = client.get("/api/v1/tenant-management/adapters")
+        assert response.status_code in (401, 403)
+
     def test_create_minimal_gam_tenant(self, client, mock_api_key_auth):
         """Test creating a minimal GAM tenant with just refresh token."""
         tenant_data = {
