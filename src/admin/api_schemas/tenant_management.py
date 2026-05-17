@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator, model_validator
 
+from src.admin.services.adapter_connection_tester import AdapterErrorCode
 from src.core.config import get_pydantic_extra_mode
 
 _EXTRA_MODE = get_pydantic_extra_mode()
@@ -476,12 +477,21 @@ class AdapterConfigResponse(BaseModel):
 
 
 class TestConnectionResponse(BaseModel):
-    """Result of an adapter connection probe."""
+    """Result of an adapter connection probe.
+
+    ``error_code`` classifies the fault into a closed set of typed values
+    so the UI can branch without parsing the human-readable ``error``.
+    The same code appears as the suffix of the ``adapter_{code}`` error
+    in :class:`ApiError` envelopes from the provision / PUT paths. See
+    :mod:`src.admin.services.adapter_connection_tester`.
+    """
 
     model_config = _config()
 
     success: bool
     error: str | None = None
+    error_code: AdapterErrorCode | None = None
+    details: dict[str, Any] | None = None
     tested_at: datetime
 
 
@@ -504,6 +514,10 @@ class PreviewAdapterResponse(BaseModel):
     ``ok=False`` (bad creds) is returned with HTTP 200 — Storefront renders
     this inline. Hard errors (malformed body, missing API key) still surface
     via the normal 4xx path.
+
+    ``error_code`` carries the same typed classification as
+    :class:`TestConnectionResponse` so the UI can branch on machine-readable
+    fault categories rather than parsing ``error``.
     """
 
     model_config = _config()
@@ -515,6 +529,8 @@ class PreviewAdapterResponse(BaseModel):
     time_zone: str | None = None
     inventory_reachable: bool = False
     error: str | None = None
+    error_code: AdapterErrorCode | None = None
+    details: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
