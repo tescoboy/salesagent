@@ -57,6 +57,7 @@ from src.admin.api_schemas.tenant_management import (
     ProvisionTenantRequest,
     ProvisionTenantResponse,
     RecentBuyer,
+    RefreshConflictResponse,
     RefreshResponse,
     RejectWorkflowRequest,
     SpringServeAdapterConfig,
@@ -2194,6 +2195,10 @@ def _spawn_refresh_workers(tenant_id: str, sync_run_ids: dict[str, str]) -> None
             targeting_row = session.scalars(select(SyncJob).filter_by(sync_id=targeting_id)).first()
             if targeting_row is not None:
                 targeting_row.status = "running"
+                # Restamp so /refresh's 60s idempotency window reflects
+                # when the bundled targeting work actually started, not
+                # when the row was queued at provision/refresh time.
+                targeting_row.started_at = datetime.now(UTC)
                 targeting_row.progress = {"phase": "Bundled with concurrent inventory sync"}
                 session.commit()
 
@@ -2245,15 +2250,25 @@ def _create_and_spawn_refresh(
     *,
     triggered_by_id: str,
     now: datetime | None = None,
-) -> tuple[dict[str, str], datetime]:
+) -> tuple[dict[str, str], datetime, dict[str, str]]:
     """Create pending SyncJob rows for all enabled sync types and spawn
-    their workers. Returns ``(sync_run_ids, started_at)``.
+    their workers. Returns ``(sync_run_ids, started_at, running_conflicts)``.
 
     Single source of truth for the row-create-then-spawn pattern shared
     by ``refresh_tenant`` and ``provision_tenant`` (Sprint 1.8 §8
     first-sync-on-provision). Idempotent under rapid re-entry: an
     existing SyncJob within the 60s window is reused instead of
     queuing a duplicate.
+
+    ``running_conflicts`` is a ``{sync_type: existing_sync_id}`` map
+    naming the sync_types that already had a ``status=running`` row
+    started *outside* the 60s idempotency window — i.e. a long-running
+    in-flight sync. The 60s reuse-on-recent-start path is treated as
+    part of the same caller action and does NOT populate this dict.
+    Callers turn a non-empty dict into HTTP 409 (issue #463) so the
+    storefront's "Retry" button gets a clear signal that the click
+    triggered nothing new. Provision-time first-sync ignores this
+    dict — a fresh tenant cannot have a running sync.
 
     The caller already validated the tenant exists.
     """
@@ -2267,6 +2282,7 @@ def _create_and_spawn_refresh(
             raise ValueError(f"Tenant {tenant_id!r} does not exist")
 
         sync_run_ids: dict[str, str] = {}
+        running_conflicts: dict[str, str] = {}
         idempotency_cutoff = now - timedelta(seconds=_REFRESH_IDEMPOTENCY_SECONDS)
         adapter_type = tenant.ad_server or "mock"
 
@@ -2290,6 +2306,15 @@ def _create_and_spawn_refresh(
 
             if existing is not None:
                 sync_run_ids[sync_type] = existing.sync_id
+                # A running row that started outside the 60s window is a
+                # genuine conflict — not the rapid-double-click case the
+                # idempotency window covers. ``started_at`` is timezone-
+                # aware on DateTime(timezone=True) columns; ``cutoff`` is
+                # UTC. Naive-aware mismatches surface as TypeError, not
+                # silent wrong answer.
+                existing_started = existing.started_at
+                if existing.status == "running" and existing_started < idempotency_cutoff:
+                    running_conflicts[sync_type] = existing.sync_id
                 continue
 
             sync_id = f"sync_{tenant_id}_{sync_type}_{int(now.timestamp())}"
@@ -2317,12 +2342,18 @@ def _create_and_spawn_refresh(
     # tracks the same lifecycle).
     _spawn_refresh_workers(tenant_id=tenant_id, sync_run_ids=sync_run_ids)
 
-    return sync_run_ids, now
+    return sync_run_ids, now, running_conflicts
 
 
 @tenant_management_api.route("/tenants/<tenant_id>/refresh", methods=["POST"])
 @require_tenant_management_api_key
-@spec.validate(resp=Response(HTTP_202=RefreshResponse, HTTP_404=ApiError))
+@spec.validate(
+    resp=Response(
+        HTTP_202=RefreshResponse,
+        HTTP_404=ApiError,
+        HTTP_409=RefreshConflictResponse,
+    )
+)
 def refresh_tenant(tenant_id: str):
     """Fan out a refresh across all sync types — collapses N per-sync
     triggers into one call.
@@ -2333,7 +2364,18 @@ def refresh_tenant(tenant_id: str):
     existing background sync infrastructure.
 
     Returns 202 Accepted with ``sync_run_ids`` mapping sync_type → sync_id.
-    Storefront polls ``GET /status.syncs`` for per-type progress.
+    Storefront reads ``GET /tenants/{tid}/status`` (``syncs`` block) for
+    per-type progress.
+
+    Returns 409 ``sync_already_running`` when at least one sync_type has
+    a ``running`` row that started *before* the 60s idempotency window
+    — i.e. a long-running in-flight sync that the caller's retry would
+    just shadow. The 409 body shape mirrors the 202 body
+    (``sync_run_ids`` + ``started_at`` at the top level) plus the
+    ``error``, ``message``, and ``running_sync_types`` fields — so
+    receivers don't need a second parse path. Issue #463: a UI "Retry"
+    button needs a clear signal that the click triggered nothing new
+    instead of an indistinguishable 202.
     """
     # Validate tenant exists before delegating to the helper. Cheap query
     # with the same shape the helper uses internally.
@@ -2342,13 +2384,31 @@ def refresh_tenant(tenant_id: str):
         if not tenant:
             return _api_error("tenant_not_found", f"Tenant {tenant_id!r} does not exist", 404)
 
-    sync_run_ids, started_at = _create_and_spawn_refresh(
+    sync_run_ids, started_at, running_conflicts = _create_and_spawn_refresh(
         tenant_id=tenant_id,
         triggered_by_id="tenant_management_api:refresh",
     )
 
-    response = RefreshResponse(sync_run_ids=sync_run_ids, started_at=started_at)
     invalidate_status_cache(tenant_id)
+
+    if running_conflicts:
+        # Shape mirrors the 202 body (sync_run_ids + started_at at the
+        # top level) so receivers don't need a second parse path. The
+        # in-flight run's id is the correlation handle — the caller
+        # can read GET /tenants/{tid}/status (syncs block) keyed by it
+        # without re-issuing a refresh.
+        conflict = RefreshConflictResponse(
+            message=(
+                f"Sync already running for sync_types: {', '.join(sorted(running_conflicts.keys()))}. "
+                "Existing sync_run_ids returned for correlation."
+            ),
+            sync_run_ids=sync_run_ids,
+            started_at=started_at,
+            running_sync_types=sorted(running_conflicts.keys()),
+        )
+        return jsonify(conflict.model_dump(mode="json")), 409
+
+    response = RefreshResponse(sync_run_ids=sync_run_ids, started_at=started_at)
     return jsonify(response.model_dump(mode="json")), 202
 
 

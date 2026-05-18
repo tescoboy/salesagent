@@ -2200,14 +2200,19 @@ class TestRefresh:
         finally:
             monkeypatch.setattr(_threading.Thread, "start", original_thread_start)
 
-    def test_running_sync_is_reused_in_response(self, client, auth_headers, tid, bound_factories):
-        """A pre-existing running SyncJob is reused even outside the 60s
-        idempotency window — running > stale-but-recent.
+    def test_running_sync_outside_window_returns_409_with_existing_id(self, client, auth_headers, tid, bound_factories):
+        """A pre-existing running SyncJob outside the 60s idempotency
+        window is a genuine conflict — return 409 with the existing
+        sync_id so the storefront can correlate, instead of an
+        indistinguishable 202.
 
         Clears the provision-time first-sync rows first so the synthetic
         running row is the only candidate; otherwise the just-spawned
         provision rows (status=pending, started_at=just-now) would win
         the most-recent ordering.
+
+        Issue #463: a UI "Retry" button needs to know its click triggered
+        nothing new. Pre-#463 this was a silent 202.
         """
         from datetime import timedelta as _td
 
@@ -2233,8 +2238,14 @@ class TestRefresh:
         bound_factories.commit()
 
         resp = client.post(f"/api/v1/tenant-management/tenants/{tid}/refresh", headers=auth_headers)
-        assert resp.status_code == 202
-        assert resp.get_json()["sync_run_ids"]["inventory"] == old_running_id
+        assert resp.status_code == 409
+        body = resp.get_json()
+        assert body["error"] == "sync_already_running"
+        # 409 body mirrors the 202 shape: sync_run_ids and started_at
+        # at the top level, no details nesting.
+        assert body["sync_run_ids"]["inventory"] == old_running_id
+        assert "inventory" in body["running_sync_types"]
+        assert "started_at" in body
 
     def test_completed_sync_outside_window_is_not_reused(self, client, auth_headers, tid, bound_factories):
         """A completed SyncJob older than 60s is NOT reused — we want
@@ -2272,3 +2283,152 @@ class TestRefresh:
     def test_missing_api_key_returns_401(self, client, tid):
         resp = client.post(f"/api/v1/tenant-management/tenants/{tid}/refresh")
         assert resp.status_code in (401, 403)
+
+    def test_returns_409_when_sync_running_outside_idempotency_window(
+        self, client, auth_headers, cleanup_tenants, monkeypatch
+    ):
+        """Issue #463: a long-running sync (older than the 60s
+        idempotency window) makes /refresh return 409 instead of an
+        indistinguishable 202. The storefront's "Retry" button needs to
+        know its click triggered nothing new — same sync_run_ids would
+        otherwise be ambiguous between "you're idempotent" and "an old
+        sync is still chugging."""
+        # Stub the spawner so SyncJob rows stay in their planted state.
+        import src.admin.tenant_management_api as api_mod
+
+        monkeypatch.setattr(api_mod, "_spawn_refresh_workers", lambda **kw: None)
+
+        payload = _provision_payload(external_org_id="org_refresh_409")
+        prov = client.post("/api/v1/tenant-management/tenants/provision", headers=auth_headers, json=payload)
+        assert prov.status_code == 201
+        tid = prov.get_json()["tenant_id"]
+        cleanup_tenants.append(tid)
+
+        # Backdate the inventory row to 10 minutes ago and mark it running
+        # — same row, outside the 60s window. The other two sync_types
+        # stay pending (provision-created) so we can isolate which trigger
+        # the 409 fires for.
+        from datetime import UTC, datetime, timedelta
+
+        from src.core.database.database_session import get_db_session
+        from src.core.database.models import SyncJob
+
+        with get_db_session() as session:
+            inv_row = session.scalars(select(SyncJob).filter_by(tenant_id=tid, sync_type="inventory")).first()
+            inv_row.status = "running"
+            inv_row.started_at = datetime.now(UTC) - timedelta(minutes=10)
+            session.commit()
+            running_sync_id = inv_row.sync_id
+
+        resp = client.post(f"/api/v1/tenant-management/tenants/{tid}/refresh", headers=auth_headers)
+        assert resp.status_code == 409, resp.get_data(as_text=True)
+
+        body = resp.get_json()
+        assert body["error"] == "sync_already_running"
+        # 409 body mirrors the 202 shape (sync_run_ids + started_at at
+        # the top level) so receivers don't need a second parse path.
+        assert body["running_sync_types"] == ["inventory"]
+        assert body["sync_run_ids"]["inventory"] == running_sync_id
+        assert "started_at" in body
+
+    def test_does_not_return_409_within_idempotency_window(self, client, auth_headers, cleanup_tenants, monkeypatch):
+        """A running sync that STARTED within the 60s window is still
+        the idempotent-reuse case, not a conflict. Re-POST stays 202."""
+        import src.admin.tenant_management_api as api_mod
+
+        monkeypatch.setattr(api_mod, "_spawn_refresh_workers", lambda **kw: None)
+
+        payload = _provision_payload(external_org_id="org_refresh_no_409")
+        prov = client.post("/api/v1/tenant-management/tenants/provision", headers=auth_headers, json=payload)
+        assert prov.status_code == 201
+        tid = prov.get_json()["tenant_id"]
+        cleanup_tenants.append(tid)
+
+        # Flip inventory to running but keep started_at "now" (inside 60s).
+        from datetime import UTC, datetime
+
+        from src.core.database.database_session import get_db_session
+        from src.core.database.models import SyncJob
+
+        with get_db_session() as session:
+            inv_row = session.scalars(select(SyncJob).filter_by(tenant_id=tid, sync_type="inventory")).first()
+            inv_row.status = "running"
+            inv_row.started_at = datetime.now(UTC)
+            session.commit()
+
+        resp = client.post(f"/api/v1/tenant-management/tenants/{tid}/refresh", headers=auth_headers)
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+
+    def test_worker_pickup_restamps_started_at(self, client, auth_headers, cleanup_tenants, monkeypatch):
+        """Regression for the race the code reviewer flagged: a row that
+        sat ``pending`` longer than 60s and just transitioned to
+        ``running`` must not look like a stale in-flight conflict on the
+        next /refresh. The worker pickup re-stamps ``started_at`` so the
+        60s window reflects when work actually began.
+
+        This pins the contract from the worker side. The complementary
+        test ``test_does_not_return_409_within_idempotency_window``
+        pins the same outcome from the API side."""
+        import src.admin.tenant_management_api as api_mod
+
+        monkeypatch.setattr(api_mod, "_spawn_refresh_workers", lambda **kw: None)
+
+        payload = _provision_payload(external_org_id="org_worker_pickup_restamp")
+        prov = client.post("/api/v1/tenant-management/tenants/provision", headers=auth_headers, json=payload)
+        assert prov.status_code == 201
+        tid = prov.get_json()["tenant_id"]
+        cleanup_tenants.append(tid)
+
+        from datetime import UTC, datetime, timedelta
+
+        from src.core.database.database_session import get_db_session
+        from src.core.database.models import SyncJob
+        from src.services.background_sync_service import start_inventory_sync_background
+
+        # Backdate the inventory row so it looks like it's been pending
+        # for 5 minutes — outside the 60s window.
+        with get_db_session() as session:
+            inv_row = session.scalars(select(SyncJob).filter_by(tenant_id=tid, sync_type="inventory")).first()
+            inv_row.started_at = datetime.now(UTC) - timedelta(minutes=5)
+            pending_sync_id = inv_row.sync_id
+            session.commit()
+
+        # Stub the actual sync thread so the test stays fast — we only
+        # care that the worker-pickup status + started_at transition
+        # happens before the thread spawns.
+        import src.services.background_sync_service as bg_mod
+
+        original_thread = bg_mod.threading.Thread
+        spawned = []
+
+        class _NoopThread:
+            def __init__(self, *args, **kwargs):
+                spawned.append(kwargs)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(bg_mod.threading, "Thread", _NoopThread)
+        try:
+            start_inventory_sync_background(
+                tenant_id=tid,
+                pending_sync_id=pending_sync_id,
+                sync_mode="full",
+                sync_types=["ad_units"],
+            )
+        finally:
+            monkeypatch.setattr(bg_mod.threading, "Thread", original_thread)
+
+        with get_db_session() as session:
+            inv_row = session.scalars(select(SyncJob).filter_by(sync_id=pending_sync_id)).first()
+            assert inv_row.status == "running"
+            # The pre-pickup started_at was 5 min ago; post-pickup must
+            # be within the last few seconds (well under 60s).
+            assert (datetime.now(UTC) - inv_row.started_at) < timedelta(seconds=10)
+
+        # And the consequence for /refresh: 202 (idempotent reuse), not 409.
+        resp = client.post(f"/api/v1/tenant-management/tenants/{tid}/refresh", headers=auth_headers)
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+        # Same sync_run_id is reused — caller's repeat refresh doesn't
+        # double-spawn the work that just started.
+        assert resp.get_json()["sync_run_ids"]["inventory"] == pending_sync_id
