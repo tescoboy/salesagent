@@ -34,11 +34,17 @@
   injectShowIdsStyles();
 
   function injectShowIdsStyles() {
+    // v2 emits the GAM id as `<span class="id">gam:...</span>` inside
+    // `.src-meta`, `.krow__name`, and inside the composite `.crow__title`
+    // siblings. Hide all by default; reveal when the page root has
+    // `.show-ids`.
     const css = `
-      .signals-page .row-main__id { display: none; }
-      .signals-page.show-ids .row-main__id { display: inline; }
-      .signals-page .col-gam-id { display: none; }
-      .signals-page.show-ids .col-gam-id { display: table-cell; }
+      .signals-page .src-meta .id,
+      .signals-page .krow__name .id,
+      .signals-page .sig-meta .id { display: none; }
+      .signals-page.show-ids .src-meta .id,
+      .signals-page.show-ids .krow__name .id,
+      .signals-page.show-ids .sig-meta .id { display: inline; }
     `;
     const tag = document.createElement('style');
     tag.textContent = css;
@@ -88,7 +94,7 @@
       qTag = m[1];
       qText = qText.slice(m[0].length).trim();
     }
-    document.querySelectorAll('tr[data-row-kind]').forEach((row) => {
+    document.querySelectorAll('[data-row-kind]').forEach((row) => {
       const mapped = row.dataset.mapped === '1';
       const tags = (row.dataset.tags || '').split(',').filter(Boolean);
       const text = row.textContent.toLowerCase();
@@ -106,8 +112,8 @@
   const bulkbar = document.getElementById('signals-bulkbar');
 
   function visibleSelected() {
-    return [...document.querySelectorAll('tr.row-selectable input.sig-cb:checked')]
-      .filter((cb) => cb.closest('tr').style.display !== 'none');
+    return [...document.querySelectorAll('.row-selectable input.sig-cb:checked')]
+      .filter((cb) => cb.closest('.row-selectable').style.display !== 'none');
   }
 
   function classifySelection() {
@@ -115,7 +121,7 @@
     let mapped = 0, unmapped = 0;
     const items = [];
     sel.forEach((cb) => {
-      const row = cb.closest('tr');
+      const row = cb.closest('.row-selectable');
       const kind = row.dataset.rowKind;
       const isMapped = row.dataset.mapped === '1';
       if (isMapped || kind === 'composite') mapped++;
@@ -143,40 +149,57 @@
     bulkbar.querySelector('[data-bulk="delete-count"]').textContent = mapped;
   }
 
-  document.querySelectorAll('tr.row-selectable input.sig-cb').forEach((cb) => {
-    cb.addEventListener('change', refreshBulkBar);
-    cb.addEventListener('click', (e) => e.stopPropagation());
+  // All checkbox / row-click handlers are DELEGATED on `document` so lazy-
+  // loaded value rows (injected after a key expand) pick up the wiring
+  // without re-binding. Per-element listeners would silently drop on new
+  // DOM nodes.
+
+  // Row-checkbox change → refresh bulk bar
+  document.addEventListener('change', (e) => {
+    const cb = e.target;
+    if (!(cb instanceof HTMLInputElement) || !cb.classList.contains('sig-cb')) return;
+    if (cb.dataset.selectAll) return;  // handled below
+    if (!cb.closest('.row-selectable')) return;
+    refreshBulkBar();
   });
 
-  // Header "select-all" within a card scope
-  document.querySelectorAll('input.sig-cb[data-select-all]').forEach((cb) => {
-    cb.addEventListener('change', () => {
-      const scope = cb.dataset.selectAll;
-      document.querySelectorAll(`tr.row-selectable[data-scope="${scope}"] input.sig-cb`).forEach((rowCb) => {
-        if (rowCb.closest('tr').style.display === 'none') return;
-        rowCb.checked = cb.checked;
-      });
+  // Prevent checkbox click from bubbling to row-toggle handler
+  document.addEventListener('click', (e) => {
+    const cb = e.target;
+    if (cb instanceof HTMLInputElement && cb.classList.contains('sig-cb') && cb.closest('.row-selectable')) {
+      e.stopPropagation();
+    }
+  }, true);  // capture phase so we run before the row handler
+
+  // Select-all checkbox (per-card scope)
+  document.addEventListener('change', (e) => {
+    const cb = e.target;
+    if (!(cb instanceof HTMLInputElement) || !cb.dataset.selectAll) return;
+    const scope = cb.dataset.selectAll;
+    document.querySelectorAll(`.row-selectable[data-scope="${scope}"] input.sig-cb`).forEach((rowCb) => {
+      if (rowCb.closest('.row-selectable').style.display === 'none') return;
+      rowCb.checked = cb.checked;
+    });
+    refreshBulkBar();
+  });
+
+  // Row body click → toggle checkbox
+  document.addEventListener('click', (e) => {
+    const row = e.target.closest('.row-selectable');
+    if (!row) return;
+    if (e.target.closest('input, button, a, .menu, .menu-trigger, .sig-name')) return;
+    const cb = row.querySelector('input.sig-cb');
+    if (cb) {
+      cb.checked = !cb.checked;
       refreshBulkBar();
-    });
-  });
-
-  // Click row body to toggle
-  document.querySelectorAll('tr.row-selectable').forEach((row) => {
-    row.addEventListener('click', (e) => {
-      if (e.target.closest('input, button, a, .menu, .menu-trigger, .row-meta__signal-name')) return;
-      const cb = row.querySelector('input.sig-cb');
-      if (cb) {
-        cb.checked = !cb.checked;
-        refreshBulkBar();
-      }
-    });
+    }
   });
 
   // ---------- Key expand/collapse ----------
-  document.querySelectorAll('.key-row').forEach((kr) => {
+  document.querySelectorAll('.krow').forEach((kr) => {
     kr.addEventListener('click', (e) => {
       if (e.target.closest('button, a, .menu-trigger')) return;
-      const target = document.querySelector(`tr.key-values[data-key-id="${kr.dataset.keyId}"]`);
+      const target = document.querySelector(`.kvalues[data-key-id="${kr.dataset.keyId}"]`);
       if (!target) return;
       const open = !target.hidden;
       target.hidden = open;
@@ -188,47 +211,49 @@
   });
 
   async function loadKeyValues(keyId, target) {
-    const wrap = target.querySelector('.key-values__wrap');
-    if (!wrap || wrap.dataset.loaded === '1') return;
-    wrap.innerHTML = '<div class="kv-empty">Loading values…</div>';
+    if (target.dataset.loaded === '1') return;
+    target.innerHTML = '<div class="freeform-callout-v2" style="background: var(--sig-bg-page);"><div>Loading values…</div></div>';
     try {
       const r = await fetch(urls.targetingValues(keyId), { credentials: 'same-origin' });
       const data = await r.json();
       if (data.error) {
-        wrap.innerHTML = `<div class="kv-empty">${escapeHtml(data.error)}</div>`;
+        target.innerHTML = `<div class="freeform-callout-v2"><div>${escapeHtml(data.error)}</div></div>`;
         return;
       }
       const values = data.values || [];
       if (!values.length) {
-        wrap.innerHTML = '<div class="kv-empty">No values defined in GAM for this key.</div>';
+        target.innerHTML = '<div class="freeform-callout-v2"><div>No values defined in GAM for this key.</div></div>';
         return;
       }
-      wrap.innerHTML = renderValueTable(keyId, values);
-      wrap.dataset.loaded = '1';
+      target.innerHTML = renderValueRows(keyId, values);
+      target.dataset.loaded = '1';
     } catch (err) {
-      wrap.innerHTML = `<div class="kv-empty">Failed to load values: ${escapeHtml(err.message)}</div>`;
+      target.innerHTML = `<div class="freeform-callout-v2"><div>Failed to load values: ${escapeHtml(err.message)}</div></div>`;
     }
   }
 
-  function renderValueTable(keyId, values) {
-    const rows = values.map((v) => {
-      const sel = `${keyId}:${v.id}`;
-      return `<tr class="row-selectable" data-row-kind="kv" data-mapped="0" data-tags="" data-scope="kv-${keyId}" data-sel="${escapeAttr(sel)}">
-        <td class="col-check"><input type="checkbox" class="sig-cb" data-sel="${escapeAttr(sel)}" data-key-id="${escapeAttr(keyId)}" data-value-id="${escapeAttr(v.id)}" data-key-name="${escapeAttr(v.key_name || '')}" data-value-name="${escapeAttr(v.display_name || v.name)}"></td>
-        <td>
-          <div class="row-main">
-            <span class="row-main__name"><code>${escapeHtml(v.key_name || keyId)}=${escapeHtml(v.name)}</code></span>
-            <span class="row-main__id">gam ${escapeHtml(v.id)}</span>
-          </div>
-          <div class="row-meta">
-            <span class="row-meta__unmapped">Unmapped</span>
-            <span style="color: var(--sig-fg-muted)">— tick to expose</span>
-          </div>
-        </td>
-        <td style="width:1px"></td>
-      </tr>`;
+  function renderValueRows(keyId, values) {
+    return values.map((v) => {
+      const keyName = v.key_name || keyId;
+      return `<div class="srow row-selectable unmapped" data-row-kind="kv" data-mapped="0" data-tags="" data-scope="kv-${escapeAttr(keyId)}" data-key-id="${escapeAttr(keyId)}" data-value-id="${escapeAttr(v.id)}" data-key-name="${escapeAttr(keyName)}" data-value-name="${escapeAttr(v.display_name || v.name)}">
+        <div class="srow__check">
+          <input type="checkbox" class="sig-cb" data-key-id="${escapeAttr(keyId)}" data-value-id="${escapeAttr(v.id)}" data-key-name="${escapeAttr(keyName)}" data-value-name="${escapeAttr(v.display_name || v.name)}">
+        </div>
+        <div class="srow__source">
+          <div class="src-name"><code style="font-family: var(--sig-mono); font-size: 12.5px; color: var(--sig-fg-primary); background: var(--sig-bg-page); padding: 1px 7px; border-radius: 4px; border: 1px solid var(--sig-bd-hairline);">${escapeHtml(keyName)}=${escapeHtml(v.name)}</code></div>
+          <div class="src-meta"><span class="id">gam:${escapeHtml(v.id)}</span></div>
+        </div>
+        <div class="srow__arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg></div>
+        <div class="srow__signal">
+          <button type="button" class="sig-unmapped" data-action="map-one" data-kind="kv" data-key-id="${escapeAttr(keyId)}" data-value-id="${escapeAttr(v.id)}" data-key-name="${escapeAttr(keyName)}" data-value-name="${escapeAttr(v.display_name || v.name)}">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            Map this value
+          </button>
+          <span class="sig-hint">creates a (key, value) signal on save</span>
+        </div>
+        <div class="srow__actions"></div>
+      </div>`;
     }).join('');
-    return `<table class="sig-tbl"><tbody>${rows}</tbody></table>`;
   }
 
   // ---------- Overflow menus ----------
@@ -249,7 +274,7 @@
   });
 
   // ---------- Inline rename (signal name in row-meta) ----------
-  document.querySelectorAll('.row-meta__signal-name[data-signal-id]').forEach((span) => {
+  document.querySelectorAll('.sig-name[data-signal-id]').forEach((span) => {
     span.addEventListener('click', (e) => {
       e.stopPropagation();
       if (span.classList.contains('editing')) return;
@@ -265,7 +290,14 @@
     const input = span.querySelector('input');
     input.focus();
     input.select();
+    // Guard: blur + Enter can both fire; the fetch is async; without a
+    // committed flag we mutate innerHTML twice and race the DOM. Lock
+    // after the first invocation.
+    let committed = false;
     const commit = async () => {
+      if (committed) return;
+      committed = true;
+      input.removeEventListener('blur', commit);
       const newName = input.value.trim();
       span.classList.remove('editing');
       if (!newName || newName === original) {
@@ -294,6 +326,8 @@
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); commit(); }
       if (e.key === 'Escape') {
+        committed = true;  // suppress the blur that follows
+        input.removeEventListener('blur', commit);
         span.classList.remove('editing');
         span.innerHTML = escapeHtml(original) + pencilSvg();
       }
@@ -310,7 +344,7 @@
     item.addEventListener('click', (e) => {
       e.stopPropagation();
       const signalId = item.dataset.signalId;
-      const span = document.querySelector(`.row-meta__signal-name[data-signal-id="${CSS.escape(signalId)}"]`);
+      const span = document.querySelector(`.sig-name[data-signal-id="${CSS.escape(signalId)}"]`);
       if (span) {
         document.querySelectorAll('.menu').forEach((m) => { m.hidden = true; });
         startInlineEdit(span);
@@ -428,29 +462,39 @@
   });
 
   bulkbar.querySelector('[data-bulk-action="clear"]').addEventListener('click', () => {
-    document.querySelectorAll('tr.row-selectable input.sig-cb:checked').forEach((cb) => { cb.checked = false; });
+    document.querySelectorAll('.row-selectable input.sig-cb:checked').forEach((cb) => { cb.checked = false; });
     refreshBulkBar();
   });
 
   // ---------- Single-row Map button (one-shot create) ----------
-  document.querySelectorAll('[data-action="map-one"]').forEach((btn) => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const d = btn.dataset;
-      let item;
-      if (d.kind === 'segment') {
-        item = { kind: 'audience_segment', segment_id: d.segmentId, segment_name: d.segmentName };
-      } else {
-        return;
-      }
-      try {
-        const data = await postJson(urls.bulkCreate, { items: [item] });
-        if (data.created) window.location.reload();
-        else alert('Already mapped.');
-      } catch (err) {
-        alert('Map failed: ' + err.message);
-      }
-    });
+  // Delegated so lazy-loaded value rows also pick it up.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-action="map-one"]');
+    if (!btn) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const d = btn.dataset;
+    let item;
+    if (d.kind === 'segment') {
+      item = { kind: 'audience_segment', segment_id: d.segmentId, segment_name: d.segmentName };
+    } else if (d.kind === 'kv') {
+      item = {
+        kind: 'custom_key_value',
+        key_id: d.keyId,
+        value_id: d.valueId,
+        key_name: d.keyName,
+        value_name: d.valueName,
+      };
+    } else {
+      return;
+    }
+    try {
+      const data = await postJson(urls.bulkCreate, { items: [item] });
+      if (data.created) window.location.reload();
+      else alert('Already mapped.');
+    } catch (err) {
+      alert('Map failed: ' + err.message);
+    }
   });
 
   // ---------- Overflow-menu delete / unmap ----------
