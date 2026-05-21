@@ -338,6 +338,81 @@ def _list_unbundled_inventory(session, tenant_id: str, limit: int) -> list[dict]
     ]
 
 
+def _build_bundle_summary(profile: InventoryProfile, product_count: int, adapter_label: str) -> dict:
+    """Sidebar summary payload for the edit page.
+
+    Shapes the bundle for at-a-glance review: inventory totals, format count,
+    property mode, product usage. The template reads these keys directly.
+    """
+    config = profile.inventory_config or {}
+    publisher_properties = profile.publisher_properties or []
+
+    property_tags: list[str] = []
+    property_id_count = 0
+    for prop in publisher_properties:
+        property_tags.extend(prop.get("property_tags") or [])
+        property_id_count += len(prop.get("property_ids") or [])
+    property_mode = "tags" if property_tags or not property_id_count else "ids"
+
+    return {
+        "adapter_label": adapter_label,
+        "ad_unit_count": len(config.get("ad_units") or []),
+        "placement_count": len(config.get("placements") or []),
+        "format_count": len(profile.format_ids or []),
+        "property_mode": property_mode,
+        "property_tag_count": len(set(property_tags)),
+        "property_id_count": property_id_count,
+        "products_using": product_count,
+    }
+
+
+def _compute_blast_radius(session, tenant_id: str, profile: InventoryProfile) -> list[dict]:
+    """Which placements/ad units in this bundle also appear in other bundles.
+
+    "Blast radius" = inventory shared with sibling bundles. Reads as context,
+    not a warning — bundles share placements, not state, so edits here are
+    local. Returned as ``[{kind, external_id, others}]`` where ``others`` is
+    the count of *other* bundles also referencing that external_id.
+
+    Builds a single ``{external_id -> set(bundle_ids)}`` index per entity type
+    so lookups are O(1). A naive double-loop is O(N · M) over bundles ×
+    placements, which gets expensive past a few hundred bundles.
+    """
+    from src.core.database.repositories.inventory_profile import InventoryProfileRepository
+
+    repo = InventoryProfileRepository(session, tenant_id)
+    all_bundles = repo.list_all()
+
+    my_config = profile.inventory_config or {}
+    my_placements = my_config.get("placements") or []
+    my_ad_units = my_config.get("ad_units") or []
+    if not my_placements and not my_ad_units:
+        return []
+
+    placement_index: dict[str, set[int]] = {}
+    ad_unit_index: dict[str, set[int]] = {}
+    for b in all_bundles:
+        if b.id == profile.id:
+            continue
+        cfg = b.inventory_config or {}
+        for ext_id in cfg.get("placements") or []:
+            placement_index.setdefault(ext_id, set()).add(b.id)
+        for ext_id in cfg.get("ad_units") or []:
+            ad_unit_index.setdefault(ext_id, set()).add(b.id)
+
+    reused: list[dict] = []
+    for ext_id in my_placements:
+        bundles = placement_index.get(ext_id)
+        if bundles:
+            reused.append({"kind": "placement", "external_id": ext_id, "others": len(bundles)})
+    for ext_id in my_ad_units:
+        bundles = ad_unit_index.get(ext_id)
+        if bundles:
+            reused.append({"kind": "ad_unit", "external_id": ext_id, "others": len(bundles)})
+
+    return reused
+
+
 def _list_seed_suggestions(session, tenant_id: str, limit: int) -> list[dict]:
     """Synced GAM placements to surface as "promote into a bundle" candidates.
 
@@ -778,6 +853,18 @@ def edit_inventory_profile(tenant_id: str, profile_id: int):
             select(PropertyTag).where(PropertyTag.tenant_id == tenant_id).order_by(PropertyTag.tag_id)
         ).all()
 
+        product_count = (
+            session.scalar(select(func.count()).select_from(Product).where(Product.inventory_profile_id == profile_id))
+            or 0
+        )
+        adapter_label = (
+            "Google Ad Manager"
+            if tenant.ad_server in {"google_ad_manager", "gam"}
+            else (tenant.ad_server or "your ad server").replace("_", " ").title()
+        )
+        bundle_summary = _build_bundle_summary(profile, product_count, adapter_label)
+        blast_radius = _compute_blast_radius(session, tenant_id, profile)
+
         # Render inside the session so JSON columns (``profile.format_ids``,
         # ``profile.inventory_config``, etc.) are accessible from the template.
         # Outside the ``with`` the instance is detached and SQLAlchemy raises
@@ -790,6 +877,8 @@ def edit_inventory_profile(tenant_id: str, profile_id: int):
             profile=profile,
             authorized_properties=authorized_properties,
             property_tags=property_tags_list,
+            bundle_summary=bundle_summary,
+            blast_radius=blast_radius,
             active_tab="inventory_profiles",
         )
 
@@ -832,7 +921,17 @@ def duplicate_inventory_profile(tenant_id: str, profile_id: int):
         session.commit()
 
         flash(f"Duplicated '{source.name}' — editing the copy now.", "success")
-        return redirect(url_for("inventory_profiles.edit_inventory_profile", tenant_id=tenant_id, profile_id=new_id))
+        # ``duplicated=1`` lets the editor autofocus + select the name field
+        # so renaming is a single keystroke. User-engagement reviewer (#528)
+        # called this the highest-leverage friction fix on the page.
+        return redirect(
+            url_for(
+                "inventory_profiles.edit_inventory_profile",
+                tenant_id=tenant_id,
+                profile_id=new_id,
+                duplicated=1,
+            )
+        )
 
 
 @inventory_profiles_bp.route("/<int:profile_id>/delete", methods=["DELETE", "POST"])
@@ -886,6 +985,17 @@ def get_inventory_profile_api(tenant_id: str, profile_id: int):
         if not profile or profile.tenant_id != tenant_id:
             return jsonify({"error": "Inventory bundle not found"}), 404
 
+        # Derive property_mode from publisher_properties shape — the same
+        # logic the template uses (#528). Hardcoding "all" was a bug:
+        # agents pulling the API would mis-render bundles that were saved
+        # in tag or property-id mode.
+        property_tags: list[str] = []
+        property_id_count = 0
+        for prop in profile.publisher_properties or []:
+            property_tags.extend(prop.get("property_tags") or [])
+            property_id_count += len(prop.get("property_ids") or [])
+        property_mode = "tags" if property_tags or not property_id_count else "property_ids"
+
         return jsonify(
             {
                 "id": profile.id,
@@ -898,7 +1008,7 @@ def get_inventory_profile_api(tenant_id: str, profile_id: int):
                 "include_descendants": profile.inventory_config.get("include_descendants", True),
                 "formats": profile.format_ids,
                 "publisher_properties": profile.publisher_properties,
-                "property_mode": "all",  # Default to "all" mode for now (no DB column yet)
+                "property_mode": property_mode,
                 "targeting_template": profile.targeting_template,
             }
         )
