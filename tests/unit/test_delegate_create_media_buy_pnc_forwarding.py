@@ -26,6 +26,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from adcp.decisioning import AdcpError as WireAdcpError
 
 from tests.unit.helpers.delegate_request_bodies import minimal_create_media_buy_body
 
@@ -103,3 +104,58 @@ async def test_delegate_passes_none_when_request_omits_pnc() -> None:
     impl_mock.assert_awaited_once()
     _, kwargs = impl_mock.await_args
     assert kwargs.get("push_notification_config") is None
+
+
+@pytest.mark.asyncio
+async def test_delegate_validates_missing_idempotency_key_before_identity_resolution() -> None:
+    """The missing-key storyboard must fail as a buyer request error, not auth.
+
+    ``_build_identity`` can fail when the request context is incomplete. For an
+    invalid request body, validation should happen first so callers see the
+    spec-defined ``INVALID_REQUEST`` for ``idempotency_key``.
+    """
+    from core.platforms._delegate import _delegate_create_media_buy
+
+    req_body = minimal_create_media_buy_body()
+    req_body.pop("idempotency_key")
+
+    with patch("core.platforms._delegate._build_identity", side_effect=AssertionError("should not resolve identity")):
+        with pytest.raises(WireAdcpError) as exc_info:
+            await _delegate_create_media_buy(req_body, object())
+
+    assert exc_info.value.code == "INVALID_REQUEST"
+    assert exc_info.value.recovery == "correctable"
+    assert exc_info.value.field == "idempotency_key"
+
+
+@pytest.mark.asyncio
+async def test_delegate_echoes_create_media_buy_idempotency_key_on_success() -> None:
+    """Fresh create responses expose the accepted idempotency key for replay tests."""
+    from adcp.types import MediaBuyStatus
+
+    from core.platforms._delegate import _delegate_create_media_buy
+    from src.core.schemas import CreateMediaBuyResult, CreateMediaBuySuccess
+
+    req_body = minimal_create_media_buy_body()
+    fake_ctx = object()
+
+    impl_mock = AsyncMock()
+    impl_mock.return_value = CreateMediaBuyResult(
+        response=CreateMediaBuySuccess(
+            media_buy_id="mb_test",
+            packages=[],
+            status=MediaBuyStatus.pending_creatives,
+        ),
+        status="completed",
+    )
+
+    with (
+        patch("core.platforms._delegate._create_media_buy_impl", impl_mock),
+        patch(
+            "core.platforms._delegate._build_identity",
+            return_value=type("FakeIdent", (), {"tenant_id": "t1", "principal_id": "p1"})(),
+        ),
+    ):
+        wire = await _delegate_create_media_buy(req_body, fake_ctx)
+
+    assert wire["idempotency_key"] == req_body["idempotency_key"]

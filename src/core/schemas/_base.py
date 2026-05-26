@@ -246,6 +246,10 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
     # Internal fields (excluded from AdCP responses)
     workflow_step_id: str | None = None
     creative_deadline: datetime | None = None
+    idempotency_key: str | None = Field(
+        default=None,
+        description="Client-supplied idempotency key echoed for retry correlation.",
+    )
     replayed: bool | None = Field(
         default=None,
         description="Envelope flag set true when the response is returned from an idempotency replay.",

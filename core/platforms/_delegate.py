@@ -189,6 +189,29 @@ def _to_wire(response: Any) -> dict[str, Any]:
     return wire
 
 
+def _with_create_media_buy_idempotency_key(result: Any, req: CreateMediaBuyRequest) -> Any:
+    """Echo the request idempotency key on successful create responses.
+
+    The framework owns replay caching, but storyboard runners need the fresh
+    response to expose the client key so later steps can bind the replay to the
+    exact key that was accepted. Keep this at the transport boundary so every
+    success branch in the implementation gets the same wire decoration.
+    """
+    from src.core.schemas import CreateMediaBuyResult, CreateMediaBuySuccess
+
+    idempotency_key = getattr(req, "idempotency_key", None)
+    if not isinstance(idempotency_key, str) or not idempotency_key:
+        return result
+    if not isinstance(result, CreateMediaBuyResult):
+        return result
+    inner = result.response
+    if not isinstance(inner, CreateMediaBuySuccess):
+        return result
+    if inner.idempotency_key == idempotency_key:
+        return result
+    return result.model_copy(update={"response": inner.model_copy(update={"idempotency_key": idempotency_key})})
+
+
 # AdCP 3.0.11 standard error codes are uppercase snake_case. Some internal
 # call sites still pass lowercase legacy strings (``"validation_error"``,
 # ``"authentication_error"``, etc.) into the ``errors=[Error(code=...)]``
@@ -474,8 +497,8 @@ async def _delegate_create_media_buy(req: Any, ctx: RequestContext[Any]) -> dict
     project to the correct wire ``code`` instead of leaking through as
     generic ``INTERNAL_ERROR``.
     """
-    identity = _build_identity(ctx)
     req_model = _coerce_to_request_model(req, CreateMediaBuyRequest)
+    identity = _build_identity(ctx)
     pnc = req_model.push_notification_config
     pnc_dict: dict[str, Any] | None
     if pnc is None:
@@ -485,6 +508,7 @@ async def _delegate_create_media_buy(req: Any, ctx: RequestContext[Any]) -> dict
     else:
         pnc_dict = dict(pnc)
     response = await _create_media_buy_impl(req_model, push_notification_config=pnc_dict, identity=identity)
+    response = _with_create_media_buy_idempotency_key(response, req_model)
     _emit_media_buy_created_if_success(identity.tenant_id, response)
     return _to_wire(response)
 
