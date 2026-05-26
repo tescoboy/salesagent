@@ -1,6 +1,6 @@
 .PHONY: setup quality quality-full pre-pr lint-fix lint typecheck test-fast test-full
 .PHONY: test-stack-up test-stack-down test-all test-cov test-entity openapi
-.PHONY: test-int test-bdd test-e2e
+.PHONY: test-int test-bdd test-e2e storyboard-smoke storyboard-non-guaranteed
 
 setup:
 	uv run python scripts/setup-dev.py
@@ -86,6 +86,34 @@ ifndef TARGET
 	$(error TARGET is required. Usage: make test-e2e TARGET=tests/e2e/test_file.py)
 endif
 	scripts/run-test.sh --stack $(TARGET) $(ARGS)
+
+storyboard-smoke:
+	AGENT_URL=$${AGENT_URL:-http://localhost:8000} \
+	AGENT_TOKEN=$${AGENT_TOKEN:-ci-test-token} \
+	ADCP_SDK_VERSION=$${ADCP_SDK_VERSION:-7.11.0} \
+	ALLOW_HTTP=$${ALLOW_HTTP:-1} \
+	PROTOCOLS=$${PROTOCOLS:-mcp,a2a} \
+	STORYBOARDS=$${STORYBOARDS:-capability_discovery,pagination_integrity_list_accounts,get_signals_pagination_integrity,signal_owned} \
+	REPORT_DIR=$${REPORT_DIR:-.context/storyboard-smoke} \
+	./scripts/storyboard-check.sh
+
+storyboard-non-guaranteed:
+	AGENT_URL=$${AGENT_URL:-http://localhost:8000} \
+	AGENT_TOKEN=$${AGENT_TOKEN:-ci-test-token} \
+	ADCP_SDK_VERSION=$${ADCP_SDK_VERSION:-7.11.0} \
+	SEED_DEMO_AUTO_APPROVE=$${SEED_DEMO_AUTO_APPROVE:-1} \
+	ALLOW_HTTP=$${ALLOW_HTTP:-1} \
+	PROTOCOLS=$${PROTOCOLS:-mcp,a2a} \
+	SPECIALISMS=$${SPECIALISMS:-sales-non-guaranteed} \
+	EXCLUDED_STORYBOARDS=$${EXCLUDED_STORYBOARDS:-security_baseline} \
+	STORYBOARD_SOFT_FAIL=$${STORYBOARD_SOFT_FAIL:-1} \
+	BETWEEN_PROTOCOLS_HOOK=$${BETWEEN_PROTOCOLS_HOOK:-./scripts/storyboard-reset-compose.sh} \
+	WEBHOOK_RECEIVER=$${WEBHOOK_RECEIVER:-} \
+	WEBHOOK_RECEIVER_PORT=$${WEBHOOK_RECEIVER_PORT:-} \
+	WEBHOOK_RECEIVER_PUBLIC_URL=$${WEBHOOK_RECEIVER_PUBLIC_URL:-} \
+	WEBHOOK_RECEIVER_AUTO_TUNNEL=$${WEBHOOK_RECEIVER_AUTO_TUNNEL:-0} \
+	REPORT_DIR=$${REPORT_DIR:-.context/storyboard-non-guaranteed} \
+	./scripts/storyboard-check.sh
 
 # ─── Docker dev stack rebuild ──────────────────────────────────
 # Bypasses a BuildKit cache-mount edge case where ``compose build``
