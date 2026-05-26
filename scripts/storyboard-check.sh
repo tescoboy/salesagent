@@ -42,6 +42,10 @@
 #   AGENT_URL=http://localhost:8000 AGENT_TOKEN=ci-test-token \
 #   ALLOW_HTTP=1 ./scripts/storyboard-check.sh
 #
+#   # Pin the JS storyboard runner/spec line:
+#   ADCP_SDK_PACKAGE=@adcp/sdk@7.11.0 ./scripts/storyboard-check.sh          # AdCP 3.0.x
+#   ADCP_SDK_PACKAGE=@adcp/sdk@8.1.0-beta.11 ./scripts/storyboard-check.sh   # AdCP 3.1 beta
+#
 # Outputs:
 #   - One-line summary per transport: passed/failed/skipped + duration
 #   - List of failing step IDs with truncated error messages
@@ -61,7 +65,7 @@ set -uo pipefail
 AGENT_URL="${AGENT_URL:-}"
 AGENT_TOKEN="${AGENT_TOKEN:-}"
 ADCP_SDK_VERSION="${ADCP_SDK_VERSION:-latest}"
-ADCP_SDK_PACKAGE="@adcp/sdk@${ADCP_SDK_VERSION}"
+ADCP_SDK_PACKAGE="${ADCP_SDK_PACKAGE:-@adcp/sdk@${ADCP_SDK_VERSION}}"
 STORYBOARD="${STORYBOARD-}"
 STORYBOARDS="${STORYBOARDS:-}"
 SPECIALISMS="${SPECIALISMS:-}"

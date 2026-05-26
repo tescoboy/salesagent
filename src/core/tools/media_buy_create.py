@@ -33,6 +33,7 @@ from src.core.exceptions import (
     AdCPAuthorizationError,
     AdCPError,
     AdCPNotFoundError,
+    AdCPNotImplementedInEmbeddedError,
     AdCPProductNotFoundError,
     AdCPTermsRejectedError,
     AdCPValidationError,
@@ -92,6 +93,22 @@ def _validate_measurement_terms(req: "CreateMediaBuyRequest") -> None:
             )
 
 
+def _effective_manual_approval_required(
+    *,
+    tenant_approval_required: bool,
+    adapter_approval_required: bool,
+    publisher_owns_campaign: bool | None = None,
+) -> bool:
+    """Apply the embedded campaign_approval gate to manual approval checks."""
+    owns_approval = publisher_owns_campaign_approval() if publisher_owns_campaign is None else publisher_owns_campaign
+    if not owns_approval:
+        raise AdCPNotImplementedInEmbeddedError(
+            "Campaign approval is managed by the embedding storefront.",
+            details={"capability": "campaign_approval"},
+        )
+    return owns_approval and (tenant_approval_required or adapter_approval_required)
+
+
 class PackageAssignmentDict(TypedDict):
     """Internal dict format for passing package assignments to adapters."""
 
@@ -148,6 +165,7 @@ from src.core.context_manager import get_context_manager
 from src.core.database.models import MediaBuy
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.models import Product as ModelProduct
+from src.core.embedded_runtime import publisher_owns_campaign_approval
 from src.core.helpers import log_tool_activity
 from src.core.helpers.adapter_helpers import get_adapter
 from src.core.helpers.creative_helpers import (
@@ -162,6 +180,7 @@ from src.core.schemas import (
     CreateMediaBuyError,
     CreateMediaBuyRequest,
     CreateMediaBuyResult,
+    CreateMediaBuySubmitted,
     CreateMediaBuySuccess,
     CreativeApprovalStatus,
     Error,
@@ -348,16 +367,36 @@ def _request_has_creatives(req: CreateMediaBuyRequest) -> bool:
     """
     if not req.packages:
         return False
-    for pkg in req.packages:
+    return _packages_have_creatives(req.packages)
+
+
+def _packages_have_creatives(packages: Any) -> bool:
+    """True if package objects or serialized package dicts carry creatives."""
+    if not packages:
+        return False
+    for pkg in packages:
+        if isinstance(pkg, dict):
+            if pkg.get("creative_ids") or pkg.get("creative_assignments") or pkg.get("creatives"):
+                return True
+            continue
         # Local ``creative_ids`` and AdCP ``creative_assignments`` both attach
-        # pre-uploaded creatives to the package.
-        if _get_requested_creative_ids(pkg):
-            return True
-        # adcp PackageRequest: inline ``creatives`` list (full creative objects)
-        inline = getattr(pkg, "creatives", None)
-        if inline:
+        # pre-uploaded creatives to the package. Inline ``creatives`` carries
+        # full creative objects.
+        if _get_requested_creative_ids(pkg) or getattr(pkg, "creatives", None):
             return True
     return False
+
+
+def _media_buy_status_for_create_replay(existing: Any) -> MediaBuyStatus:
+    """Derive the beta-2 lifecycle status for a create-media-buy replay."""
+    try:
+        return MediaBuyStatus(existing.status)
+    except ValueError:
+        if existing.status == "pending_approval":
+            raw_request = existing.raw_request or {}
+            if not _packages_have_creatives(raw_request.get("packages")):
+                return MediaBuyStatus.pending_creatives
+        return MediaBuyStatus.pending_start
 
 
 def _link_step_to_media_buy(*, tenant_id: str, step_id: str, media_buy_id: str, branch: str) -> None:
@@ -746,7 +785,7 @@ def _execute_adapter_media_buy_creation(
             if response.errors:
                 for err in response.errors:
                     logger.error(f"[ADAPTER]   Error: {err.code} - {err.message}")
-        else:
+        elif isinstance(response, CreateMediaBuySuccess):
             logger.info(
                 f"[ADAPTER] create_media_buy succeeded: {response.media_buy_id} "
                 f"with {len(response.packages) if response.packages else 0} packages"
@@ -755,6 +794,8 @@ def _execute_adapter_media_buy_creation(
                 for i, pkg in enumerate(response.packages):
                     # response.packages are now always Package objects
                     logger.info(f"[ADAPTER] Response package {i}: {pkg.package_id}")
+        else:
+            logger.info(f"[ADAPTER] create_media_buy submitted async task: {response.task_id}")
         return response
     except Exception as adapter_error:
         import traceback
@@ -876,7 +917,10 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                     stmt_product = (
                         select(ProductModel)
                         .filter_by(tenant_id=tenant_id, product_id=product_id)
-                        .options(selectinload(ProductModel.pricing_options))
+                        .options(
+                            selectinload(ProductModel.pricing_options),
+                            selectinload(ProductModel.inventory_profile),
+                        )
                     )
                     product = session.scalars(stmt_product).first()
 
@@ -971,7 +1015,7 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
                     from src.core.schemas import FormatId as FormatIdType
 
                     format_ids_list: list[FormatIdType] = []
-                    formats = product.format_ids or []
+                    formats = product.effective_format_ids or []
 
                     logger.debug(f"[APPROVAL] Converting {len(formats)} formats for package {package_id}")
 
@@ -1079,6 +1123,10 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             error_messages = [str(err) for err in response.errors] if response.errors else ["Unknown error"]
             error_msg = "; ".join(error_messages)
             logger.error(f"[APPROVAL] Adapter creation failed for {media_buy_id}: {error_msg}")
+            return False, error_msg
+        if isinstance(response, CreateMediaBuySubmitted):
+            error_msg = f"Adapter submitted async task {response.task_id} during approval execution"
+            logger.error(f"[APPROVAL] {error_msg}")
             return False, error_msg
 
         logger.info(f"[APPROVAL] Adapter creation succeeded for {media_buy_id}: {response.media_buy_id}")
@@ -1801,16 +1849,12 @@ def _build_idempotency_hit_result(
         # ``budget``, etc. and fails the conformance suite.
         response_packages = [_package_from_config(pkg) for pkg in db_packages]
 
-        try:
-            adcp_status = MediaBuyStatus(existing.status)
-        except ValueError:
-            adcp_status = MediaBuyStatus.pending_start
-
         return CreateMediaBuyResult(
             response=CreateMediaBuySuccess(
                 media_buy_id=existing.media_buy_id,
                 packages=response_packages,
-                status=adcp_status,
+                status="completed",
+                media_buy_status=_media_buy_status_for_create_replay(existing),
                 replayed=True,
             ),
             status=AdcpTaskStatus.completed.value,
@@ -2507,8 +2551,12 @@ async def _create_media_buy_impl(
         # Use tenant.human_review_required as the authoritative source, with adapter setting as fallback
         tenant_approval_required = tenant.get("human_review_required", True)
         adapter_approval_required = adapter.manual_approval_required
-        # Tenant setting takes precedence - if tenant requires approval, it's required
-        manual_approval_required = tenant_approval_required or adapter_approval_required
+        campaign_approval_owned = publisher_owns_campaign_approval()
+        manual_approval_required = _effective_manual_approval_required(
+            tenant_approval_required=tenant_approval_required,
+            adapter_approval_required=adapter_approval_required,
+            publisher_owns_campaign=campaign_approval_owned,
+        )
         manual_approval_operations = adapter.manual_approval_operations
 
         # DEBUG: Log manual approval settings
@@ -2969,7 +3017,8 @@ async def _create_media_buy_impl(
                 response=CreateMediaBuySuccess(
                     media_buy_id=media_buy_id,
                     packages=pending_packages,
-                    status=buy_status,
+                    status="completed",
+                    media_buy_status=buy_status,
                     workflow_step_id=step.step_id,
                 ),
                 status=AdcpTaskStatus.completed.value,
@@ -2994,10 +3043,17 @@ async def _create_media_buy_impl(
             config_errors = []
 
             for schema_product in products_in_buy:
-                # Auto-generate default config if missing
-                if not schema_product.implementation_config:
+                existing_effective_config = dict(effective_configs.get(schema_product.product_id) or {})
+                needs_default_config = not existing_effective_config or any(
+                    field not in existing_effective_config for field in ("priority", "creative_placeholders")
+                )
+
+                # Auto-generate default line-item config if missing or incomplete.
+                # Profile-backed products may already have inventory targeting
+                # from the profile but no product-level GAM line-item defaults.
+                if needs_default_config:
                     logger.info(
-                        f"Product '{schema_product.name}' ({schema_product.product_id}) is missing GAM configuration. "
+                        f"Product '{schema_product.name}' ({schema_product.product_id}) is missing GAM configuration defaults. "
                         f"Auto-generating defaults based on product type."
                     )
                     # Generate defaults based on product delivery type and formats
@@ -3011,7 +3067,7 @@ async def _create_media_buy_impl(
                     auto_config = gam_validator.generate_default_config(
                         delivery_type=delivery_type_str, formats=formats_list
                     )
-                    effective_configs[schema_product.product_id] = auto_config
+                    effective_configs[schema_product.product_id] = {**auto_config, **existing_effective_config}
 
                     # Persist the auto-generated config to database
                     with MediaBuyUoW(tenant["tenant_id"]) as gam_uow:
@@ -3020,7 +3076,10 @@ async def _create_media_buy_impl(
                         product_stmt = select(ModelProduct).filter_by(product_id=schema_product.product_id)
                         db_product = gam_uow.session.scalars(product_stmt).first()
                         if db_product:
-                            db_product.implementation_config = auto_config
+                            db_product.implementation_config = {
+                                **auto_config,
+                                **(db_product.implementation_config or {}),
+                            }
                             # UoW auto-commits on clean exit
                             logger.info(f"Saved auto-generated GAM config for product {schema_product.product_id}")
 
@@ -3079,7 +3138,7 @@ async def _create_media_buy_impl(
 
         # Check if either tenant or product disables auto-creation
         # Skip in dry_run mode - we're only validating, not creating workflow
-        if not testing_ctx.dry_run and (not auto_create_enabled or not product_auto_create):
+        if not testing_ctx.dry_run and campaign_approval_owned and (not auto_create_enabled or not product_auto_create):
             reason = "Tenant configuration" if not auto_create_enabled else "Product configuration"
             # Type narrowing: step and persistent_ctx exist in non-dry_run mode
             assert step is not None and persistent_ctx is not None
@@ -3164,7 +3223,8 @@ async def _create_media_buy_impl(
                 response=CreateMediaBuySuccess(
                     media_buy_id=media_buy_id,
                     packages=response_packages,
-                    status=buy_status,
+                    status="completed",
+                    media_buy_status=buy_status,
                     workflow_step_id=step.step_id,
                 ),
                 status=AdcpTaskStatus.completed.value,
@@ -3504,6 +3564,10 @@ async def _create_media_buy_impl(
             simulated_response = CreateMediaBuySuccess(
                 media_buy_id=f"dry_run_{uuid.uuid4().hex[:12]}",
                 packages=simulated_packages,
+                status="completed",
+                media_buy_status=MediaBuyStatus.pending_start
+                if _request_has_creatives(req)
+                else MediaBuyStatus.pending_creatives,
             )
             return CreateMediaBuyResult(response=simulated_response, status=AdcpTaskStatus.completed.value)
 
@@ -3524,6 +3588,9 @@ async def _create_media_buy_impl(
             error_code = response.errors[0].code if response.errors else "UNKNOWN"
             logger.error(f"[ADAPTER] Adapter returned error response: {error_code} - {error_msg}")
             return CreateMediaBuyResult(response=response, status=AdcpTaskStatus.failed.value)
+
+        if isinstance(response, CreateMediaBuySubmitted):
+            return CreateMediaBuyResult(response=response, status=AdcpTaskStatus.submitted.value)
 
         # At this point, response is CreateMediaBuySuccess - safe to access success-specific fields
         # Type narrowing: media_buy_id must be present in successful response
@@ -4159,7 +4226,8 @@ async def _create_media_buy_impl(
         adcp_response = CreateMediaBuySuccess(
             media_buy_id=response.media_buy_id,
             packages=response_packages,
-            status=MediaBuyStatus(media_buy_status),
+            status="completed",
+            media_buy_status=MediaBuyStatus(media_buy_status),
             creative_deadline=response.creative_deadline,
         )
 

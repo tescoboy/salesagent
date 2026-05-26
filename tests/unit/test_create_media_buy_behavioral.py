@@ -236,6 +236,33 @@ class _PatchContext:
         self._p_uow.stop()
 
 
+class TestEmbeddedCampaignApprovalGate:
+    def test_storefront_owned_campaign_approval_fails_closed(self):
+        from src.core.exceptions import AdCPNotImplementedInEmbeddedError
+        from src.core.tools.media_buy_create import _effective_manual_approval_required
+
+        with pytest.raises(AdCPNotImplementedInEmbeddedError) as exc_info:
+            _effective_manual_approval_required(
+                tenant_approval_required=True,
+                adapter_approval_required=True,
+                publisher_owns_campaign=False,
+            )
+
+        assert exc_info.value.details == {"capability": "campaign_approval"}
+
+    def test_publisher_owned_campaign_approval_preserves_manual_approval(self):
+        from src.core.tools.media_buy_create import _effective_manual_approval_required
+
+        assert (
+            _effective_manual_approval_required(
+                tenant_approval_required=True,
+                adapter_approval_required=False,
+                publisher_owns_campaign=True,
+            )
+            is True
+        )
+
+
 # ===========================================================================
 # HIGH_RISK Tests
 # ===========================================================================
@@ -1469,16 +1496,17 @@ class TestManualApprovalObligations:
 
         # Spec ``create_media_buy_response`` variant-1 (sync-success): when the
         # seller has minted a buy id synchronously, the response carries
-        # ``media_buy_id`` + ``packages`` + a ``MediaBuyStatus`` describing
+        # ``media_buy_id`` + ``packages`` + ``media_buy_status`` describing
         # what's blocking activation. Without creatives in the request that
-        # status is ``pending_creatives`` (buyer's next call is ``sync_creatives``).
+        # media-buy status is ``pending_creatives`` (buyer's next call is
+        # ``sync_creatives``).
         # Variant-3 (``status='submitted'``, no ``media_buy_id``) is reserved
         # for cases where no buy was minted.
         from adcp.types import MediaBuyStatus
 
         assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.media_buy_id is not None
-        assert result.response.status == MediaBuyStatus.pending_creatives
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
         assert result.status == "completed"
 
     @pytest.mark.asyncio
@@ -1512,7 +1540,7 @@ class TestManualApprovalObligations:
 
         assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.media_buy_id is not None
-        assert result.response.status == MediaBuyStatus.pending_creatives
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
         assert result.status == "completed"
 
     @pytest.mark.asyncio
@@ -1595,7 +1623,7 @@ class TestManualApprovalObligations:
         assert result.status == "completed"
         assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.media_buy_id is not None
-        assert result.response.status == MediaBuyStatus.pending_creatives
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
         assert result.response.workflow_step_id is not None
 
     @pytest.mark.asyncio
@@ -1764,7 +1792,7 @@ class TestPendingCreativesVariantClassification:
         assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.media_buy_id is not None
         assert result.response.packages is not None and len(result.response.packages) == 1
-        assert result.response.status == MediaBuyStatus.pending_creatives
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
         # Wrapper-level TaskStatus is "completed" — the seller's sync work is done.
         assert result.status == "completed"
 
@@ -1882,7 +1910,7 @@ class TestPendingCreativesVariantClassification:
 
         assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.media_buy_id is not None
-        assert result.response.status == MediaBuyStatus.pending_creatives
+        assert result.response.media_buy_status == MediaBuyStatus.pending_creatives
         assert result.status == "completed"
 
 
@@ -1988,7 +2016,8 @@ class TestInlineCreativeObligations:
 
         assert isinstance(result.response, CreateMediaBuySuccess)
         assert result.response.media_buy_id is not None
-        assert result.response.status == MediaBuyStatus.pending_start
+        assert result.response.status == "completed"
+        assert result.response.media_buy_status == MediaBuyStatus.pending_start
         mock_upload.assert_called_once_with(packages=ANY, context=ANY, testing_ctx=ANY)
 
     @pytest.mark.asyncio
