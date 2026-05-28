@@ -28,6 +28,7 @@ from src.services.adapter_sync_orchestration import (
     enqueue_adapter_sync,
     execute_adapter_sync,
 )
+from src.services.catalog_sync_helpers import dispatch_limited
 from src.services.sync_scheduling_view import (
     GUIDANCE_STALE_AFTER,
     GUIDANCE_SYNC_KINDS,
@@ -56,6 +57,9 @@ def _env_seconds(name: str, default: int) -> int:
 
 REPORTING_INTERVAL_SECONDS = _env_seconds("ADAPTER_REPORTING_SYNC_INTERVAL", 3600)
 INVENTORY_GUIDANCE_INTERVAL_SECONDS = _env_seconds("ADAPTER_INVENTORY_GUIDANCE_SYNC_INTERVAL", 3600)
+MAX_CONCURRENT_SYNC_DISPATCHES = int(
+    os.getenv("ADAPTER_SYNC_MAX_CONCURRENT_TENANTS") or os.getenv("ADAPTER_REPORTING_MAX_CONCURRENT_TENANTS") or "3"
+)
 
 
 class AdapterSyncScheduler:
@@ -109,11 +113,11 @@ class AdapterSyncScheduler:
         if not eligible:
             return []
 
-        dispatched: list[str] = []
-        for item in eligible:
-            sync_id = await _dispatch(item)
-            if sync_id is not None:
-                dispatched.append(sync_id)
+        dispatched = await dispatch_limited(
+            eligible,
+            max_concurrent=MAX_CONCURRENT_SYNC_DISPATCHES,
+            dispatch=_dispatch,
+        )
 
         logger.info(
             "%s sync cycle complete: dispatched=%d eligible=%d",

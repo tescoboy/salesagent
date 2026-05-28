@@ -1261,6 +1261,9 @@ class StatusSyncsBlock(BaseModel):
     inventory: StatusSyncRunBlock = Field(default_factory=StatusSyncRunBlock)
     custom_targeting: StatusSyncRunBlock = Field(default_factory=StatusSyncRunBlock)
     advertisers: StatusSyncRunBlock = Field(default_factory=StatusSyncRunBlock)
+    reporting: StatusSyncRunBlock = Field(default_factory=StatusSyncRunBlock)
+    signal_coverage: StatusSyncRunBlock = Field(default_factory=StatusSyncRunBlock)
+    pricing_availability: StatusSyncRunBlock = Field(default_factory=StatusSyncRunBlock)
 
 
 class StatusWorkflowsBlock(BaseModel):

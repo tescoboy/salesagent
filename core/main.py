@@ -578,12 +578,16 @@ async def _start_schedulers() -> None:
         start_adapter_reporting_sync_scheduler,
     )
     from src.services.delivery_webhook_scheduler import start_delivery_webhook_scheduler
+    from src.services.gam_pricing_availability_scheduler import start_gam_pricing_availability_scheduler
+    from src.services.gam_signal_coverage_scheduler import start_gam_signal_coverage_scheduler
     from src.services.media_buy_status_scheduler import start_media_buy_status_scheduler
 
     await start_delivery_webhook_scheduler()
     await start_media_buy_status_scheduler()
     await start_adapter_reporting_sync_scheduler()
     await start_adapter_inventory_guidance_sync_scheduler()
+    await start_gam_pricing_availability_scheduler()
+    await start_gam_signal_coverage_scheduler()
 
 
 async def _stop_schedulers() -> None:
@@ -593,8 +597,12 @@ async def _stop_schedulers() -> None:
         stop_adapter_reporting_sync_scheduler,
     )
     from src.services.delivery_webhook_scheduler import stop_delivery_webhook_scheduler
+    from src.services.gam_pricing_availability_scheduler import stop_gam_pricing_availability_scheduler
+    from src.services.gam_signal_coverage_scheduler import stop_gam_signal_coverage_scheduler
     from src.services.media_buy_status_scheduler import stop_media_buy_status_scheduler
 
+    await stop_gam_signal_coverage_scheduler()
+    await stop_gam_pricing_availability_scheduler()
     await stop_adapter_inventory_guidance_sync_scheduler()
     await stop_adapter_reporting_sync_scheduler()
     await stop_media_buy_status_scheduler()

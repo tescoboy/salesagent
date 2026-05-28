@@ -163,6 +163,24 @@ def _syncs_block(session: Session, tenant: Tenant, adapter_type: str) -> StatusS
             adapter_type=adapter_type,
             sync_type="advertisers",
         ),
+        reporting=_sync_run_block(
+            repo.health_inputs_for_stream(adapter_type=adapter_type, sync_type="reporting"),
+            tenant=tenant,
+            adapter_type=adapter_type,
+            sync_type="reporting",
+        ),
+        signal_coverage=_sync_run_block(
+            repo.health_inputs_for_stream(adapter_type=adapter_type, sync_type="signal_coverage"),
+            tenant=tenant,
+            adapter_type=adapter_type,
+            sync_type="signal_coverage",
+        ),
+        pricing_availability=_sync_run_block(
+            repo.health_inputs_for_stream(adapter_type=adapter_type, sync_type="pricing_availability"),
+            tenant=tenant,
+            adapter_type=adapter_type,
+            sync_type="pricing_availability",
+        ),
     )
 
 
@@ -201,7 +219,10 @@ def _sync_detail_run(runs: list[SyncJob], health: SyncHealth) -> SyncJob | None:
 def _sync_item_count(run: SyncJob | None) -> int | None:
     if run is None or not run.progress:
         return None
-    return run.progress.get("item_count")
+    progress = run.progress if isinstance(run.progress, dict) else {}
+    raw_counts = progress.get("counts")
+    counts = raw_counts if isinstance(raw_counts, dict) else {}
+    return progress.get("item_count") or counts.get("products_updated") or counts.get("signals_updated")
 
 
 def _status_issue(health: SyncHealth) -> StatusSyncIssue | None:

@@ -269,6 +269,13 @@ class CreateMediaBuySuccess(AdCPCreateMediaBuySuccess):
         description="Envelope flag set true when the response is returned from an idempotency replay.",
     )
 
+    def __init__(self, **data: Any) -> None:
+        # adcp 6.3 beta.5 made these required on create success. Keep older
+        # adapter constructors compatible while emitting the new wire fields.
+        data.setdefault("confirmed_at", datetime.now(UTC))
+        data.setdefault("revision", 1)
+        super().__init__(**data)
+
     @model_serializer(mode="wrap")
     def _serialize_model(self, serializer, info):
         """Serialize model, excluding internal fields by default."""
@@ -2458,6 +2465,12 @@ class GetMediaBuysMediaBuy(SalesAgentBaseModel):
             "so buyers can distinguish them from native AdCP buys."
         ),
     )
+
+    @model_validator(mode="after")
+    def populate_protocol_metadata(self) -> "GetMediaBuysMediaBuy":
+        if self.confirmed_at is None:
+            object.__setattr__(self, "confirmed_at", self.created_at or datetime.now(UTC))
+        return self
 
     def model_dump(self, **kwargs):
         result = super().model_dump(**kwargs)

@@ -59,7 +59,9 @@ def scheduling_index():
                 "status": j.status,
                 "started_at": j.started_at.isoformat() if j.started_at else None,
                 "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+                "duration_seconds": _duration_seconds(j),
                 "triggered_by": j.triggered_by,
+                "progress": j.progress,
                 "error_message": j.error_message,
             }
             for j in recent
@@ -110,7 +112,9 @@ def list_recent():
                     "status": j.status,
                     "started_at": j.started_at.isoformat() if j.started_at else None,
                     "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+                    "duration_seconds": _duration_seconds(j),
                     "triggered_by": j.triggered_by,
+                    "progress": j.progress,
                     "error_message": j.error_message,
                 }
                 for j in jobs
@@ -194,6 +198,12 @@ def _sync_status(tenant_id: str, sync_id: str) -> str:
     with get_db_session() as session:
         job = SyncJobRepository(session, tenant_id).find_by_sync_id(sync_id)
         return job.status if job is not None else "queued"
+
+
+def _duration_seconds(job) -> int | None:
+    if not job.started_at or not job.completed_at:
+        return None
+    return int((job.completed_at - job.started_at).total_seconds())
 
 
 def _resolve_admin_identity() -> str | None:

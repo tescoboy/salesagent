@@ -774,3 +774,25 @@ class TestConvertProductHandlesNullableColumns:
                 f"reporting_capabilities default must include '{required_key}' "
                 f"per adcp ReportingCapabilities spec; got keys {sorted(rc.keys())}"
             )
+
+    def test_auction_price_guidance_moves_floor_to_floor_price_only(self) -> None:
+        from src.core.product_conversion import convert_product_model_to_schema
+
+        auction_option = SimpleNamespace(
+            pricing_model="cpm",
+            currency="USD",
+            is_fixed=False,
+            rate=None,
+            price_guidance={"floor": 0.5, "p25": 1.0, "p50": 1.5, "p75": 2.0},
+            parameters=None,
+            min_spend_per_package=None,
+        )
+        model = _make_product_model_mock(pricing_options=[auction_option])
+
+        schema = convert_product_model_to_schema(model, adapter_type="mock")
+        wire = schema.model_dump(mode="json", exclude_none=True)
+        pricing_option = wire["pricing_options"][0]
+
+        assert pricing_option["floor_price"] == 0.5
+        assert pricing_option["price_guidance"] == {"p25": 1.0, "p50": 1.5, "p75": 2.0}
+        assert "floor" not in pricing_option["price_guidance"]
