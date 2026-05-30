@@ -9,17 +9,27 @@ Each test is traced to a BDD scenario from BR-UC-001-discover-available-inventor
 Tests are ordered by migration risk: HIGH_RISK first, then MEDIUM_RISK.
 """
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.core.database.repositories.product import ProductRepository
 from src.core.exceptions import AdCPAuthorizationError, AdCPError, AdCPInvalidRequestError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.tenant_context import LazyTenantContext
 from src.core.testing_hooks import AdCPTestContext
 from src.services.policy_check_service import PolicyCheckResult, PolicyStatus
-from tests.factories import AdapterConfigFactory, PricingOptionFactory, PrincipalFactory, ProductFactory, TenantFactory
+from tests.factories import (
+    AdapterConfigFactory,
+    CurrencyLimitFactory,
+    InventoryProfileFactory,
+    PricingOptionFactory,
+    PrincipalFactory,
+    ProductFactory,
+    TenantFactory,
+)
 from tests.harness.product import ProductEnv
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -710,10 +720,18 @@ class TestNoBriefSkipsRanking:
                 product_ranking_prompt="Rank products",
             )
             PrincipalFactory(tenant=tenant, principal_id="p1")
-            p1 = ProductFactory(tenant=tenant, product_id="first_in_db")
-            PricingOptionFactory(product=p1)
-            p2 = ProductFactory(tenant=tenant, product_id="second_in_db")
-            PricingOptionFactory(product=p2)
+            InventoryProfileFactory(
+                tenant=tenant,
+                tenant_id=tenant.tenant_id,
+                profile_id="first_in_db",
+                name="First Bundle",
+            )
+            InventoryProfileFactory(
+                tenant=tenant,
+                tenant_id=tenant.tenant_id,
+                profile_id="second_in_db",
+                name="Second Bundle",
+            )
 
             with patch("src.services.ai.factory.get_factory") as mock_factory:
                 response = await env.call_impl(buying_mode="wholesale", brief="")
@@ -729,8 +747,12 @@ class TestNoBriefSkipsRanking:
         with ProductEnv(tenant_id="no-brief-rel", principal_id="p1") as env:
             tenant = TenantFactory(tenant_id="no-brief-rel", subdomain="no-brief-rel")
             PrincipalFactory(tenant=tenant, principal_id="p1")
-            p = ProductFactory(tenant=tenant, product_id="p1")
-            PricingOptionFactory(product=p)
+            InventoryProfileFactory(
+                tenant=tenant,
+                tenant_id=tenant.tenant_id,
+                profile_id="p1",
+                name="P1 Bundle",
+            )
 
             response = await env.call_impl(buying_mode="wholesale", brief="")
 
@@ -936,20 +958,146 @@ class TestBuyingModeValidation:
         product = ProductFactory(tenant=tenant, product_id=product_id)
         PricingOptionFactory(product=product)
 
+    def _seed_inventory_bundle(self, tenant_id: str, profile_id: str):
+        tenant = self._seed_tenant_principal(tenant_id)
+        InventoryProfileFactory(
+            tenant=tenant,
+            tenant_id=tenant.tenant_id,
+            profile_id=profile_id,
+            name=f"{profile_id} Bundle",
+            format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
+            publisher_properties=[
+                {
+                    "publisher_domain": f"{tenant_id}.example.com",
+                    "property_ids": ["homepage"],
+                    "selection_type": "by_id",
+                }
+            ],
+        )
+        return tenant
+
     @pytest.mark.asyncio
-    async def test_wholesale_without_search_criteria_returns_catalog(self, integration_db):
-        """Wholesale mode can request raw inventory without brief, brand, or filters."""
+    async def test_wholesale_without_search_criteria_returns_inventory_bundles(self, integration_db):
+        """Wholesale mode returns inventory bundles without brief, brand, or filters."""
         with ProductEnv(tenant_id="whole-empty", principal_id="p1") as env:
-            self._seed_catalog_product("whole-empty", "p_wholesale")
+            self._seed_inventory_bundle("whole-empty", "p_wholesale")
             response = await self._call_get_products(env, buying_mode="wholesale", brief=None, brand=None, filters=None)
 
         assert [p.product_id for p in response.products] == ["p_wholesale"]
 
     @pytest.mark.asyncio
-    async def test_wholesale_with_empty_string_brief_returns_catalog(self, integration_db):
+    async def test_wholesale_excludes_product_rows_when_bundle_exists(self, integration_db):
+        """Wholesale mode is backed by inventory bundles, not Product rows."""
+        with ProductEnv(tenant_id="whole-products-hidden", principal_id="p1") as env:
+            tenant = self._seed_inventory_bundle("whole-products-hidden", "homepage_bundle")
+            product = ProductFactory(tenant=tenant, product_id="legacy_product_row")
+            PricingOptionFactory(product=product)
+            response = await self._call_get_products(env, buying_mode="wholesale", brief=None, brand=None, filters=None)
+
+        assert [p.product_id for p in response.products] == ["homepage_bundle"]
+
+    @pytest.mark.asyncio
+    async def test_wholesale_projects_inventory_bundle_as_product_without_product_row(
+        self, integration_db, factory_session
+    ):
+        """Inventory bundles are wholesale products even before an explicit Product row exists."""
+        with ProductEnv(tenant_id="whole-bundle", principal_id="p1") as env:
+            tenant = self._seed_tenant_principal("whole-bundle")
+            tenant_id = tenant.tenant_id
+            InventoryProfileFactory(
+                tenant=tenant,
+                tenant_id=tenant_id,
+                profile_id="homepage_bundle",
+                name="Homepage Bundle",
+                forecast={
+                    "method": "estimate",
+                    "currency": "USD",
+                    "forecast_range_unit": "availability",
+                    "generated_at": datetime.now(UTC),
+                    "valid_until": datetime.now(UTC) + timedelta(hours=1),
+                    "points": [
+                        {
+                            "label": "Homepage Bundle",
+                            "product_id": "homepage_bundle",
+                            "metrics": {"impressions": {"mid": 1000.0}},
+                        }
+                    ],
+                },
+                pricing_availability={
+                    "pricing_guidance_by_model": {
+                        "cpm": {
+                            "p25": 1.25,
+                            "p50": 2.0,
+                        }
+                    }
+                },
+                format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
+                publisher_properties=[
+                    {
+                        "publisher_domain": "whole-bundle.example.com",
+                        "property_ids": ["homepage"],
+                        "selection_type": "by_id",
+                    }
+                ],
+            )
+            response = await self._call_get_products(env, buying_mode="wholesale", brief=None, brand=None, filters=None)
+
+        factory_session.expire_all()
+        assert [p.product_id for p in response.products] == ["homepage_bundle"]
+        bundle = response.products[0]
+        pricing = bundle.pricing_options[0].root
+        assert ProductRepository(factory_session, tenant_id).get_by_id("homepage_bundle") is None
+        assert bundle.name == "Homepage Bundle"
+        assert bundle.delivery_type.value == "non_guaranteed"
+        assert pricing.pricing_model == "cpm"
+        assert pricing.floor_price == 0.0
+        assert pricing.price_guidance.p25 == 1.25
+        assert bundle.forecast.points[0].product_id == "homepage_bundle"
+        assert getattr(pricing, "fixed_price", None) is None
+        first_property = bundle.publisher_properties[0].root
+        assert first_property.selection_type == "by_id"
+        assert [property_id.root for property_id in first_property.property_ids] == ["homepage"]
+
+    @pytest.mark.asyncio
+    async def test_wholesale_bundle_pricing_prefers_gam_network_currency(self, integration_db, factory_session):
+        """Bundle pricing uses the GAM network currency, not alphabetical limits."""
+        with ProductEnv(tenant_id="whole-bundle-currency", principal_id="p1") as env:
+            tenant = self._seed_tenant_principal("whole-bundle-currency")
+            tenant_id = tenant.tenant_id
+            AdapterConfigFactory(
+                tenant=tenant,
+                tenant_id=tenant_id,
+                adapter_type="google_ad_manager",
+                gam_network_currency="USD",
+            )
+            CurrencyLimitFactory(tenant=tenant, tenant_id=tenant_id, currency_code="EUR")
+            InventoryProfileFactory(
+                tenant=tenant,
+                tenant_id=tenant_id,
+                profile_id="currency_bundle",
+                name="Currency Bundle",
+                format_ids=[{"agent_url": "https://creative.adcontextprotocol.org", "id": "display_300x250"}],
+                publisher_properties=[
+                    {
+                        "publisher_domain": "whole-bundle.example.com",
+                        "property_ids": ["homepage"],
+                        "selection_type": "by_id",
+                    }
+                ],
+            )
+            response = await self._call_get_products(env, buying_mode="wholesale", brief=None, brand=None, filters=None)
+
+        factory_session.expire_all()
+        pricing = response.products[0].pricing_options[0].root
+        assert response.products[0].product_id == "currency_bundle"
+        assert pricing.pricing_option_id == "cpm_usd_auction"
+        assert pricing.currency == "USD"
+
+    @pytest.mark.asyncio
+    async def test_wholesale_with_empty_string_brief_returns_inventory_bundles(self, integration_db):
         """An empty brief does not turn wholesale mode into a narrowed search."""
         with ProductEnv(tenant_id="whole-empty-brief", principal_id="p1") as env:
-            self._seed_catalog_product("whole-empty-brief", "p_wholesale_empty")
+            self._seed_inventory_bundle("whole-empty-brief", "p_wholesale_empty")
             response = await self._call_get_products(env, buying_mode="wholesale", brief="", brand=None, filters=None)
 
         assert [p.product_id for p in response.products] == ["p_wholesale_empty"]
@@ -995,19 +1143,19 @@ class TestBuyingModeValidation:
         assert [p.product_id for p in response.products] == ["p_brief"]
 
     @pytest.mark.asyncio
-    async def test_wholesale_with_brand_returns_catalog(self, integration_db):
+    async def test_wholesale_with_brand_returns_inventory_bundles(self, integration_db):
         """Wholesale mode still accepts a brand reference."""
         with ProductEnv(tenant_id="brand-ok", principal_id="p1") as env:
-            self._seed_catalog_product("brand-ok", "p_brand")
+            self._seed_inventory_bundle("brand-ok", "p_brand")
             response = await env.call_impl(buying_mode="wholesale", brief=None, brand={"domain": "nike.com"})
 
         assert [p.product_id for p in response.products] == ["p_brand"]
 
     @pytest.mark.asyncio
-    async def test_wholesale_with_filters_returns_catalog(self, integration_db):
+    async def test_wholesale_with_filters_returns_inventory_bundles(self, integration_db):
         """Wholesale mode still accepts filters."""
         with ProductEnv(tenant_id="filt-ok", principal_id="p1") as env:
-            self._seed_catalog_product("filt-ok", "p_filters")
+            self._seed_inventory_bundle("filt-ok", "p_filters")
             response = await self._call_get_products(env, buying_mode="wholesale", brief=None, brand=None, filters={})
 
         assert [p.product_id for p in response.products] == ["p_filters"]
