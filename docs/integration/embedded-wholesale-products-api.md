@@ -14,10 +14,18 @@ AdCP `get_products` in wholesale mode. They persist as `InventoryProfile` rows;
 buyer-facing `Product` objects are projected at protocol time. Brief-mode
 `get_products` continues to use curated `Product` rows.
 
-Wholesale pricing is derived by the Sales Agent: non-guaranteed CPM auction with
-a zero floor, enriched by pricing and delivery analytics when sync data exists.
-Storefront requests may still include `pricing_options` for backward
-compatibility, but runtime pricing is not persisted as Product pricing rows.
+Wholesale forecast and pricing metadata are derived by the Sales Agent. The
+authoring request describes the inventory bundle, creative eligibility,
+targeting capabilities, and adapter execution selectors. `forecast` and
+`pricing_options` are not authoring inputs for wholesale products; they appear
+only on responses and buyer-facing projections as system-owned metadata.
+
+Buyer-facing wholesale pricing is projected as a non-guaranteed CPM auction.
+Wholesale auction floor is always `0.0` in this projection. When
+pricing/availability sync data exists, Sales Agent may expose system-owned
+percentile guidance, but that guidance is not a floor. Minimum economic size is
+enforced through minimum package budget/spend checks during buying, not through
+the auction floor.
 
 ## API Reference And Auth
 
@@ -328,9 +336,6 @@ A minimal GAM-backed draft looks like this:
   "status": "active",
   "delivery_type": "non_guaranteed",
   "channels": ["display"],
-  "forecast": {
-    "impressions": 1000000
-  },
   "inventory": {
     "publisher_properties": [
       {
@@ -405,6 +410,10 @@ Important distinctions:
   zones, supply tags, or other native ad-server selectors.
 - `inventory.creative_formats` is buyer-facing creative eligibility.
 - `inventory.execution.format_bindings` is adapter-specific execution detail.
+- `forecast` is response-side system metadata populated by Sales Agent syncs.
+  Do not send it as part of product setup.
+- `pricing_options` is response-side system metadata. Do not send it to author
+  wholesale rate, floor, or guidance values.
 
 ## 9. Validate, Preview, And Create
 
@@ -451,11 +460,13 @@ Validation currently checks:
 - The execution adapter matches the tenant adapter.
 - Selector types are supported by the tenant adapter.
 
-The response includes `pricing_options`, but they are the derived wholesale
-projection (`cpm_<currency>_auction`, `is_fixed: false`, `price_guidance.floor:
-0.0`), not caller-supplied fixed-rate pricing.
 - Selector IDs exist when the adapter inventory cache has data for that
   selector type.
+
+The response includes `pricing_options`, but they are the derived wholesale
+projection (`cpm_<currency>_auction`, `is_fixed: false`), not caller-supplied
+fixed-rate pricing. The auction floor is always `0.0`; storefronts should not
+treat it as an authored business rule or minimum buy size.
 
 ## 10. Confirm Buyer Discovery
 
